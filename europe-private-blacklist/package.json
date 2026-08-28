@@ -1,0 +1,15 @@
+{
+  "name": "europe-private-blacklist",
+  "private": true,
+  "type": "module",
+  "main": "scripts/start.mjs",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "node scripts/ensure-build.mjs",
+    "start": "node scripts/start.mjs",
+    "dev": "node scripts/start.mjs",
+    "preview": "node scripts/start.mjs"
+  }
+}\n
