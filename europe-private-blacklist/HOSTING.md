@@ -1,1 +1,0 @@
-Stop, delete old files especially .output, upload, npm run build, npm start\n
