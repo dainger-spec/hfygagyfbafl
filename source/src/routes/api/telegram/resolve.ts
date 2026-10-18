@@ -12,7 +12,7 @@ export const Route = createFileRoute("/api/telegram/resolve")({
         }
         const input = String(body.input || "").slice(0, 200).trim();
         if (!input) return Response.json({ ok: false, error: "empty" }, { status: 400 });
-        const result = await resolveHandleServer(input);
+        const result = await resolveHandleServer(input, authed.id);
         return Response.json(result || { username: "", id: "", source: "unresolved" });
       },
     },

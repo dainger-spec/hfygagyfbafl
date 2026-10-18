@@ -14,6 +14,8 @@ export type ParsedHandle = {
   id: string;
   // "telegram" = the id was confirmed by Telegram itself.
   source?: "telegram" | "parsed" | "unresolved";
+  // The server skipped the lookup because of limits: not "not found", just "later".
+  busy?: boolean;
 };
 
 export function normalizeUsername(raw: string): string {

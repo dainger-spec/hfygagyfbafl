@@ -304,6 +304,12 @@ function ScammerAccountRow({
       return;
     }
     onChange({ username: parsed.username, id: "", idLocked: false });
+    // Do not look up half-typed names: every lookup spends the shared limit for
+    // username searches (4 is the shortest username Telegram has).
+    if (parsed.username.length < 4) {
+      setResolving(false);
+      return;
+    }
     let cancelled = false;
     setResolving(true);
     const timer = setTimeout(() => {
@@ -327,9 +333,9 @@ function ScammerAccountRow({
           return;
         }
         onChange({ username: res.username, id: idRef.current });
-        if (!idRef.current) setError(t(locale, "idNotFound"));
+        if (!idRef.current) setError(t(locale, res.busy ? "idBusy" : "idNotFound"));
       })();
-    }, 480);
+    }, 900);
     return () => {
       cancelled = true;
       clearTimeout(timer);

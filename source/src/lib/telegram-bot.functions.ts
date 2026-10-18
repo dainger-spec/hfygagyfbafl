@@ -13,7 +13,7 @@ export const resolveTelegramHandle = createServerFn({ method: "POST" })
     const { resolveHandleServer, verifyTelegramInitData } = await import("@/lib/telegram-bot.server");
     const authed = verifyTelegramInitData(data.initData || "");
     if (!authed) return { username: "", id: "", source: "unresolved" as const };
-    return resolveHandleServer(data.input);
+    return resolveHandleServer(data.input, authed.id);
   });
 
 const evidenceSchema = z.object({

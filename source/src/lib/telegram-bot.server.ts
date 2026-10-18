@@ -921,7 +921,7 @@ let mtIdleTimer: ReturnType<typeof setTimeout> | null = null;
 // While Telegram says FLOOD_WAIT, MTProto is not touched at all (no lookups, no logins).
 let mtBlockedUntil = 0;
 const mtMisses = new Map<string, number>();
-const mtInflight = new Map<string, Promise<{ username: string; id: string } | null>>();
+const mtInflight = new Map<string, Promise<Lookup>>();
 // Saved login: restarts reuse it instead of logging in as the bot again.
 const MT_SESSION_PATH = join(DATA_DIR, "mtproto.session");
 
@@ -992,16 +992,22 @@ function floodSeconds(err: unknown): number {
   return m ? Number(m[1] || m[2]) : 0;
 }
 
-async function resolveUsernameMtproto(username: string): Promise<{ username: string; id: string } | null> {
+// "busy" = not looked up because of limits (try again later), null = no such username.
+type Lookup = { username: string; id: string } | null | "busy";
+
+async function resolveUsernameMtproto(username: string, userId = ""): Promise<Lookup> {
   const key = username.toLowerCase();
-  if (!botToken() || Date.now() < mtBlockedUntil) return null;
+  if (!botToken()) return null;
+  if (Date.now() < mtBlockedUntil) return "busy";
   // Usernames that do not exist are not asked again for 30 minutes.
   if (Date.now() - (mtMisses.get(key) || 0) < 30 * 60_000) return null;
   const running = mtInflight.get(key);
   if (running) return running;
+  // One person can't use up the shared budget for everybody else.
+  if (userId && tooMany(`mtproto:user:${userId}`, 8, 60_000)) return "busy";
   // Own budget, well below what Telegram tolerates for bots.
-  if (tooMany("mtproto:resolve", 20, 60_000) || tooMany("mtproto:resolve:h", 300, 60 * 60_000)) return null;
-  const job = (async () => {
+  if (tooMany("mtproto:resolve", 30, 60_000) || tooMany("mtproto:resolve:h", 400, 60 * 60_000)) return "busy";
+  const job = (async (): Promise<Lookup> => {
     try {
       const { client, Api } = await mtproto();
       const result = (await client.invoke(new Api.contacts.ResolveUsername({ username }))) as {
@@ -1020,7 +1026,7 @@ async function resolveUsernameMtproto(username: string): Promise<{ username: str
       if (wait) {
         mtBlockedUntil = Date.now() + (wait + 5) * 1000;
         console.warn(`[epb] MTProto FLOOD_WAIT ${wait}s, lookups paused`);
-        return null;
+        return "busy";
       }
       const rpc = (err as { errorMessage?: string })?.errorMessage;
       if (rpc && /USERNAME_(NOT_OCCUPIED|INVALID)/.test(rpc)) {
@@ -1040,7 +1046,7 @@ async function resolveUsernameMtproto(username: string): Promise<{ username: str
 }
 
 // Username -> id through Telegram itself (cache of verified pairs, Bot API, MTProto).
-async function lookupVerifiedId(username: string): Promise<{ username: string; id: string } | null> {
+async function lookupVerifiedId(username: string, userId = ""): Promise<Lookup> {
   const key = username.replace(/^@/, "").toLowerCase();
   if (!key) return null;
   const cached = idCache[key];
@@ -1050,12 +1056,12 @@ async function lookupVerifiedId(username: string): Promise<{ username: string; i
     rememberHandle(chat.username || username, String(chat.id));
     return { username: chat.username || username, id: String(chat.id) };
   }
-  const mt = await resolveUsernameMtproto(key);
-  if (mt?.id) {
+  const mt = await resolveUsernameMtproto(key, userId);
+  if (mt && mt !== "busy" && mt.id) {
     rememberHandle(mt.username, mt.id);
     return mt;
   }
-  return null;
+  return mt === "busy" ? "busy" : null;
 }
 
 export type AccountCheck = "ok" | "mismatch" | "unknown";
@@ -1065,14 +1071,15 @@ export async function verifyAccountPair(username: string, id: string): Promise<{
   const handle = username.replace(/^@/, "").trim();
   if (!handle || !id) return { check: "unknown" };
   const found = await lookupVerifiedId(handle);
-  if (!found?.id) return { check: "unknown" };
+  if (!found || found === "busy") return { check: "unknown" };
   return found.id === id ? { check: "ok" } : { check: "mismatch", realId: found.id };
 }
 
-export async function resolveHandleServer(input: string): Promise<{
+export async function resolveHandleServer(input: string, userId = ""): Promise<{
   username: string;
   id: string;
   source: "telegram" | "parsed" | "unresolved";
+  busy?: boolean;
 } | null> {
   const parsed = parseTelegramInput(input);
   if (!parsed.username && !parsed.id) return null;
@@ -1093,12 +1100,12 @@ export async function resolveHandleServer(input: string): Promise<{
     return { username: chat?.username || "", id: parsed.id, source: chat?.username ? "telegram" : "parsed" };
   }
   const username = parsed.username;
-  const found = await lookupVerifiedId(username);
-  if (found?.id) return { username: found.username, id: found.id, source: "telegram" };
+  const found = await lookupVerifiedId(username, userId);
+  if (found && found !== "busy") return { username: found.username, id: found.id, source: "telegram" };
   // Old cache from before verification existed: only a hint, never "telegram".
   const legacy = legacyIds[username.toLowerCase()];
   if (legacy) return { username, id: legacy, source: "parsed" };
-  return { username, id: "", source: "unresolved" };
+  return { username, id: "", source: "unresolved", busy: found === "busy" };
 }
 
 function pendingAccounts(record?: PendingPost, fallbackUser = "", fallbackId = ""): { username: string; id: string }[] {
@@ -1793,7 +1800,7 @@ export async function sendApplicationToArbiters(
     account.check = "unknown";
     if (account.username) {
       const found = await lookupVerifiedId(account.username);
-      if (found?.id) {
+      if (found && found !== "busy") {
         if (account.telegramId && account.telegramId !== found.id) account.claimedId = account.telegramId;
         account.telegramId = found.id;
         account.check = account.claimedId ? "mismatch" : "ok";
@@ -2646,7 +2653,7 @@ async function handleApplyMessage(msg: TgMessage, session: ApplySession) {
         await askSummary(chatId);
         return;
       }
-      const resolved = await resolveHandleServer(raw);
+      const resolved = await resolveHandleServer(raw, userId);
       if (!resolved) {
         await tgSoft("sendMessage", {
           chat_id: chatId,
