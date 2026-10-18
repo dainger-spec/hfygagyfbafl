@@ -86,6 +86,7 @@ type Bindings = {
   cardStamp?: string;
   relayChats?: RelayChat[];
   webhookStamp?: string;
+  lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
 
 // Relay chats are also kept in their own file, so replacing telegram-bindings.json
@@ -153,7 +154,7 @@ let bindingsLoadFailed = false;
 let bindings: Bindings = loadBindings();
 let profileReady = false;
 let commandsStamp = "";
-const COMMANDS_STAMP = "eu-blacklist-bot-v3-i18n";
+const COMMANDS_STAMP = "eu-blacklist-bot-v4-admin";
 
 function loadBindings(): Bindings {
   let raw = readJson<Bindings>(BINDINGS_PATH);
@@ -247,6 +248,9 @@ type PendingPost = {
   victimUsername?: string;
   createdAt?: number;
   status?: "pending" | "published" | "rejected";
+  // Where the review message with the buttons is, so the admin panel can point to it.
+  reviewChatId?: string;
+  reviewMessageId?: number;
 };
 
 // Only pairs confirmed by Telegram (user objects in updates, getChat, MTProto) go here.
@@ -868,6 +872,18 @@ async function ensureBotProfile() {
     await tgSoft("deleteMyCommands", { scope: { type: "default" } });
     await tgSoft("deleteMyCommands", { scope: { type: "all_group_chats" } });
     await tgSoft("deleteMyCommands", { scope: { type: "all_chat_administrators" } });
+    // Only the arbiter chat gets the admin commands in its "/" menu.
+    for (const chat_id of arbiterCandidates()) {
+      await tgSoft("setMyCommands", {
+        commands: [
+          { command: "admin", description: "Панель управления" },
+          { command: "relays", description: "Чаты рассылки" },
+          { command: "channel", description: "Канал для постов" },
+          { command: "id", description: "ID этого чата" },
+        ],
+        scope: { type: "chat", chat_id },
+      });
+    }
   }
   profileReady = true;
 }
@@ -1844,6 +1860,11 @@ export async function sendApplicationToArbiters(
       bindings.arbiterChatId = sent.chat_id;
       saveBindings();
     }
+    if (pendingPosts[app.id]) {
+      pendingPosts[app.id]!.reviewChatId = String(sent.chat_id);
+      pendingPosts[app.id]!.reviewMessageId = sent.message_id;
+      savePending();
+    }
     await notifyApplicant(pendingPosts[app.id], app.id, "pending");
     return { ok: true };
   } catch (err) {
@@ -2167,6 +2188,15 @@ async function publishFromMessage(
     broadcastQueue = broadcastQueue
       .then(() => broadcastToRelays(html, files))
       .then(async (report) => {
+        bindings.lastBroadcast = {
+          at: Date.now(),
+          total: report.total,
+          sent: report.sent,
+          noRights: report.noRights.length,
+          gone: report.gone.length,
+          failed: report.failed.length,
+        };
+        saveBindings();
         if (!reportTo || !report.total) return;
         await tgSoft("sendMessage", {
           chat_id: reportTo.chatId,
@@ -3167,6 +3197,321 @@ async function bindChat(
   await notifyArbitersAboutRelay(chat, from);
 }
 
+// ---------- Admin panel (arbiter chat only, everything on buttons) ----------
+
+type AdminView = { text: string; keyboard: { text: string; callback_data: string }[][] };
+type RelayFilter = "a" | "on" | "pd" | "off";
+const ADMIN_PAGE = 8;
+
+const RELAY_FILTERS: { key: RelayFilter; label: string; match: (c: RelayChat) => boolean }[] = [
+  { key: "a", label: "Все", match: () => true },
+  { key: "on", label: "✅ Вкл", match: (c) => c.status === "on" },
+  { key: "pd", label: "⏳ Ждут", match: (c) => c.status === "pending" },
+  { key: "off", label: "⛔ Выкл", match: (c) => c.status === "off" },
+];
+
+const statusIcon = (status: RelayChat["status"]) => (status === "on" ? "✅" : status === "pending" ? "⏳" : "⛔");
+const statusText = (status: RelayChat["status"]) =>
+  status === "on" ? "рассылка включена" : status === "pending" ? "ждёт решения" : "рассылка выключена";
+
+function ago(ts?: number): string {
+  if (!ts) return "давно";
+  const min = Math.round((Date.now() - ts) / 60_000);
+  if (min < 60) return `${Math.max(1, min)} мин назад`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `${h} ч назад`;
+  return `${Math.round(h / 24)} дн назад`;
+}
+
+function cut(text: string, max: number) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function pendingComplaints() {
+  return Object.entries(pendingPosts)
+    .filter(([, rec]) => (rec.status || "pending") === "pending")
+    .sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+}
+
+function adminHome(): AdminView {
+  const relays = bindings.relayChats || [];
+  const all = Object.values(pendingPosts);
+  const count = (st: string) => all.filter((r) => (r.status || "pending") === st).length;
+  const last = bindings.lastBroadcast;
+  const lines = [
+    `<b>${CHANNEL_NAME} — панель</b>`,
+    "",
+    `<b>Заявки</b>: ждут решения ${count("pending")}, опубликовано ${count("published")}, отклонено ${count("rejected")}`,
+    `<b>Чаты рассылки</b>: включено ${relays.filter((c) => c.status === "on").length}, ждут ${relays.filter((c) => c.status === "pending").length}, выключено ${relays.filter((c) => c.status === "off").length}`,
+    `<b>Канал</b>: <code>${escapeHtml(bindings.channelId || PINNED_CHANNEL)}</code>`,
+    last
+      ? `<b>Последняя рассылка</b>: ${ago(last.at)}, доставлено ${last.sent} из ${last.total}` +
+        (last.noRights ? `, без прав ${last.noRights}` : "") +
+        (last.gone ? `, недоступно ${last.gone}` : "")
+      : "<b>Последняя рассылка</b>: ещё не было",
+  ];
+  return {
+    text: lines.join("\n"),
+    keyboard: [
+      [{ text: `📝 Заявки без решения (${count("pending")})`, callback_data: "adm:ap:0" }],
+      [
+        { text: "📋 Чаты рассылки", callback_data: "adm:rl:a:0" },
+        { text: "⏳ Ждут решения", callback_data: "adm:rl:pd:0" },
+      ],
+      [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
+      [
+        { text: "🔄 Обновить", callback_data: "adm:home" },
+        { text: "✖ Закрыть", callback_data: "adm:x" },
+      ],
+    ],
+  };
+}
+
+function adminRelayList(filter: RelayFilter, page: number): AdminView {
+  const f = RELAY_FILTERS.find((x) => x.key === filter) || RELAY_FILTERS[0]!;
+  const list = (bindings.relayChats || []).filter(f.match);
+  const pages = Math.max(1, Math.ceil(list.length / ADMIN_PAGE));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const slice = list.slice(p * ADMIN_PAGE, (p + 1) * ADMIN_PAGE);
+  const keyboard: AdminView["keyboard"] = [
+    RELAY_FILTERS.map((x) => ({ text: x.key === f.key ? `• ${x.label}` : x.label, callback_data: `adm:rl:${x.key}:0` })),
+    ...slice.map((c) => [
+      { text: `${statusIcon(c.status)} ${cut(c.title || c.id, 40)}`, callback_data: `adm:rc:${c.id}:${f.key}:${p}` },
+    ]),
+  ];
+  const nav: AdminView["keyboard"][number] = [];
+  if (p > 0) nav.push({ text: "◀", callback_data: `adm:rl:${f.key}:${p - 1}` });
+  nav.push({ text: `${p + 1} / ${pages}`, callback_data: `adm:rl:${f.key}:${p}` });
+  if (p < pages - 1) nav.push({ text: "▶", callback_data: `adm:rl:${f.key}:${p + 1}` });
+  keyboard.push(nav, [{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return {
+    text: [
+      `<b>Чаты рассылки</b> — ${f.label}: ${list.length}`,
+      list.length ? "Нажмите на чат, чтобы открыть карточку." : "Здесь пока пусто.",
+    ].join("\n"),
+    keyboard,
+  };
+}
+
+async function adminRelayCard(chatId: string, filter: string, page: string, note = ""): Promise<AdminView> {
+  const relay = findRelay(chatId);
+  const back = { text: "⬅ К списку", callback_data: `adm:rl:${filter}:${page}` };
+  if (!relay) return { text: "Этого чата уже нет в списке.", keyboard: [[back]] };
+  const suffix = `${relay.id}:${filter}:${page}`;
+  const toggle =
+    relay.status === "on"
+      ? { text: "⛔ Выключить рассылку", callback_data: `adm:roff:${suffix}` }
+      : { text: "✅ Включить рассылку", callback_data: `adm:ron:${suffix}` };
+  return {
+    text: [
+      `<b>${escapeHtml(relay.title || "без названия")}</b>`,
+      `ID: <code>${escapeHtml(relay.id)}</code>`,
+      `Тип: ${chatKindLabel(relay.type)}`,
+      `Статус: ${statusIcon(relay.status)} ${statusText(relay.status)}`,
+      relay.requestedAt ? `Запрос: ${ago(relay.requestedAt)}` : "",
+      note ? `\n${note}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    keyboard: [[toggle], [{ text: "🔍 Проверить права бота", callback_data: `adm:rchk:${suffix}` }], [back]],
+  };
+}
+
+async function botRightsNote(chatId: string): Promise<string> {
+  const botId = Number(botToken().split(":")[0]);
+  const member = await tgSoft<{
+    status: string;
+    can_post_messages?: boolean;
+    can_send_messages?: boolean;
+    can_send_photos?: boolean;
+    can_send_videos?: boolean;
+  }>("getChatMember", { chat_id: chatId, user_id: botId });
+  if (!member) return "❌ Бот не видит этот чат: его удалили или чат закрыт.";
+  if (member.status === "left" || member.status === "kicked") return "❌ Бота в этом чате нет.";
+  const chat = await tgSoft<{ type?: string }>("getChat", { chat_id: chatId });
+  if (chat?.type === "channel") {
+    return member.status === "administrator" && member.can_post_messages !== false
+      ? "✅ Бот админ канала и может публиковать."
+      : "⚠️ Бот не может публиковать в канале: нужен админ с правом публикации.";
+  }
+  if (member.status === "restricted" && (member.can_send_messages === false || member.can_send_photos === false))
+    return "⚠️ Боту запрещено отправлять сообщения или медиа в этом чате.";
+  return member.status === "administrator" || member.status === "creator"
+    ? "✅ Бот админ, рассылка будет доходить."
+    : "✅ Бот участник чата и может писать. Лучше выдать админа, чтобы медиа точно доходили.";
+}
+
+function adminPendingList(page: number): AdminView {
+  const list = pendingComplaints();
+  const pages = Math.max(1, Math.ceil(list.length / ADMIN_PAGE));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const keyboard: AdminView["keyboard"] = list.slice(p * ADMIN_PAGE, (p + 1) * ADMIN_PAGE).map(([key, rec]) => [
+    {
+      text: `${key} · ${cut(scamLabel(rec), 24)} · ${rec.amount} ${rec.currency} · ${ago(rec.createdAt)}`,
+      callback_data: `adm:as:${key}`,
+    },
+  ]);
+  const nav: AdminView["keyboard"][number] = [];
+  if (p > 0) nav.push({ text: "◀", callback_data: `adm:ap:${p - 1}` });
+  if (pages > 1) nav.push({ text: `${p + 1} / ${pages}`, callback_data: `adm:ap:${p}` });
+  if (p < pages - 1) nav.push({ text: "▶", callback_data: `adm:ap:${p + 1}` });
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return {
+    text: list.length
+      ? `<b>Заявки без решения</b>: ${list.length}\nНажмите на заявку — бот пришлёт её ещё раз с кнопками.`
+      : "<b>Заявки без решения</b>: нет, все разобраны.",
+    keyboard,
+  };
+}
+
+// Re-sends a complaint with its review buttons, replying to the original message
+// (with the evidence) when it is known.
+async function adminShowComplaint(arbiterChatId: number | string, key: string) {
+  const rec = pendingPosts[key];
+  if (!rec) return false;
+  const accounts = pendingAccounts(rec)
+    .map((a) => formatAccountLine(a.username, a.id, true))
+    .join("\n");
+  const text = [
+    `<b>Заявка ${escapeHtml(key)}</b> (повтор из панели, ${ago(rec.createdAt)})`,
+    "",
+    `<b>Аккаунт</b>\n${accounts}`,
+    `<b>Ущерб</b>\n${escapeHtml(rec.amount)} ${escapeHtml(rec.currency)}`,
+    "",
+    `<b>Кратко (в пост)</b>\n${escapeHtml(rec.summary || rec.story)}`,
+    rec.files?.length ? `\nДоказательств: ${rec.files.length} (в исходной заявке, они уйдут в пост)` : "",
+  ].join("\n");
+  const parts = splitHtml(text);
+  for (const [i, part] of parts.entries()) {
+    const last = i === parts.length - 1;
+    const payload: Record<string, unknown> = {
+      chat_id: arbiterChatId,
+      text: part,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: last ? reviewKeyboard(key) : undefined,
+    };
+    if (i === 0 && rec.reviewMessageId && rec.reviewChatId && sameChat(rec.reviewChatId, arbiterChatId)) {
+      payload.reply_parameters = { message_id: rec.reviewMessageId, allow_sending_without_reply: true };
+    }
+    await tgSoft("sendMessage", payload);
+  }
+  return true;
+}
+
+function adminChannel(): AdminView {
+  return {
+    text: [
+      "<b>Канал для постов</b>",
+      `Сейчас: <code>${escapeHtml(bindings.channelId || PINNED_CHANNEL)}</code>`,
+      "",
+      "Чтобы сменить: нажмите кнопку и пришлите ID канала (-100…) или @username следующим сообщением. Бот должен быть админом канала.",
+    ].join("\n"),
+    keyboard: [[{ text: "✏ Сменить канал", callback_data: "adm:chset" }], [{ text: "⬅ В меню", callback_data: "adm:home" }]],
+  };
+}
+
+async function sendAdminPanel(chatId: number | string) {
+  const view = adminHome();
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: view.text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: view.keyboard },
+  });
+}
+
+async function renderAdmin(cb: NonNullable<TgUpdate["callback_query"]>, view: AdminView) {
+  if (!cb.message) return;
+  const edited = await tgSoft("editMessageText", {
+    chat_id: cb.message.chat.id,
+    message_id: cb.message.message_id,
+    text: view.text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: view.keyboard },
+  });
+  // Telegram refuses an edit that changes nothing; that is fine.
+  return edited;
+}
+
+async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) {
+  const chatId = cb.message!.chat.id;
+  const [, action = "home", ...rest] = (cb.data || "").split(":");
+  const answer = (text = "", alert = false) =>
+    tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: text || undefined, show_alert: alert });
+
+  if (action === "x") {
+    await answer();
+    await tgSoft("deleteMessage", { chat_id: chatId, message_id: cb.message!.message_id });
+    return;
+  }
+  if (action === "home") {
+    await answer();
+    await renderAdmin(cb, adminHome());
+    return;
+  }
+  if (action === "rl") {
+    await answer();
+    await renderAdmin(cb, adminRelayList((rest[0] as RelayFilter) || "a", Number(rest[1] || 0)));
+    return;
+  }
+  // Chat ids are negative: "-100123" survives the split as one piece.
+  const [target = "", filter = "a", page = "0"] = rest;
+  if (action === "rc") {
+    await answer();
+    await renderAdmin(cb, await adminRelayCard(target, filter, page));
+    return;
+  }
+  if (action === "ron" || action === "roff") {
+    const relay = findRelay(target);
+    if (!relay) {
+      await answer("Чата уже нет в списке", true);
+      return;
+    }
+    upsertRelay({ id: relay.id, title: relay.title, type: relay.type }, action === "ron" ? "on" : "off");
+    if (action === "ron") {
+      await tgSoft("sendMessage", {
+        chat_id: relay.id,
+        text: `Рассылка ${CHANNEL_NAME} включена. Сюда будут приходить одобренные посты.`,
+      });
+    }
+    await answer(action === "ron" ? "Рассылка включена" : "Рассылка выключена");
+    await renderAdmin(cb, await adminRelayCard(target, filter, page));
+    return;
+  }
+  if (action === "rchk") {
+    await answer("Проверяем…");
+    await renderAdmin(cb, await adminRelayCard(target, filter, page, await botRightsNote(target)));
+    return;
+  }
+  if (action === "ap") {
+    await answer();
+    await renderAdmin(cb, adminPendingList(Number(rest[0] || 0)));
+    return;
+  }
+  if (action === "as") {
+    const key = rest[0] || "";
+    const shown = (pendingPosts[key]?.status || "pending") === "pending" && (await adminShowComplaint(chatId, key));
+    await answer(shown ? "Заявка отправлена ниже" : "Заявка уже обработана", !shown);
+    if (!shown) await renderAdmin(cb, adminPendingList(0));
+    return;
+  }
+  if (action === "ch") {
+    await answer();
+    await renderAdmin(cb, adminChannel());
+    return;
+  }
+  if (action === "chset") {
+    await answer("Пришлите ID канала следующим сообщением");
+    await askPublishChannel(chatId);
+    return;
+  }
+  await answer();
+}
+
 function relayListHtml(): string[] {
   const list = bindings.relayChats || [];
   const by = (status: RelayChat["status"]) => list.filter((c) => c.status === status);
@@ -3381,6 +3726,14 @@ async function handleTelegramUpdate(update: TgUpdate) {
       await replyStart(cb.message.chat.id, cb.from?.id);
       return;
     }
+    if (cb.data.startsWith("adm:")) {
+      if (!isOfficialArbiterChat(cb.message.chat.id)) {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Чат не авторизован", show_alert: true });
+        return;
+      }
+      await handleAdminCallback(cb);
+      return;
+    }
     if (cb.data.startsWith("rel:")) {
       if (!isOfficialArbiterChat(cb.message.chat.id)) {
         await tgSoft("answerCallbackQuery", {
@@ -3505,6 +3858,11 @@ async function handleTelegramUpdate(update: TgUpdate) {
     const arg = (msg.text || "").replace(/^\/channel(?:@\w+)?/i, "").trim();
     if (arg) await applyPublishChannel(msg.chat.id, arg);
     else await askPublishChannel(msg.chat.id);
+    return;
+  }
+  if (cmd === "admin" || cmd === "menu" || cmd === "panel") {
+    if (!isOfficialArbiterChat(msg.chat.id)) return;
+    await sendAdminPanel(msg.chat.id);
     return;
   }
   if (cmd === "relays" || cmd === "relay_on" || cmd === "relay_off") {
