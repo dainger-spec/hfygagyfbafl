@@ -362,17 +362,15 @@ function ScammerAccountRow({
         />
       </Field>
       <Field label="ID">
+        {/* Display only: the id comes from Telegram or from the Telegram field above,
+            never from free typing here. */}
         <Input
           value={row.id}
-          onChange={(e) => {
-            if (row.idLocked) return;
-            onChange({ id: e.target.value.replace(/\D/g, "").slice(0, 15) });
-            setError("");
-          }}
-          readOnly={row.idLocked}
-          aria-readonly={row.idLocked}
-          className={row.idLocked ? "cursor-not-allowed opacity-70" : undefined}
-          placeholder={t(locale, "pasteId")}
+          readOnly
+          tabIndex={-1}
+          aria-readonly
+          className="cursor-not-allowed opacity-70"
+          placeholder={t(locale, "idAuto")}
           inputMode="numeric"
           required={false}
         />
