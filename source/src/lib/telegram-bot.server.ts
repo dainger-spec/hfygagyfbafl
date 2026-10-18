@@ -912,11 +912,18 @@ async function computeBotStatus() {
 
 type MtprotoClient = {
   invoke: (req: unknown) => Promise<unknown>;
+  session?: { save: () => string };
   disconnect?: () => Promise<void>;
   destroy?: () => Promise<void>;
 };
 let mtClient: Promise<{ client: MtprotoClient; Api: any }> | null = null;
 let mtIdleTimer: ReturnType<typeof setTimeout> | null = null;
+// While Telegram says FLOOD_WAIT, MTProto is not touched at all (no lookups, no logins).
+let mtBlockedUntil = 0;
+const mtMisses = new Map<string, number>();
+const mtInflight = new Map<string, Promise<{ username: string; id: string } | null>>();
+// Saved login: restarts reuse it instead of logging in as the bot again.
+const MT_SESSION_PATH = join(DATA_DIR, "mtproto.session");
 
 // One logged-in client is reused: logging in as the bot on every lookup is slow
 // and quickly runs into FLOOD_WAIT from Telegram.
@@ -929,9 +936,19 @@ function mtproto() {
       const { Logger } = await import("telegram/extensions/Logger.js");
       const apiId = Number(process.env.TELEGRAM_API_ID || 2040);
       const apiHash = process.env.TELEGRAM_API_HASH || "b18441a1ff607e10a989891a5462e627";
-      const client = new TelegramClient(new StringSession(""), apiId, apiHash, {
+      let saved = "";
+      try {
+        const [stamp, value] = readFileSync(MT_SESSION_PATH, "utf8").split("\n");
+        // A session belongs to one token: after /revoke it is useless.
+        if (stamp === webhookStamp() && value) saved = value.trim();
+      } catch {
+        /* no saved session */
+      }
+      const client = new TelegramClient(new StringSession(saved), apiId, apiHash, {
         connectionRetries: 1,
         timeout: 12,
+        // Never sleep inside a request (a lookup would hang); we handle FLOOD_WAIT ourselves.
+        floodSleepThreshold: 0,
         deviceModel: "EPB",
         systemVersion: "Linux",
         appVersion: "1.0",
@@ -939,12 +956,18 @@ function mtproto() {
         baseLogger: new Logger("none" as never),
       });
       await client.start({ botAuthToken: botToken() });
+      try {
+        mkdirSync(DATA_DIR, { recursive: true });
+        writeFileSync(MT_SESSION_PATH, `${webhookStamp()}\n${(client.session as unknown as { save: () => string }).save()}`, { mode: 0o600 });
+      } catch {
+        /* ignore */
+      }
       return { client: client as unknown as MtprotoClient, Api };
     })();
     mtClient.catch(() => dropMtproto());
   }
   if (mtIdleTimer) clearTimeout(mtIdleTimer);
-  mtIdleTimer = setTimeout(() => dropMtproto(), 10 * 60_000);
+  mtIdleTimer = setTimeout(() => dropMtproto(), 30 * 60_000);
   return mtClient;
 }
 
@@ -961,23 +984,59 @@ function dropMtproto() {
     .catch(() => {});
 }
 
+function floodSeconds(err: unknown): number {
+  const e = err as { seconds?: number; errorMessage?: string; message?: string };
+  if (typeof e?.seconds === "number" && e.seconds > 0) return e.seconds;
+  const text = `${e?.errorMessage || ""} ${e?.message || ""}`;
+  const m = text.match(/FLOOD_WAIT_(\d+)|A wait of (\d+) seconds/);
+  return m ? Number(m[1] || m[2]) : 0;
+}
+
 async function resolveUsernameMtproto(username: string): Promise<{ username: string; id: string } | null> {
-  if (!botToken() || tooMany("mtproto:resolve", 20, 60_000)) return null;
-  try {
-    const { client, Api } = await mtproto();
-    const result = (await client.invoke(new Api.contacts.ResolveUsername({ username }))) as {
-      peer?: { userId?: unknown };
-      users?: { id?: unknown; username?: string }[];
-    };
-    const user = result.users?.[0];
-    const id = String(user?.id ?? result.peer?.userId ?? "");
-    if (!/^\d{5,15}$/.test(id)) return null;
-    return { username: user?.username || username, id };
-  } catch (err) {
-    // USERNAME_NOT_OCCUPIED / INVALID are normal answers; anything else resets the client.
-    if (!/USERNAME_(NOT_OCCUPIED|INVALID)/.test(String((err as Error)?.message || err))) dropMtproto();
-    return null;
-  }
+  const key = username.toLowerCase();
+  if (!botToken() || Date.now() < mtBlockedUntil) return null;
+  // Usernames that do not exist are not asked again for 30 minutes.
+  if (Date.now() - (mtMisses.get(key) || 0) < 30 * 60_000) return null;
+  const running = mtInflight.get(key);
+  if (running) return running;
+  // Own budget, well below what Telegram tolerates for bots.
+  if (tooMany("mtproto:resolve", 20, 60_000) || tooMany("mtproto:resolve:h", 300, 60 * 60_000)) return null;
+  const job = (async () => {
+    try {
+      const { client, Api } = await mtproto();
+      const result = (await client.invoke(new Api.contacts.ResolveUsername({ username }))) as {
+        peer?: { userId?: unknown };
+        users?: { id?: unknown; username?: string }[];
+      };
+      const user = result.users?.[0];
+      const id = String(user?.id ?? result.peer?.userId ?? "");
+      if (!/^\d{5,15}$/.test(id)) {
+        mtMisses.set(key, Date.now());
+        return null;
+      }
+      return { username: user?.username || username, id };
+    } catch (err) {
+      const wait = floodSeconds(err);
+      if (wait) {
+        mtBlockedUntil = Date.now() + (wait + 5) * 1000;
+        console.warn(`[epb] MTProto FLOOD_WAIT ${wait}s, lookups paused`);
+        return null;
+      }
+      const rpc = (err as { errorMessage?: string })?.errorMessage;
+      if (rpc && /USERNAME_(NOT_OCCUPIED|INVALID)/.test(rpc)) {
+        mtMisses.set(key, Date.now());
+        return null;
+      }
+      // An RPC answer means the connection works; only a broken connection is rebuilt.
+      if (!rpc) dropMtproto();
+      return null;
+    } finally {
+      mtInflight.delete(key);
+      if (mtMisses.size > 5000) mtMisses.clear();
+    }
+  })();
+  mtInflight.set(key, job);
+  return job;
 }
 
 // Username -> id through Telegram itself (cache of verified pairs, Bot API, MTProto).
