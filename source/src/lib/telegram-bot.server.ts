@@ -912,6 +912,7 @@ async function computeBotStatus() {
 
 type MtprotoClient = {
   invoke: (req: unknown) => Promise<unknown>;
+  connected?: boolean;
   session?: { save: () => string };
   disconnect?: () => Promise<void>;
   destroy?: () => Promise<void>;
@@ -955,7 +956,8 @@ function mtproto() {
         autoReconnect: false,
         baseLogger: new Logger("none" as never),
       });
-      await client.start({ botAuthToken: botToken() });
+      // A login that hangs must not block every later lookup on the same promise.
+      await withTimeout(client.start({ botAuthToken: botToken() }), 20_000, "mtproto login timeout");
       try {
         mkdirSync(DATA_DIR, { recursive: true });
         writeFileSync(MT_SESSION_PATH, `${webhookStamp()}\n${(client.session as unknown as { save: () => string }).save()}`, { mode: 0o600 });
@@ -969,6 +971,14 @@ function mtproto() {
   if (mtIdleTimer) clearTimeout(mtIdleTimer);
   mtIdleTimer = setTimeout(() => dropMtproto(), 30 * 60_000);
   return mtClient;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function dropMtproto() {
@@ -1009,8 +1019,22 @@ async function resolveUsernameMtproto(username: string, userId = ""): Promise<Lo
   if (tooMany("mtproto:resolve", 30, 60_000) || tooMany("mtproto:resolve:h", 400, 60 * 60_000)) return "busy";
   const job = (async (): Promise<Lookup> => {
     try {
-      const { client, Api } = await mtproto();
-      const result = (await client.invoke(new Api.contacts.ResolveUsername({ username }))) as {
+      const ask = async () => {
+        const { client, Api } = await mtproto();
+        // Telegram or the hosting network may close an idle connection: start a new one.
+        if (client.connected === false) throw new Error("mtproto disconnected");
+        return withTimeout(client.invoke(new Api.contacts.ResolveUsername({ username })), 10_000, "mtproto request timeout");
+      };
+      let raw: unknown;
+      try {
+        raw = await ask();
+      } catch (err) {
+        // Connection problem (not an answer from Telegram): one retry on a fresh connection.
+        if ((err as { errorMessage?: string })?.errorMessage || floodSeconds(err)) throw err;
+        dropMtproto();
+        raw = await ask();
+      }
+      const result = raw as {
         peer?: { userId?: unknown };
         users?: { id?: unknown; username?: string }[];
       };

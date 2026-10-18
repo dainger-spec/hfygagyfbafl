@@ -185,18 +185,24 @@ export function readTelegramWebUser(): {
 }
 
 export async function lookupTelegramHandle(input: string): Promise<ParsedHandle | null> {
+  // Never leave the form spinning: a stuck request ends as "try again" after 25 s.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25_000);
   try {
     const res = await fetch("/api/telegram/resolve", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ input, initData: telegramInitData() }),
+      signal: ctrl.signal,
     });
     if (res.ok) {
       const json = (await res.json()) as ParsedHandle;
       if (json?.username || json?.id) return json;
     }
   } catch {
-    /* fall through */
+    if (ctrl.signal.aborted) return { ...(await resolveTelegramId(input) || { username: "", id: "" }), busy: true };
+  } finally {
+    clearTimeout(timer);
   }
   return resolveTelegramId(input);
 }
