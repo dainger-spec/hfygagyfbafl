@@ -22,10 +22,12 @@ type AccRow = {
   input: string;
   username: string;
   id: string;
+  // Set when Telegram confirmed the id for this username: the field is then read-only.
+  idLocked?: boolean;
 };
 
 function emptyAcc(): AccRow {
-  return { key: uid("acc"), input: "", username: "", id: "" };
+  return { key: uid("acc"), input: "", username: "", id: "", idLocked: false };
 }
 
 export function ApplyForm({
@@ -292,16 +294,16 @@ function ScammerAccountRow({
     const value = row.input.trim();
     setError("");
     if (!value) {
-      if (row.username || row.id) onChange({ username: "", id: "" });
+      if (row.username || row.id) onChange({ username: "", id: "", idLocked: false });
       return;
     }
     const parsed = parseTelegramInput(value);
     if (parsed.id) {
-      onChange({ username: parsed.username, id: parsed.id });
+      onChange({ username: parsed.username, id: parsed.id, idLocked: false });
       setResolving(false);
       return;
     }
-    onChange({ username: parsed.username, id: "" });
+    onChange({ username: parsed.username, id: "", idLocked: false });
     let cancelled = false;
     setResolving(true);
     const timer = setTimeout(() => {
@@ -320,7 +322,7 @@ function ScammerAccountRow({
           return;
         }
         if (res.id) {
-          onChange({ username: res.username, id: res.id });
+          onChange({ username: res.username, id: res.id, idLocked: res.source === "telegram" });
           setError("");
           return;
         }
@@ -363,14 +365,19 @@ function ScammerAccountRow({
         <Input
           value={row.id}
           onChange={(e) => {
+            if (row.idLocked) return;
             onChange({ id: e.target.value.replace(/\D/g, "").slice(0, 15) });
             setError("");
           }}
+          readOnly={row.idLocked}
+          aria-readonly={row.idLocked}
+          className={row.idLocked ? "cursor-not-allowed opacity-70" : undefined}
           placeholder={t(locale, "pasteId")}
           inputMode="numeric"
           required={false}
         />
       </Field>
+      {row.idLocked ? <p className="text-xs text-muted">{t(locale, "idLocked")}</p> : null}
       {resolving ? (
         <p className="flex items-center gap-1.5 text-sm text-gold">
           <LoaderCircle className="size-3.5 animate-spin" />

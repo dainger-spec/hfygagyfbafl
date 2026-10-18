@@ -12,6 +12,8 @@ export const KNOWN_TELEGRAM_IDS: Record<string, string> = {
 export type ParsedHandle = {
   username: string;
   id: string;
+  // "telegram" = the id was confirmed by Telegram itself.
+  source?: "telegram" | "parsed" | "unresolved";
 };
 
 export function normalizeUsername(raw: string): string {

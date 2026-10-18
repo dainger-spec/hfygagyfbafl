@@ -18,7 +18,8 @@ export type PersonRef = {
   firstName?: string;
   // Server-side only: whether Telegram confirmed that the username belongs to this id.
   check?: "ok" | "mismatch" | "unknown";
-  realId?: string;
+  // The id the applicant typed when it did not match the real one (replaced by the real id).
+  claimedId?: string;
 };
 
 export type Application = {

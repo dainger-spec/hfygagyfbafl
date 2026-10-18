@@ -1119,10 +1119,10 @@ function formatAccountLine(username: string, id: string, html = false) {
 
 // Shown to arbiters only: tells them whether the username/id pair is genuine.
 function accountCheckHtml(a: PersonRef): string {
-  if (!a.username) return "❔ указан только ID";
+  if (!a.username) return "❔ указан только ID, проверить по username нельзя";
   if (a.check === "ok") return "✅ username и ID совпадают (проверено в Telegram)";
   if (a.check === "mismatch")
-    return `⚠️ НЕ СОВПАДАЕТ: у @${escapeHtml(a.username.replace(/^@/, ""))} ID <code>${escapeHtml(a.realId || "?")}</code>`;
+    return `⚠️ Заявитель указал чужой ID <code>${escapeHtml(a.claimedId || "?")}</code> — заменён на настоящий ID @${escapeHtml(a.username.replace(/^@/, ""))}`;
   return "❔ связку username и ID проверить не удалось";
 }
 
@@ -1785,12 +1785,27 @@ export async function sendApplicationToArbiters(
     storageKey: evidenceOwnedBy(file.storageKey, userId) ? file.storageKey : undefined,
   }));
   if (app.evidence.length > 30) return { ok: false, error: btUser(userId, "tooManyFiles") };
+  // The id typed by the applicant is never trusted: when Telegram knows the username,
+  // its id replaces whatever was submitted, so a post can't name the wrong person.
   for (const account of scammerAccounts(app).slice(0, 8)) {
     account.username = String(account.username || "").replace(/^@/, "").trim();
     account.telegramId = /^\d{5,15}$/.test(String(account.telegramId || "").trim()) ? String(account.telegramId).trim() : "";
-    const pair = await verifyAccountPair(account.username, account.telegramId);
-    account.check = pair.check;
-    account.realId = pair.realId;
+    account.check = "unknown";
+    if (account.username) {
+      const found = await lookupVerifiedId(account.username);
+      if (found?.id) {
+        if (account.telegramId && account.telegramId !== found.id) account.claimedId = account.telegramId;
+        account.telegramId = found.id;
+        account.check = account.claimedId ? "mismatch" : "ok";
+      }
+    } else if (account.telegramId) {
+      const chat = await tgSoft<{ id: number; username?: string; type?: string }>("getChat", { chat_id: account.telegramId });
+      if (chat?.type === "private" && chat.username) {
+        account.username = chat.username;
+        rememberHandle(chat.username, account.telegramId);
+        account.check = "ok";
+      }
+    }
   }
   try {
     const sent = await deliverApplication(app, copies);
