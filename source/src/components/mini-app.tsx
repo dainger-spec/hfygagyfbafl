@@ -41,20 +41,15 @@ export function MiniApp({
   const setIdentity = useBlacklistStore((s) => s.setIdentity);
   const locale = useBlacklistStore((s) => s.locale);
 
-  // "Подать жалобу": the emblem flies out of the logo, then the form slides in.
-  const [hero, setHero] = useState<HeroStart | null>(null);
+  // The emblem animation now plays once, on entry; the button just opens the form.
+  const [intro, setIntro] = useState<HeroStart | null>(null);
+  const [preIntro, setPreIntro] = useState(false);
+  const introStarted = useRef(false);
   const [enterForm, setEnterForm] = useState(false);
   const openComplaint = useCallback(() => {
-    if (hero) return;
-    const start = measureHero();
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (!start || reduce || typeof Element.prototype.animate !== "function") {
-      onPage("apply");
-      return;
-    }
-    haptic("medium");
-    setHero(start);
-  }, [hero, onPage]);
+    setEnterForm(true);
+    onPage("apply");
+  }, [onPage]);
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
   const openCheck = useCallback(() => onPage("check"), [onPage]);
@@ -91,6 +86,29 @@ export function MiniApp({
 
   const showLang = ready && langPicked === false;
   const showApp = ready && langPicked === true;
+
+  // Entry animation: the emblem returns into the ring of stars and the black clears.
+  useLayoutEffect(() => {
+    if (!showApp || page !== "home" || introStarted.current) return;
+    introStarted.current = true;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || typeof Element.prototype.animate !== "function") return;
+    setPreIntro(true); // cover the home screen before it is painted
+    const img = new Image();
+    img.src = HERO_EMBLEM_HD;
+    void (img.decode?.() ?? Promise.resolve())
+      .catch(() => {})
+      .then(() =>
+        requestAnimationFrame(() => {
+          const start = measureHero();
+          if (start) {
+            haptic("light");
+            setIntro(start);
+          }
+          setPreIntro(false);
+        }),
+      );
+  }, [showApp, page]);
 
   return (
     <div
@@ -148,16 +166,8 @@ export function MiniApp({
           />
         ) : null}
       </div>
-      {hero ? (
-        <HeroTransition
-          start={hero}
-          onMidpoint={() => {
-            setEnterForm(true);
-            onPage("apply");
-          }}
-          onDone={() => setHero(null)}
-        />
-      ) : null}
+      {preIntro ? <div className="absolute inset-0 z-[55]" style={{ background: "#080808" }} /> : null}
+      {intro ? <IntroTransition start={intro} onDone={() => setIntro(null)} /> : null}
     </div>
   );
 }
@@ -188,178 +198,103 @@ const HERO_EMBLEM_HD = "/brand/emblem-hd.webp";
 // Native height of emblem-hd.webp: the emblem never grows past it on screen.
 const HERO_EMBLEM_PX = 746;
 
-// Full-screen overlay for "Подать жалобу":
-//  1. the emblem glides from the logo to the centre and settles with a short breath, the
-//     stars fade out where they are;
-//  2. a black oval with the medal's golden rim opens from under the emblem past the screen
-//     edges while the face fades out in place;
-//  3. from the black screen the form fades in.
-// The emblem is laid out at its final size and starts scaled down, so the browser draws it
-// at full resolution and only ever shrinks it; it is never shown bigger than its pixels.
-// The oval is a plain shape (clip-path), sharp at any size.
-const MEDAL_YELLOW = "#FED001";
-const SCREEN_BLACK = "#080808";
-// Golden rim of the artwork, as a part of the emblem height.
-const MEDAL_RIM = 10 / 740;
-
-function HeroTransition({
-  start,
-  onMidpoint,
-  onDone,
-}: {
-  start: HeroStart;
-  onMidpoint: () => void;
-  onDone: () => void;
-}) {
+// Entry animation (reverse of the old complaint transition): the screen starts black with
+// the emblem large in the centre; the emblem flies back into the ring of stars (the logo
+// spot) and shrinks, the stars fade in, and the black clears to reveal the home screen.
+// The emblem is laid out at the logo size and starts scaled up from there, so the browser
+// draws it at full resolution and only ever shrinks it.
+function IntroTransition({ start, onDone }: { start: HeroStart; onDone: () => void }) {
   const shade = useRef<HTMLDivElement>(null);
   const glow = useRef<HTMLDivElement>(null);
   const ring = useRef<HTMLDivElement>(null);
   const emblem = useRef<HTMLImageElement>(null);
-  const rim = useRef<HTMLDivElement>(null);
-  const field = useRef<HTMLDivElement>(null);
-  const callbacks = useRef({ onMidpoint, onDone });
-  callbacks.current = { onMidpoint, onDone };
+  const done = useRef(onDone);
+  done.current = onDone;
 
-  // Final geometry, computed once.
+  // Final "big centre" size (same sharpness cap as before).
   const [geo] = useState(() => {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const dpr = window.devicePixelRatio || 1;
     const e = start.emblem;
-    const breath = 1.025;
-    // Big, but never more screen pixels than the image has (also during the breath).
-    const h = Math.max(e.height, Math.min(vh * 0.42, vw * 0.7 * (e.height / e.width), HERO_EMBLEM_PX / dpr / breath));
-    const w = h * (e.width / e.height);
-    const cx = vw / 2;
-    const cy = vh * 0.45;
-    return { vw, vh, h, w, cx, cy, breath, from: e.height / h };
+    const h = Math.max(e.height, Math.min(vh * 0.42, vw * 0.7 * (e.height / e.width), HERO_EMBLEM_PX / dpr));
+    return { h, cx: vw / 2, cy: vh * 0.45 };
   });
 
   useLayoutEffect(() => {
-    const { vw, vh, h, w, cx, cy, breath, from } = geo;
+    const { h, cx, cy } = geo;
     const e = start.emblem;
-    const sx = e.left + e.width / 2 - cx;
-    const sy = e.top + e.height / 2 - cy;
-    const a = w / 2;
-    const b = h / 2;
-    const r = h * MEDAL_RIM;
-    // How much the oval must grow so its black field covers every corner of the screen.
-    const kEnd =
-      Math.max(...[[0, 0], [vw, 0], [0, vh], [vw, vh]].map(([x, y]) => Math.hypot((x! - cx) / (a - r), (y! - cy) / (b - r)))) * 1.03;
-    const oval = (k: number, inset: number) =>
-      `ellipse(${(k * (a - inset)).toFixed(1)}px ${(k * (b - inset)).toFixed(1)}px at ${cx.toFixed(1)}px ${cy.toFixed(1)}px)`;
-
-    const DURATION = 1500;
-    const ARRIVE = 0.31; // emblem in the centre
-    const OPEN = 0.42; // the black oval starts to open
-    const FULL = 0.66; // screen fully black -> the form is put underneath
-    const REVEAL = 0.82; // the black clears quickly onto the form
-    const glide = "cubic-bezier(.2,.85,.25,1)";
+    const big = h / e.height; // scale from the logo size up to the big centred emblem
+    const dx = cx - (e.left + e.width / 2);
+    const dy = cy - (e.top + e.height / 2);
+    const land = "cubic-bezier(.2,.8,.2,1)";
     const soft = "cubic-bezier(.45,0,.55,1)";
-    const open = "cubic-bezier(.62,0,.78,.38)";
-    const clear = "cubic-bezier(.4,0,.1,1)"; // quick black fade-out onto the next page
-
-    const timing = { duration: DURATION, easing: "linear", fill: "forwards" as const };
+    const DURATION = 1300;
+    const timing = { duration: DURATION, easing: "linear" as const, fill: "forwards" as const };
     start.source.style.visibility = "hidden";
 
-    // fadeAfter: the rim is a filled yellow oval under the black one; it must be gone before
-    // the black fades, or the form would show through a yellow tint.
-    const widen = (el: HTMLDivElement, inset: number, fadeAfter: boolean) =>
-      el.animate(
-        [
-          { clipPath: oval(1, inset), opacity: 0 },
-          { clipPath: oval(1, inset), opacity: 0, offset: OPEN - 0.001 },
-          { clipPath: oval(1, inset), opacity: 1, offset: OPEN, easing: open },
-          { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL },
-          ...(fadeAfter
-            ? [
-                { clipPath: oval(kEnd, inset), opacity: 1, offset: REVEAL, easing: clear },
-                { clipPath: oval(kEnd, inset), opacity: 0 },
-              ]
-            : [
-                { clipPath: oval(kEnd, inset), opacity: 0, offset: FULL + 0.001 },
-                { clipPath: oval(kEnd, inset), opacity: 0 },
-              ]),
-        ],
-        timing,
-      );
-
     const anims = [
+      // Black screen clears in the second half.
       shade.current!.animate(
         [
-          { opacity: 0, easing: soft },
-          { opacity: 1, offset: 0.22 },
-          { opacity: 1, offset: REVEAL, easing: clear },
+          { opacity: 1 },
+          { opacity: 1, offset: 0.42, easing: soft },
+          { opacity: 0, offset: 0.82 },
           { opacity: 0 },
         ],
         timing,
       ),
-      // Stars keep turning in place and fade out.
-      ring.current!.animate(
-        [
-          { transform: `rotate(${start.angle}deg)`, opacity: 1 },
-          { transform: `rotate(${start.angle + 22}deg)`, opacity: 0, offset: 0.22 },
-          { transform: `rotate(${start.angle + 22}deg)`, opacity: 0 },
-        ],
-        timing,
-      ),
+      // Emblem: big in the centre -> back into the ring, shrinking.
       emblem.current!.animate(
         [
-          { transform: `translate(${sx}px,${sy}px) scale(${from})`, opacity: 1, easing: glide },
-          { transform: "translate(0px,0px) scale(1)", opacity: 1, offset: ARRIVE, easing: soft },
-          { transform: `translate(0px,0px) scale(${breath})`, opacity: 1, offset: (ARRIVE + OPEN) / 2, easing: soft },
-          { transform: "translate(0px,0px) scale(1)", opacity: 1, offset: OPEN, easing: "cubic-bezier(.4,0,.9,.6)" },
-          { transform: "translate(0px,0px) scale(1)", opacity: 0, offset: OPEN + 0.12 },
-          { transform: "translate(0px,0px) scale(1)", opacity: 0 },
+          { transform: `translate(${dx}px,${dy}px) scale(${big})`, easing: land },
+          { transform: `translate(${dx}px,${dy}px) scale(${big})`, offset: 0.12, easing: land },
+          { transform: "translate(0px,0px) scale(1)", offset: 0.74 },
+          { transform: "translate(0px,0px) scale(1)" },
         ],
         timing,
       ),
+      // Golden halo fades as the emblem leaves the centre.
       glow.current!.animate(
         [
-          { transform: "translate(-50%,-50%) scale(.35)", opacity: 0, easing: glide },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, offset: ARRIVE, easing: soft },
-          { transform: "translate(-50%,-50%) scale(1.06)", opacity: 1, offset: (ARRIVE + OPEN) / 2, easing: soft },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.8, offset: OPEN },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0, offset: OPEN + 0.1 },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0 },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, easing: soft },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, offset: 0.12 },
+          { transform: "translate(-50%,-50%) scale(.6)", opacity: 0, offset: 0.5 },
+          { transform: "translate(-50%,-50%) scale(.6)", opacity: 0 },
         ],
         timing,
       ),
-      widen(rim.current!, 0, false),
-      widen(field.current!, r, true),
+      // Stars settle into place and fade in near the end.
+      ring.current!.animate(
+        [
+          { transform: `rotate(${start.angle - 26}deg)`, opacity: 0 },
+          { transform: `rotate(${start.angle - 26}deg)`, opacity: 0, offset: 0.5 },
+          { transform: `rotate(${start.angle}deg)`, opacity: 1, offset: 0.84, easing: land },
+          { transform: `rotate(${start.angle}deg)`, opacity: 1 },
+        ],
+        timing,
+      ),
     ];
 
-    // Moments on the same timeline: the page switch and the vibrations always line up with
-    // what is on screen.
     let cancelled = false;
-    const at = (part: number, fn: () => void) => {
-      const tick = shade.current!.animate([], { duration: DURATION * part });
-      void tick.finished.then(() => !cancelled && fn()).catch(() => {});
-      return tick;
-    };
-    const ticks = [
-      at(ARRIVE, () => haptic("light")),
-      at(FULL, () => {
-        haptic("rigid");
-        callbacks.current.onMidpoint();
-      }),
-    ];
-    void Promise.all(anims.map((x) => x.finished))
-      .then(() => !cancelled && callbacks.current.onDone())
+    const landTick = shade.current!.animate([], { duration: DURATION * 0.74 });
+    void landTick.finished.then(() => !cancelled && haptic("soft")).catch(() => {});
+    void Promise.all(anims.map((a) => a.finished))
+      .then(() => !cancelled && done.current())
       .catch(() => {});
     return () => {
       cancelled = true;
-      ticks.forEach((x) => x.cancel());
-      anims.forEach((x) => x.cancel());
+      landTick.cancel();
+      anims.forEach((a) => a.cancel());
       start.source.style.visibility = "";
     };
   }, [start, geo]);
 
   const rr = start.ring;
-  const layer = "absolute inset-0 opacity-0";
+  const e = start.emblem;
   return (
     <div className="pointer-events-none fixed inset-0 z-[60] overflow-hidden" aria-hidden>
-      <div ref={shade} className="absolute inset-0 bg-bg opacity-0" />
+      <div ref={shade} className="absolute inset-0" style={{ background: "#080808" }} />
       <div
         ref={glow}
         className="absolute rounded-full opacity-0"
@@ -373,14 +308,11 @@ function HeroTransition({
       />
       <div
         ref={ring}
-        className="absolute"
+        className="absolute opacity-0"
         style={{ left: rr.left, top: rr.top, width: rr.width, height: rr.height, transformOrigin: "50% 50%" }}
       >
         <EuStarsLogo size={rr.width} />
       </div>
-      <div ref={rim} className={layer} style={{ background: MEDAL_YELLOW }} />
-      <div ref={field} className={layer} style={{ background: SCREEN_BLACK }} />
-      {/* Laid out at the final size: drawn at full resolution, only ever scaled down. */}
       <img
         ref={emblem}
         src={HERO_EMBLEM_HD}
@@ -388,13 +320,7 @@ function HeroTransition({
         draggable={false}
         decoding="sync"
         className="absolute select-none"
-        style={{
-          left: geo.cx - geo.w / 2,
-          top: geo.cy - geo.h / 2,
-          width: geo.w,
-          height: geo.h,
-          transformOrigin: "50% 50%",
-        }}
+        style={{ left: e.left, top: e.top, width: e.width, height: e.height, transformOrigin: "50% 50%" }}
       />
     </div>
   );
