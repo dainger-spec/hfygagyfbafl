@@ -1985,9 +1985,12 @@ function parseEpbMarker(text: string): { username: string; id: string; story: st
 // Error that remembers what was already delivered before the failure.
 class PartialSendError extends Error {
   sentIds: number[];
+  // true = Telegram answered with an error; false = no answer (timeout, network).
+  answered: boolean;
   constructor(cause: unknown, sentIds: number[]) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.sentIds = sentIds;
+    this.answered = cause instanceof TgError;
   }
 }
 
@@ -2120,7 +2123,30 @@ async function sendChannelPost(html: string, files: MediaRef[]): Promise<Channel
 
 const RIGHTS_NOTICE_EVERY = 24 * 60 * 60 * 1000;
 
-type BroadcastReport = { total: number; sent: number; noRights: string[]; gone: string[]; failed: string[] };
+type BroadcastReport = {
+  total: number;
+  sent: number;
+  noRights: string[];
+  gone: string[];
+  failed: string[];
+  // Delivered, but not as a forward: a copy, or text only where media is forbidden.
+  copies?: string[];
+  textOnly?: string[];
+};
+
+// Telegram refused media (photos/videos) in this chat, not the chat as a whole.
+function isMediaForbidden(err: unknown) {
+  const text = err instanceof Error ? err.message : String(err);
+  return /send (photos|videos|documents|media|audios|voice)|CHAT_SEND_(PHOTOS|VIDEOS|MEDIA|DOCS|GIFS)_FORBIDDEN|was not forwarded/i.test(text);
+}
+
+// What forwardMessages did in one chat: all delivered, nothing delivered (safe to send
+// a copy instead), or partly delivered (sending anything more would duplicate it).
+function forwardOutcome(result: unknown[] | null, err: unknown, expected: number): "all" | "none" | "partial" {
+  if (result) return result.length >= expected ? "all" : result.length ? "partial" : "none";
+  const failedAt = String((err as Error)?.message || "").match(/failed to send message #(\d+)/i);
+  return failedAt && Number(failedAt[1]) > 1 ? "partial" : "none";
+}
 
 // Sends to every approved chat. Failures never remove a chat from the list:
 // a chat that lost rights starts receiving posts again as soon as rights are back.
@@ -2172,24 +2198,47 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
     if (job.done.includes(chatIdKey(chat.id))) continue;
     const label = chat.title ? `${chat.title} (${chat.id})` : chat.id;
     try {
+      let viaForward = false;
       if (forward && job.source) {
-        const result = await tg<unknown[]>("forwardMessages", {
-          chat_id: chat.id,
-          from_chat_id: job.source.chatId,
-          message_ids: job.source.messageIds,
-        }).catch((err) => {
-          // The channel post can't be forwarded (protected or deleted): copies from now on.
-          if (/can't be forwarded|protected|CHAT_FORWARDS_RESTRICTED|message to forward not found/i.test(String((err as Error)?.message))) return null;
-          throw err;
-        });
-        // forwardMessages silently skips messages it can't forward and may return [].
-        if (!result || !result.length) {
-          forward = false;
-          report.failed.push("пересылка из канала не удалась, в чаты ушли копии");
-          await sendPostToChat(chat.id, job.html, job.files);
+        let result: unknown[] | null = null;
+        let fwdErr: unknown = null;
+        try {
+          result = await tg<unknown[]>("forwardMessages", {
+            chat_id: chat.id,
+            from_chat_id: job.source.chatId,
+            message_ids: job.source.messageIds,
+          });
+        } catch (err) {
+          fwdErr = err;
         }
-      } else {
-        await sendPostToChat(chat.id, job.html, job.files);
+        // No answer from Telegram (timeout, dropped connection): the forward may have gone
+        // through, so sending a copy could duplicate it. Report instead.
+        if (fwdErr && !(fwdErr instanceof TgError)) throw fwdErr;
+        const message = String((fwdErr as Error)?.message || "");
+        if (fwdErr && /protected|CHAT_FORWARDS_RESTRICTED|message to forward not found|message can't be forwarded/i.test(message)) {
+          // The channel post itself can't be forwarded (protected or deleted): copies for everyone.
+          forward = false;
+          report.failed.push("пересылка из канала невозможна (защита контента или пост удалён), в чаты ушли копии");
+        } else if (fwdErr && (isChatGone(fwdErr) || (isMissingRights(fwdErr) && !isMediaForbidden(fwdErr)))) {
+          throw fwdErr;
+        }
+        const outcome = forwardOutcome(result, fwdErr, job.source.messageIds.length);
+        if (outcome === "all") viaForward = true;
+        if (outcome === "partial") throw new Error("пересланы не все части поста; повторно не отправляем, чтобы не было дублей");
+        // outcome "none": nothing reached this chat, a copy below is safe.
+      }
+      if (!viaForward) {
+        try {
+          await sendPostToChat(chat.id, job.html, job.files);
+          if (forward) (report.copies ||= []).push(label);
+        } catch (err) {
+          // Media forbidden in this chat and nothing sent yet: at least the text goes out.
+          // Only when Telegram itself refused (an answer, not a lost connection).
+          const refusedCleanly = err instanceof PartialSendError && err.answered && !err.sentIds.length;
+          if (!job.files.length || !refusedCleanly || !isMediaForbidden(err)) throw err;
+          await sendPostToChat(chat.id, job.html, []);
+          (report.textOnly ||= []).push(label);
+        }
       }
       report.sent += 1;
     } catch (err) {
@@ -2207,7 +2256,12 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
       } else if (isChatGone(err)) {
         report.gone.push(label);
       } else {
-        report.failed.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+        const noAnswer = !(err instanceof TgError) && !(err instanceof PartialSendError && err.answered) && !(err instanceof Error && err.message.startsWith("пересланы"));
+        report.failed.push(
+          noAnswer
+            ? `${label}: Telegram не ответил (возможно, пост дошёл); повторно не отправляем, чтобы не было дублей`
+            : `${label}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
     // Remember the chat right away, under its old and new id if it migrated.
@@ -2274,6 +2328,10 @@ function broadcastReportHtml(report: BroadcastReport): string {
       .map((x) => `• ${escapeHtml(x)}`)
       .join("\n") + (items.length > 15 ? `\n… и ещё ${items.length - 15}` : "");
   const lines = [`<b>Рассылка завершена</b>: доставлено ${report.sent} из ${report.total}`];
+  if (report.copies?.length)
+    lines.push("", `<b>Пересылка в чат не прошла, отправлено копией (${report.copies.length})</b>`, list(report.copies));
+  if (report.textOnly?.length)
+    lines.push("", `<b>В чате запрещены фото/видео, отправлен только текст (${report.textOnly.length})</b>`, list(report.textOnly));
   if (report.noRights.length) lines.push("", `<b>Нет прав (${report.noRights.length})</b>`, list(report.noRights));
   if (report.gone.length) lines.push("", `<b>Бот удалён или чат недоступен (${report.gone.length})</b>`, list(report.gone));
   if (report.failed.length) lines.push("", `<b>Ошибки (${report.failed.length})</b>`, list(report.failed));
