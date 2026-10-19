@@ -2154,6 +2154,8 @@ type BroadcastJob = {
   source?: ChannelPost;
   // Chats already handled (sent or failed): never sent twice, also after a restart.
   done: string[];
+  // Chat being sent to right now; saved before sending (see runBroadcast).
+  inflight?: string;
   report: BroadcastReport;
   reportTo?: { chatId: number | string; messageId: number };
   startedAt: number;
@@ -2181,6 +2183,13 @@ async function channelAllowsForwarding(chatId: string): Promise<boolean> {
 // a chat that lost rights starts receiving posts again as soon as rights are back.
 async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
   const report = job.report;
+  // The server died while sending to this chat: it may have the post already. Skip it.
+  if (job.inflight && !job.done.includes(job.inflight)) {
+    (report.unconfirmed ||= []).push(`${job.inflight}: сервер перезапустился во время отправки, повторно не отправляли`);
+    report.sent += 1;
+    job.done.push(job.inflight);
+  }
+  job.inflight = undefined;
   const done = new Set(job.done);
   const approved = relayDestinations().filter((c) => !done.has(chatIdKey(c.id)));
   report.total = Math.max(report.total, done.size + approved.length);
@@ -2195,6 +2204,8 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
     // A group may have been reached already under another id (old group -> supergroup).
     if (job.done.includes(chatIdKey(chat.id))) continue;
     const label = chat.title ? `${chat.title} (${chat.id})` : chat.id;
+    job.inflight = chatIdKey(chat.id);
+    saveBroadcastJobs();
     try {
       let viaForward = false;
       if (forward && job.source) {
@@ -2280,6 +2291,7 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
     // Remember the chat right away, under its old and new id if it migrated.
     const k = chatIdKey(chat.id);
     job.done.push(k);
+    job.inflight = undefined;
     const moved = migratedKeys.get(k);
     if (moved) job.done.push(moved);
     saveBroadcastJobs();
@@ -2623,6 +2635,7 @@ type TgMessage = {
   caption_entities?: TgEntity[];
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;
+  media_group_id?: string;
 };
 
 type TgUpdate = {
@@ -3592,6 +3605,479 @@ async function bindChat(
   await notifyArbitersAboutRelay(chat, from);
 }
 
+// ---------- Bot users and broadcasts to them (private chats only) ----------
+
+type BotUser = { first: number; last: number; blocked?: boolean };
+const USERS_PATH = join(DATA_DIR, "telegram-users.json");
+const botUsers: Record<string, BotUser> = readJson<Record<string, BotUser>>(USERS_PATH) || {};
+
+// Private chat ids are positive; groups and channels are negative. Only these ever
+// get a user broadcast.
+const isUserId = (id: string | number | undefined) => /^[1-9]\d{0,15}$/.test(String(id ?? ""));
+
+// First run: people who already used the bot before the counter existed.
+if (!existsSync(USERS_PATH)) {
+  const seed = new Set<string>([...Object.keys(userLocales), ...Object.values(pendingPosts).map((r) => r.victimId || "")]);
+  for (const id of seed) if (isUserId(id)) botUsers[id] = { first: Date.now(), last: 0 };
+  try {
+    writeJsonAtomic(USERS_PATH, botUsers);
+  } catch {
+    /* ignore */
+  }
+}
+
+let usersTimer: ReturnType<typeof setTimeout> | null = null;
+function saveUsers() {
+  if (usersTimer) return;
+  usersTimer = setTimeout(() => {
+    usersTimer = null;
+    try {
+      writeJsonAtomic(USERS_PATH, botUsers);
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+}
+
+function touchUser(id: string | number | undefined, blocked?: boolean) {
+  if (!isUserId(id)) return;
+  const key = String(id);
+  const now = Date.now();
+  const user = botUsers[key] || { first: now, last: now };
+  user.last = now;
+  if (blocked !== undefined) user.blocked = blocked;
+  else if (user.blocked) user.blocked = false; // wrote to the bot again: reachable
+  botUsers[key] = user;
+  saveUsers();
+}
+
+function userStats() {
+  const all = Object.values(botUsers);
+  const blocked = all.filter((u) => u.blocked).length;
+  return { total: all.length, active: all.length - blocked, blocked };
+}
+
+type DmDraft = {
+  id: string;
+  srcChat: string;
+  srcIds: number[];
+  buttons: { text: string; url: string }[][];
+};
+type DmJob = DmDraft & {
+  recipients: string[];
+  sent: number;
+  blocked: number;
+  failed: number;
+  startedAt: number;
+  stopped?: boolean;
+  statusChat: string;
+  statusMessage?: number;
+};
+
+const DM_JOBS_PATH = join(DATA_DIR, "telegram-dm-broadcasts.json");
+const dmDonePath = (id: string) => join(DATA_DIR, `dm-done-${id.replace(/[^a-z0-9-]/gi, "")}.log`);
+let dmJobs: DmJob[] = readJson<DmJob[]>(DM_JOBS_PATH) || [];
+let dmDraft: DmDraft | null = null;
+// prompt message key -> what the reply means
+const dmPrompts = new Map<string, "content" | "buttons">();
+const dmAlbums = new Map<string, { chat: string; ids: number[]; timer: ReturnType<typeof setTimeout> }>();
+let dmQueue: Promise<void> = Promise.resolve();
+const dmStarting = new Set<string>();
+
+function saveDmJobs() {
+  try {
+    writeJsonAtomic(DM_JOBS_PATH, dmJobs);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Lines "?id" are written BEFORE sending and "id" after. After a crash an id with only
+// the "?" line may or may not have received it: it counts as done, so nobody gets it twice.
+function readDone(id: string): Set<string> {
+  try {
+    return new Set(
+      readFileSync(dmDonePath(id), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => l.replace(/^\?/, "")),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function dmMarkup(draft: DmDraft) {
+  return draft.buttons.length ? { inline_keyboard: draft.buttons } : undefined;
+}
+
+// One recipient: the admin's message is copied, so text, formatting, premium emoji,
+// photos, videos, GIFs and albums arrive exactly as written.
+async function sendDmCopy(chatId: string, draft: DmDraft) {
+  if (draft.srcIds.length > 1) {
+    const res = await tg<unknown[]>("copyMessages", { chat_id: chatId, from_chat_id: draft.srcChat, message_ids: draft.srcIds });
+    if (!res?.length) throw new Error("сообщение не скопировалось");
+    return;
+  }
+  await tg("copyMessage", {
+    chat_id: chatId,
+    from_chat_id: draft.srcChat,
+    message_id: draft.srcIds[0],
+    reply_markup: dmMarkup(draft),
+  });
+}
+
+function parseDmButtons(text: string): { text: string; url: string }[][] | string {
+  const rows: { text: string; url: string }[][] = [];
+  for (const line of text.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const row: { text: string; url: string }[] = [];
+    for (const part of line.split("|").map((p) => p.trim()).filter(Boolean)) {
+      const m = part.match(/^(.+?)\s+[-–—]\s+(\S+)$/);
+      if (!m) return `Не понял строку: «${part}». Формат: Текст - https://ссылка`;
+      const url = m[2]!;
+      if (!/^(https?:\/\/|tg:\/\/)\S+$/i.test(url)) return `Ссылка должна начинаться с https:// или tg:// — «${url}»`;
+      row.push({ text: m[1]!.slice(0, 64), url });
+    }
+    if (row.length > 8) return "В одном ряду максимум 8 кнопок";
+    if (row.length) rows.push(row);
+  }
+  if (!rows.length) return "Не нашёл ни одной кнопки";
+  if (rows.length > 10) return "Максимум 10 рядов кнопок";
+  return rows;
+}
+
+function dmScreen(): AdminView {
+  const st = userStats();
+  const running = dmJobs.find((j) => !j.stopped);
+  const lines = [
+    "<b>Пользователи бота</b>",
+    `Всего: ${st.total}`,
+    `Получат рассылку: ${st.active}`,
+    `Заблокировали бота: ${st.blocked}`,
+    "",
+    "Рассылка уходит только в личные сообщения пользователям бота. В чаты и каналы она не отправляется.",
+  ];
+  const keyboard: AdminView["keyboard"] = [];
+  if (running) {
+    const done = readDone(running.id).size;
+    lines.push("", `<b>Идёт рассылка</b>: ${done} из ${running.recipients.length}`);
+    keyboard.push([{ text: "⏹ Остановить рассылку", callback_data: `adm:ubstop:${running.id}` }]);
+    keyboard.push([{ text: "🔄 Обновить", callback_data: "adm:ub" }]);
+  } else {
+    keyboard.push([{ text: "✉ Новая рассылка", callback_data: "adm:ubnew" }]);
+  }
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return { text: lines.join("\n"), keyboard };
+}
+
+async function askDmContent(chatId: number | string) {
+  const prompt = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text: [
+      "<b>Новая рассылка пользователям бота</b>",
+      "",
+      "Ответьте на это сообщение тем, что нужно разослать: текст, фото, видео, GIF, стикер или альбом, с подписью и форматированием.",
+      "Премиум-эмодзи сохранятся, если у владельца бота есть Telegram Premium.",
+      "",
+      "Не удаляйте своё сообщение, пока рассылка не закончится: бот копирует именно его.",
+    ].join("\n"),
+    parse_mode: "HTML",
+    reply_markup: { force_reply: true, selective: false, input_field_placeholder: "Сообщение для рассылки" },
+  });
+  if (prompt?.message_id) dmPrompts.set(`${chatId}:${prompt.message_id}`, "content");
+}
+
+async function askDmButtons(chatId: number | string) {
+  const prompt = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text: [
+      "<b>Кнопки под рассылкой</b>",
+      "",
+      "Ответьте на это сообщение. Каждая строка — ряд кнопок, кнопки в ряду через «|»:",
+      "<code>Наш канал - https://t.me/+KkrYz9IKvoBmYTQy</code>",
+      "<code>Сайт - https://example.com | Бот - https://t.me/EuropeBlack_bot</code>",
+    ].join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { force_reply: true, selective: false, input_field_placeholder: "Текст - https://ссылка" },
+  });
+  if (prompt?.message_id) dmPrompts.set(`${chatId}:${prompt.message_id}`, "buttons");
+}
+
+// Exactly what users will get, then the controls.
+async function sendDmPreview(chatId: number | string) {
+  const draft = dmDraft;
+  if (!draft) return;
+  const st = userStats();
+  let previewOk = true;
+  try {
+    await sendDmCopy(String(chatId), draft);
+  } catch (err) {
+    previewOk = false;
+    await tgSoft("sendMessage", { chat_id: chatId, text: `Не удалось показать предпросмотр: ${(err as Error).message}` });
+  }
+  const album = draft.srcIds.length > 1;
+  const keyboard: AdminView["keyboard"] = [];
+  if (!album) {
+    keyboard.push([{ text: draft.buttons.length ? "✏ Изменить кнопки" : "➕ Добавить кнопки", callback_data: "adm:ubbtn" }]);
+    if (draft.buttons.length) keyboard.push([{ text: "🗑 Убрать кнопки", callback_data: "adm:ubclr" }]);
+  }
+  if (previewOk) keyboard.push([{ text: `🚀 Разослать (${st.active})`, callback_data: `adm:ubgo:${draft.id}` }]);
+  keyboard.push([{ text: "✖ Отменить", callback_data: "adm:ubcancel" }]);
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: [
+      "<b>Предпросмотр рассылки — выше</b>",
+      `Получат: ${st.active} пользователей бота (только личные сообщения, не чаты и не каналы).`,
+      album ? "Это альбом: Telegram не позволяет добавить к альбому кнопки." : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+// Replies in the arbiter chat to the bot's broadcast prompts. True when handled.
+async function handleDmReply(msg: TgMessage): Promise<boolean> {
+  const replyTo = msg.reply_to_message?.message_id;
+  if (!replyTo) return false;
+  const kind = dmPrompts.get(`${msg.chat.id}:${replyTo}`);
+  if (!kind) return false;
+  if (kind === "buttons") {
+    if (!dmDraft) {
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Черновик рассылки не найден. Начните заново: /admin" });
+      return true;
+    }
+    const parsed = parseDmButtons(msg.text || "");
+    if (typeof parsed === "string") {
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: `${parsed}\nОтветьте на сообщение с инструкцией ещё раз.`, reply_to_message_id: msg.message_id });
+      return true;
+    }
+    dmPrompts.delete(`${msg.chat.id}:${replyTo}`);
+    dmDraft.buttons = parsed;
+    await sendDmPreview(msg.chat.id);
+    return true;
+  }
+  // Content. Albums arrive as several messages: collect them for a moment.
+  if (msg.media_group_id) {
+    const albumKey = `${msg.chat.id}:${msg.media_group_id}`;
+    const album = dmAlbums.get(albumKey);
+    if (album) {
+      album.ids.push(msg.message_id);
+      return true;
+    }
+    const timer = setTimeout(async () => {
+      const done = dmAlbums.get(albumKey);
+      dmAlbums.delete(albumKey);
+      if (!done) return;
+      dmPrompts.delete(`${msg.chat.id}:${replyTo}`);
+      dmDraft = { id: randomUUID(), srcChat: done.chat, srcIds: [...done.ids].sort((a, b) => a - b), buttons: [] };
+      await sendDmPreview(msg.chat.id);
+    }, 1500);
+    dmAlbums.set(albumKey, { chat: String(msg.chat.id), ids: [msg.message_id], timer });
+    return true;
+  }
+  dmPrompts.delete(`${msg.chat.id}:${replyTo}`);
+  dmDraft = { id: randomUUID(), srcChat: String(msg.chat.id), srcIds: [msg.message_id], buttons: [] };
+  await sendDmPreview(msg.chat.id);
+  return true;
+}
+
+// Album items arrive one by one; only the first may carry the reply. Keep the rest.
+function collectDmAlbumItem(msg: TgMessage): boolean {
+  if (!msg.media_group_id) return false;
+  const album = dmAlbums.get(`${msg.chat.id}:${msg.media_group_id}`);
+  if (!album) return false;
+  if (!album.ids.includes(msg.message_id)) album.ids.push(msg.message_id);
+  return true;
+}
+
+async function updateDmStatus(job: DmJob, final = false) {
+  const done = readDone(job.id).size;
+  const text = final
+    ? [
+        `<b>Рассылка пользователям ${job.stopped ? "остановлена" : "завершена"}</b>`,
+        `Доставлено: ${job.sent}`,
+        `Заблокировали бота / недоступны: ${job.blocked}`,
+        job.failed ? `Ошибки: ${job.failed}` : "",
+        `Обработано: ${done} из ${job.recipients.length}`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : `<b>Идёт рассылка пользователям</b>: ${done} из ${job.recipients.length}\nДоставлено ${job.sent}, недоступны ${job.blocked}${job.failed ? `, ошибки ${job.failed}` : ""}`;
+  const markup = final ? undefined : { inline_keyboard: [[{ text: "⏹ Остановить", callback_data: `adm:ubstop:${job.id}` }]] };
+  if (job.statusMessage) {
+    const edited = await tgSoft("editMessageText", {
+      chat_id: job.statusChat,
+      message_id: job.statusMessage,
+      text,
+      parse_mode: "HTML",
+      reply_markup: markup,
+    });
+    if (edited || !final) return;
+  }
+  const sent = await tgSoft<{ message_id: number }>("sendMessage", { chat_id: job.statusChat, text, parse_mode: "HTML", reply_markup: markup });
+  if (sent?.message_id && !final) {
+    job.statusMessage = sent.message_id;
+    saveDmJobs();
+  }
+}
+
+async function runDmJob(job: DmJob) {
+  const done = readDone(job.id);
+  let lastStatus = 0;
+  await updateDmStatus(job);
+  for (const chatId of job.recipients) {
+    if (job.stopped) break;
+    // Never a group or a channel, never twice (also after a restart).
+    if (!isUserId(chatId) || done.has(chatId)) continue;
+    appendFileSync(dmDonePath(job.id), `?${chatId}\n`);
+    try {
+      await sendDmCopy(chatId, job);
+      job.sent += 1;
+    } catch (err) {
+      const text = String((err as Error)?.message || "");
+      if (err instanceof TgError && (err.code === 403 || /blocked|deactivated|can't initiate|chat not found|user not found/i.test(text))) {
+        job.blocked += 1;
+        touchUser(chatId, true);
+      } else {
+        job.failed += 1;
+      }
+    }
+    done.add(chatId);
+    appendFileSync(dmDonePath(job.id), `${chatId}\n`);
+    if (Date.now() - lastStatus > 4000) {
+      lastStatus = Date.now();
+      saveDmJobs();
+      await updateDmStatus(job);
+    }
+    // Telegram allows ~30 messages per second overall; leave room for the rest of the bot.
+    await sleep(Math.max(45, 45 * job.srcIds.length));
+  }
+  await updateDmStatus(job, true);
+  dmJobs = dmJobs.filter((j) => j.id !== job.id);
+  saveDmJobs();
+  try {
+    unlinkSync(dmDonePath(job.id));
+  } catch {
+    /* ignore */
+  }
+}
+
+function enqueueDmJob(job: DmJob) {
+  dmQueue = dmQueue.then(() => runDmJob(job)).catch((err) => console.error("[epb] user broadcast", err));
+}
+
+function resumeDmJobs() {
+  for (const job of dmJobs) {
+    if (Date.now() - job.startedAt > 24 * 60 * 60 * 1000) continue;
+    console.log(`[epb] resuming user broadcast ${job.id}: ${readDone(job.id).size} done`);
+    enqueueDmJob(job);
+  }
+}
+
+// Callbacks "adm:ub*" from the admin panel. True when handled.
+async function handleDmCallback(cb: NonNullable<TgUpdate["callback_query"]>, action: string, arg: string): Promise<boolean> {
+  const chatId = cb.message!.chat.id;
+  const answer = (text = "", alert = false) =>
+    tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: text || undefined, show_alert: alert });
+  if (action === "ub") {
+    await answer();
+    await renderAdmin(cb, dmScreen());
+    return true;
+  }
+  if (action === "ubnew") {
+    if (dmJobs.some((j) => !j.stopped)) {
+      await answer("Сначала дождитесь окончания текущей рассылки", true);
+      return true;
+    }
+    await answer("Ответьте на сообщение бота тем, что нужно разослать");
+    await askDmContent(chatId);
+    return true;
+  }
+  if (action === "ubbtn") {
+    await answer();
+    if (!dmDraft) await tgSoft("sendMessage", { chat_id: chatId, text: "Черновик не найден. Начните заново: /admin" });
+    else await askDmButtons(chatId);
+    return true;
+  }
+  if (action === "ubclr") {
+    if (dmDraft) dmDraft.buttons = [];
+    await answer("Кнопки убраны");
+    await sendDmPreview(chatId);
+    return true;
+  }
+  if (action === "ubcancel") {
+    dmDraft = null;
+    await answer("Рассылка отменена");
+    await tgSoft("editMessageText", { chat_id: chatId, message_id: cb.message!.message_id, text: "Рассылка отменена." });
+    return true;
+  }
+  if (action === "ubgo") {
+    if (!dmDraft || dmDraft.id !== arg) {
+      await answer("Этот черновик уже неактуален", true);
+      return true;
+    }
+    await answer();
+    await tgSoft("editMessageText", {
+      chat_id: chatId,
+      message_id: cb.message!.message_id,
+      text: `Разослать это сообщение ${userStats().active} пользователям бота? Отменить уже отправленное будет нельзя.`,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ Да, разослать", callback_data: `adm:ubyes:${dmDraft.id}` }],
+          [{ text: "⬅ Назад", callback_data: "adm:ubback" }],
+        ],
+      },
+    });
+    return true;
+  }
+  if (action === "ubback") {
+    await answer();
+    await tgSoft("deleteMessage", { chat_id: chatId, message_id: cb.message!.message_id });
+    await sendDmPreview(chatId);
+    return true;
+  }
+  if (action === "ubyes") {
+    // One start per draft, whatever how many times or by whom the button is pressed.
+    if (!dmDraft || dmDraft.id !== arg || dmStarting.has(arg) || dmJobs.some((j) => j.id === arg)) {
+      await answer("Эта рассылка уже запущена или отменена", true);
+      return true;
+    }
+    if (dmJobs.some((j) => !j.stopped)) {
+      await answer("Уже идёт другая рассылка", true);
+      return true;
+    }
+    dmStarting.add(arg);
+    const recipients = Object.entries(botUsers)
+      .filter(([id, u]) => isUserId(id) && !u.blocked)
+      .map(([id]) => id);
+    const job: DmJob = { ...dmDraft, recipients, sent: 0, blocked: 0, failed: 0, startedAt: Date.now(), statusChat: String(chatId) };
+    dmJobs.push(job);
+    saveDmJobs();
+    dmDraft = null;
+    await answer("Рассылка запущена");
+    await tgSoft("editMessageText", {
+      chat_id: chatId,
+      message_id: cb.message!.message_id,
+      text: `Рассылка запущена: ${recipients.length} получателей.`,
+    });
+    enqueueDmJob(job);
+    return true;
+  }
+  if (action === "ubstop") {
+    const job = dmJobs.find((j) => j.id === arg);
+    if (job) {
+      job.stopped = true;
+      saveDmJobs();
+    }
+    await answer(job ? "Останавливаем…" : "Рассылка уже закончилась");
+    return true;
+  }
+  return false;
+}
+
 // ---------- Admin panel (arbiter chat only, everything on buttons) ----------
 
 type AdminView = { text: string; keyboard: { text: string; callback_data: string }[][] };
@@ -3638,6 +4124,7 @@ function adminHome(): AdminView {
     "",
     `<b>Заявки</b>: ждут решения ${count("pending")}, опубликовано ${count("published")}, отклонено ${count("rejected")}`,
     `<b>Чаты рассылки</b>: включено ${relays.filter((c) => c.status === "on").length}, ждут ${relays.filter((c) => c.status === "pending").length}, выключено ${relays.filter((c) => c.status === "off").length}`,
+    `<b>Пользователи бота</b>: ${userStats().total} (заблокировали ${userStats().blocked})`,
     `<b>Канал</b>: <code>${escapeHtml(bindings.channelId || PINNED_CHANNEL)}</code>`,
     last
       ? `<b>Последняя рассылка</b>: ${ago(last.at)}, доставлено ${last.sent} из ${last.total}` +
@@ -3654,6 +4141,7 @@ function adminHome(): AdminView {
         { text: "⏳ Ждут решения", callback_data: "adm:rl:pd:0" },
       ],
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
+      [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
         { text: "✖ Закрыть", callback_data: "adm:x" },
@@ -3848,6 +4336,7 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await renderAdmin(cb, adminHome());
     return;
   }
+  if (action.startsWith("ub") && (await handleDmCallback(cb, action, rest[0] || ""))) return;
   if (action === "rl") {
     await answer();
     await renderAdmin(cb, adminRelayList((rest[0] as RelayFilter) || "a", Number(rest[1] || 0)));
@@ -4082,8 +4571,16 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (liveSession) liveSession.touched = Date.now();
   gcSessions();
 
+  if (update.message?.chat.type === "private") touchUser(update.message.from?.id);
+  if (update.callback_query?.message?.chat.type === "private") touchUser(update.callback_query.from?.id);
+
   const member = update.my_chat_member;
   if (member) {
+    if (member.chat.type === "private") {
+      // The user blocked (kicked) or unblocked the bot.
+      touchUser(member.chat.id, member.new_chat_member.status === "kicked");
+      return;
+    }
     if (!isGroupOrChannel(member.chat)) return;
     const status = member.new_chat_member.status;
     if (status === "left" || status === "kicked") {
@@ -4342,6 +4839,8 @@ async function handleTelegramUpdate(update: TgUpdate) {
     return;
   }
 
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && channelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyPublishChannel(msg.chat.id, msg.text);
@@ -4399,3 +4898,4 @@ if (botToken() && (process.env.PUBLIC_URL || process.env.NODE_ENV === "productio
   setTimeout(() => void ensureBotProfile().catch(() => {}), 3000);
 }
 if (botToken() && broadcastJobs.length) setTimeout(resumeBroadcasts, 5000);
+if (botToken() && dmJobs.length) setTimeout(resumeDmJobs, 6000);
