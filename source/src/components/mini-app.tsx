@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronLeft, LoaderCircle } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
@@ -39,7 +39,19 @@ export function MiniApp({
   const setIdentity = useBlacklistStore((s) => s.setIdentity);
   const locale = useBlacklistStore((s) => s.locale);
 
-  const openComplaint = useCallback(() => onPage("apply"), [onPage]);
+  // "Подать жалобу": the emblem flies out of the logo, then the form slides in.
+  const [hero, setHero] = useState<HeroStart | null>(null);
+  const [enterForm, setEnterForm] = useState(false);
+  const openComplaint = useCallback(() => {
+    if (hero) return;
+    const start = measureHero();
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (!start || reduce || typeof Element.prototype.animate !== "function") {
+      onPage("apply");
+      return;
+    }
+    setHero(start);
+  }, [hero, onPage]);
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
 
@@ -108,12 +120,17 @@ export function MiniApp({
           <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} />
         ) : null}
         {showApp && page === "apply" ? (
-          <ApplyForm
-            onSubmitted={(msg) => {
-              setNotice(msg ?? "");
-              onPage("done");
-            }}
-          />
+          <div
+            className={cn("flex min-h-0 flex-1 flex-col", enterForm && "epb-page-enter")}
+            onAnimationEnd={() => setEnterForm(false)}
+          >
+            <ApplyForm
+              onSubmitted={(msg) => {
+                setNotice(msg ?? "");
+                onPage("done");
+              }}
+            />
+          </div>
         ) : null}
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
@@ -126,6 +143,195 @@ export function MiniApp({
           />
         ) : null}
       </div>
+      {hero ? (
+        <HeroTransition
+          start={hero}
+          onMidpoint={() => {
+            setEnterForm(true);
+            onPage("apply");
+          }}
+          onDone={() => setHero(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+type HeroStart = { emblem: DOMRect; ring: DOMRect; angle: number; source: HTMLElement };
+
+function measureHero(): HeroStart | null {
+  const source = document.querySelector<HTMLElement>("[data-epb-hero]");
+  const img = source?.querySelector("img");
+  const svg = source?.querySelector("svg");
+  if (!source || !img || !svg) return null;
+  const emblem = img.getBoundingClientRect();
+  // The spinning svg's box grows while rotated: use the un-rotated wrapper for the ring.
+  const ring = source.firstElementChild!.getBoundingClientRect();
+  if (!emblem.width || !ring.width) return null;
+  // Current angle of the spinning stars, so the flying ring starts exactly where it is.
+  let angle = 0;
+  try {
+    const m = new DOMMatrixReadOnly(getComputedStyle(svg).transform);
+    angle = (Math.atan2(m.b, m.a) * 180) / Math.PI;
+  } catch {
+    /* no transform */
+  }
+  return { emblem, ring, angle, source };
+}
+
+const HERO_EMBLEM_HD = "/brand/emblem-hd.webp";
+// Native height of emblem-hd.webp: the emblem never grows past it on screen.
+const HERO_EMBLEM_PX = 746;
+
+// Full-screen overlay: the emblem moves to the centre and grows with a golden glow, the
+// stars fly apart, then everything dissolves into the complaint form.
+function HeroTransition({
+  start,
+  onMidpoint,
+  onDone,
+}: {
+  start: HeroStart;
+  onMidpoint: () => void;
+  onDone: () => void;
+}) {
+  const shade = useRef<HTMLDivElement>(null);
+  const glow = useRef<HTMLDivElement>(null);
+  const ring = useRef<HTMLDivElement>(null);
+  const emblem = useRef<HTMLImageElement>(null);
+  const callbacks = useRef({ onMidpoint, onDone });
+  callbacks.current = { onMidpoint, onDone };
+
+  useLayoutEffect(() => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const e = start.emblem;
+    // Biggest size that stays sharp: even at its final 1.08x the emblem never shows more
+    // screen pixels than the image has.
+    const grow = 1.08;
+    const targetH = Math.max(
+      e.height,
+      Math.min(vh * 0.4, vw * 0.68 * (e.height / e.width), HERO_EMBLEM_PX / dpr / grow),
+    );
+    const scale = targetH / e.height;
+    const dx = vw / 2 - (e.left + e.width / 2);
+    const dy = vh * 0.44 - (e.top + e.height / 2);
+    // Easing per step (an easing on the whole animation would squeeze the steps together).
+    const glide = "cubic-bezier(.22,.9,.24,1)";
+    const soft = "cubic-bezier(.45,0,.55,1)";
+    const fadeOut = "cubic-bezier(.4,0,1,1)";
+    const DURATION = 1150;
+    const timing = { duration: DURATION, easing: "linear", fill: "forwards" as const };
+    start.source.style.visibility = "hidden";
+
+    const anims = [
+      // Background: the home screen fades away, later the form shows through.
+      shade.current!.animate(
+        [
+          { opacity: 0, easing: soft },
+          { opacity: 1, offset: 0.26 },
+          { opacity: 1, offset: 0.6, easing: soft },
+          { opacity: 0 },
+        ],
+        timing,
+      ),
+      // Stars speed up and fly apart.
+      ring.current!.animate(
+        [
+          { transform: `rotate(${start.angle}deg) scale(1)`, opacity: 1, easing: "cubic-bezier(.5,0,.75,0)" },
+          { transform: `rotate(${start.angle + 70}deg) scale(1.15)`, opacity: 1, offset: 0.2, easing: "cubic-bezier(.25,.6,.3,1)" },
+          { transform: `rotate(${start.angle + 240}deg) scale(3)`, opacity: 0, offset: 0.62 },
+          { transform: `rotate(${start.angle + 240}deg) scale(3)`, opacity: 0 },
+        ],
+        timing,
+      ),
+      // The emblem glides to the centre and grows, holds a moment, then dissolves upwards.
+      emblem.current!.animate(
+        [
+          { transform: "translate(0px,0px) scale(1)", filter: "drop-shadow(0 0 0px rgba(240,196,48,0))", opacity: 1, easing: glide },
+          {
+            transform: `translate(${dx}px,${dy}px) scale(${scale})`,
+            filter: "drop-shadow(0 0 22px rgba(240,196,48,.55))",
+            opacity: 1,
+            offset: 0.46,
+            easing: soft,
+          },
+          {
+            transform: `translate(${dx}px,${dy}px) scale(${scale * 1.03})`,
+            filter: "drop-shadow(0 0 30px rgba(240,196,48,.4))",
+            opacity: 1,
+            offset: 0.62,
+            easing: fadeOut,
+          },
+          { transform: `translate(${dx}px,${dy - 18}px) scale(${scale * grow})`, filter: "drop-shadow(0 0 0px rgba(240,196,48,0))", opacity: 0 },
+        ],
+        timing,
+      ),
+      // Golden halo behind the emblem.
+      glow.current!.animate(
+        [
+          { transform: "translate(-50%,-50%) scale(.2)", opacity: 0, easing: glide },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: 0.46, easing: soft },
+          { transform: "translate(-50%,-50%) scale(1.05)", opacity: 0.8, offset: 0.62, easing: fadeOut },
+          { transform: "translate(-50%,-50%) scale(1.5)", opacity: 0 },
+        ],
+        timing,
+      ),
+    ];
+    // Swap to the form while the overlay still covers the screen; on the same timeline as
+    // the animations, so it always lands at the same moment.
+    const mid = shade.current!.animate([], { duration: DURATION * 0.6 });
+    let cancelled = false;
+    void mid.finished.then(() => !cancelled && callbacks.current.onMidpoint()).catch(() => {});
+    void Promise.all(anims.map((a) => a.finished))
+      .then(() => !cancelled && callbacks.current.onDone())
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      mid.cancel();
+      anims.forEach((a) => a.cancel());
+      start.source.style.visibility = "";
+    };
+  }, [start]);
+
+  const e = start.emblem;
+  const r = start.ring;
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[60]" aria-hidden>
+      <div ref={shade} className="absolute inset-0 bg-bg opacity-0" />
+      <div
+        ref={glow}
+        className="absolute rounded-full opacity-0"
+        style={{
+          left: "50%",
+          top: "44%",
+          width: "min(110vw, 620px)",
+          height: "min(110vw, 620px)",
+          background: "radial-gradient(circle, rgba(240,196,48,.32) 0%, rgba(240,196,48,.10) 38%, rgba(240,196,48,0) 68%)",
+        }}
+      />
+      <div
+        ref={ring}
+        className="absolute"
+        style={{ left: r.left, top: r.top, width: r.width, height: r.height, transformOrigin: "50% 50%" }}
+      >
+        <EuStarsLogo size={r.width} />
+      </div>
+      <img
+        ref={emblem}
+        src={HERO_EMBLEM_HD}
+        alt=""
+        draggable={false}
+        className="absolute select-none"
+        style={{
+          left: e.left,
+          top: e.top,
+          width: e.width,
+          height: e.height,
+          transformOrigin: "50% 50%",
+          willChange: "transform, opacity, filter",
+        }}
+      />
     </div>
   );
 }
@@ -210,6 +416,12 @@ function Home({
   onOwners: () => void;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
+  // Load the sharp emblem in advance, so the transition never shows a blurry frame.
+  useEffect(() => {
+    const img = new Image();
+    img.src = HERO_EMBLEM_HD;
+    void img.decode?.().catch(() => {});
+  }, []);
   const handle = identity.username
     ? `@${identity.username}`
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
@@ -219,7 +431,9 @@ function Home({
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
+        <div data-epb-hero className="mt-5">
+          <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem />
+        </div>
         <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
           Europe Private
           <span className="block text-gold">Blacklist</span>
