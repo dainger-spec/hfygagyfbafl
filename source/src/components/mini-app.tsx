@@ -183,8 +183,15 @@ const HERO_EMBLEM_HD = "/brand/emblem-hd.webp";
 // Native height of emblem-hd.webp: the emblem never grows past it on screen.
 const HERO_EMBLEM_PX = 746;
 
-// Full-screen overlay: the emblem moves to the centre and grows with a golden glow, the
-// stars fly apart, then everything dissolves into the complaint form.
+// Full-screen overlay: the emblem moves to the centre and grows with a golden glow while
+// the stars fade out in place; then its oval, with the same rim as the artwork, widens
+// past the screen edges until everything is yellow, and the yellow dissolves into the form.
+// The oval is drawn with clip-paths (vector), so it stays sharp at any size.
+const MEDAL_YELLOW = "#FED001";
+// Rim of the artwork, as parts of the emblem height: outer yellow line, then dark line.
+const MEDAL_RIM = 10 / 740;
+const MEDAL_GAP = 11 / 740;
+
 function HeroTransition({
   start,
   onMidpoint,
@@ -198,6 +205,9 @@ function HeroTransition({
   const glow = useRef<HTMLDivElement>(null);
   const ring = useRef<HTMLDivElement>(null);
   const emblem = useRef<HTMLImageElement>(null);
+  const rim = useRef<HTMLDivElement>(null);
+  const gap = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLDivElement>(null);
   const callbacks = useRef({ onMidpoint, onDone });
   callbacks.current = { onMidpoint, onDone };
 
@@ -206,96 +216,141 @@ function HeroTransition({
     const vh = window.innerHeight;
     const dpr = window.devicePixelRatio || 1;
     const e = start.emblem;
-    // Biggest size that stays sharp: even at its final 1.08x the emblem never shows more
-    // screen pixels than the image has.
-    const grow = 1.08;
+    // Biggest size that stays sharp: the picture never shows more screen pixels than it has.
+    const grow = 1.06;
     const targetH = Math.max(
       e.height,
       Math.min(vh * 0.4, vw * 0.68 * (e.height / e.width), HERO_EMBLEM_PX / dpr / grow),
     );
     const scale = targetH / e.height;
-    const dx = vw / 2 - (e.left + e.width / 2);
-    const dy = vh * 0.44 - (e.top + e.height / 2);
+    const cx = vw / 2;
+    const cy = vh * 0.44;
+    const dx = cx - (e.left + e.width / 2);
+    const dy = cy - (e.top + e.height / 2);
+
+    // The oval at the emblem's final size, and how much bigger it must get to cover the screen.
+    const a = (e.width * scale) / 2;
+    const b = (e.height * scale) / 2;
+    const r = targetH * MEDAL_RIM;
+    const g = targetH * MEDAL_GAP;
+    const corner = Math.max(
+      ...[
+        [0, 0],
+        [vw, 0],
+        [0, vh],
+        [vw, vh],
+      ].map(([x, y]) => Math.hypot((x! - cx) / (a - r - g), (y! - cy) / (b - r - g))),
+    );
+    const kEnd = corner * 1.04;
+    const oval = (k: number, inset: number) =>
+      `ellipse(${Math.max(0, k * (a - inset)).toFixed(1)}px ${Math.max(0, k * (b - inset)).toFixed(1)}px at ${cx}px ${cy}px)`;
+
     // Easing per step (an easing on the whole animation would squeeze the steps together).
     const glide = "cubic-bezier(.22,.9,.24,1)";
     const soft = "cubic-bezier(.45,0,.55,1)";
-    const fadeOut = "cubic-bezier(.4,0,1,1)";
-    const DURATION = 1150;
+    const zoom = "cubic-bezier(.7,0,.84,0)";
+    const DURATION = 1450;
     const timing = { duration: DURATION, easing: "linear", fill: "forwards" as const };
+    // Moments on the timeline (0..1).
+    const ARRIVE = 0.33; // emblem in the centre
+    const OPEN = 0.4; // the oval starts to widen
+    const FULL = 0.7; // screen fully yellow -> switch to the form
     start.source.style.visibility = "hidden";
 
+    const widen = (el: HTMLDivElement, inset: number) =>
+      el.animate(
+        [
+          { clipPath: oval(1, inset), opacity: 0 },
+          { clipPath: oval(1, inset), opacity: 0, offset: OPEN - 0.001 },
+          { clipPath: oval(1, inset), opacity: 1, offset: OPEN, easing: zoom },
+          { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL },
+          { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL + 0.04, easing: soft },
+          { clipPath: oval(kEnd, inset), opacity: 0 },
+        ],
+        timing,
+      );
+
     const anims = [
-      // Background: the home screen fades away, later the form shows through.
+      // The home screen goes dark behind the emblem.
       shade.current!.animate(
         [
           { opacity: 0, easing: soft },
-          { opacity: 1, offset: 0.26 },
-          { opacity: 1, offset: 0.6, easing: soft },
+          { opacity: 1, offset: 0.24 },
+          { opacity: 1, offset: FULL + 0.04, easing: soft },
           { opacity: 0 },
         ],
         timing,
       ),
-      // Stars speed up and fly apart.
+      // Stars keep turning where they are and fade out (no growing).
       ring.current!.animate(
         [
-          { transform: `rotate(${start.angle}deg) scale(1)`, opacity: 1, easing: "cubic-bezier(.5,0,.75,0)" },
-          { transform: `rotate(${start.angle + 70}deg) scale(1.15)`, opacity: 1, offset: 0.2, easing: "cubic-bezier(.25,.6,.3,1)" },
-          { transform: `rotate(${start.angle + 240}deg) scale(3)`, opacity: 0, offset: 0.62 },
-          { transform: `rotate(${start.angle + 240}deg) scale(3)`, opacity: 0 },
+          { transform: `rotate(${start.angle}deg)`, opacity: 1, easing: "linear" },
+          { transform: `rotate(${start.angle + 30}deg)`, opacity: 0, offset: 0.26 },
+          { transform: `rotate(${start.angle + 30}deg)`, opacity: 0 },
         ],
         timing,
       ),
-      // The emblem glides to the centre and grows, holds a moment, then dissolves upwards.
+      // The emblem glides to the centre and grows, then rides the widening oval.
       emblem.current!.animate(
         [
-          { transform: "translate(0px,0px) scale(1)", filter: "drop-shadow(0 0 0px rgba(240,196,48,0))", opacity: 1, easing: glide },
+          { transform: "translate(0px,0px) scale(1)", filter: "drop-shadow(0 0 0px rgba(254,208,1,0))", easing: glide },
+          { transform: `translate(${dx}px,${dy}px) scale(${scale})`, filter: "drop-shadow(0 0 24px rgba(254,208,1,.55))", offset: ARRIVE },
           {
             transform: `translate(${dx}px,${dy}px) scale(${scale})`,
-            filter: "drop-shadow(0 0 22px rgba(240,196,48,.55))",
-            opacity: 1,
-            offset: 0.46,
-            easing: soft,
+            filter: "drop-shadow(0 0 0px rgba(254,208,1,0))",
+            offset: OPEN,
+            easing: zoom,
           },
-          {
-            transform: `translate(${dx}px,${dy}px) scale(${scale * 1.03})`,
-            filter: "drop-shadow(0 0 30px rgba(240,196,48,.4))",
-            opacity: 1,
-            offset: 0.62,
-            easing: fadeOut,
-          },
-          { transform: `translate(${dx}px,${dy - 18}px) scale(${scale * grow})`, filter: "drop-shadow(0 0 0px rgba(240,196,48,0))", opacity: 0 },
+          { transform: `translate(${dx}px,${dy}px) scale(${scale * kEnd})`, filter: "drop-shadow(0 0 0px rgba(254,208,1,0))", offset: FULL },
+          { transform: `translate(${dx}px,${dy}px) scale(${scale * kEnd})`, filter: "drop-shadow(0 0 0px rgba(254,208,1,0))" },
         ],
         timing,
       ),
-      // Golden halo behind the emblem.
+      // ...and melts into the yellow early in that zoom, before it gets big enough to blur.
+      emblem.current!.animate(
+        [
+          { opacity: 1 },
+          { opacity: 1, offset: OPEN + 0.1, easing: "cubic-bezier(.3,0,.7,1)" },
+          { opacity: 0, offset: OPEN + 0.22 },
+          { opacity: 0 },
+        ],
+        timing,
+      ),
+      // Golden halo while the emblem travels.
       glow.current!.animate(
         [
-          { transform: "translate(-50%,-50%) scale(.2)", opacity: 0, easing: glide },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: 0.46, easing: soft },
-          { transform: "translate(-50%,-50%) scale(1.05)", opacity: 0.8, offset: 0.62, easing: fadeOut },
-          { transform: "translate(-50%,-50%) scale(1.5)", opacity: 0 },
+          { transform: "translate(-50%,-50%) scale(.3)", opacity: 0, easing: glide },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: ARRIVE },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: OPEN, easing: soft },
+          { transform: "translate(-50%,-50%) scale(1.2)", opacity: 0, offset: 0.55 },
+          { transform: "translate(-50%,-50%) scale(1.2)", opacity: 0 },
         ],
         timing,
       ),
+      // The medal's oval: outer yellow line, dark line, yellow field, widening together.
+      widen(rim.current!, 0),
+      widen(gap.current!, r),
+      widen(field.current!, r + g),
     ];
-    // Swap to the form while the overlay still covers the screen; on the same timeline as
-    // the animations, so it always lands at the same moment.
-    const mid = shade.current!.animate([], { duration: DURATION * 0.6 });
+    // Switch to the form while the screen is fully yellow; on the same timeline as the
+    // animations, so it always lands at the same moment.
+    const mid = shade.current!.animate([], { duration: DURATION * (FULL + 0.01) });
     let cancelled = false;
     void mid.finished.then(() => !cancelled && callbacks.current.onMidpoint()).catch(() => {});
-    void Promise.all(anims.map((a) => a.finished))
+    void Promise.all(anims.map((x) => x.finished))
       .then(() => !cancelled && callbacks.current.onDone())
       .catch(() => {});
     return () => {
       cancelled = true;
       mid.cancel();
-      anims.forEach((a) => a.cancel());
+      anims.forEach((x) => x.cancel());
       start.source.style.visibility = "";
     };
   }, [start]);
 
   const e = start.emblem;
-  const r = start.ring;
+  const rr = start.ring;
+  const layer = "absolute inset-0 opacity-0";
   return (
     <div className="pointer-events-none fixed inset-0 z-[60]" aria-hidden>
       <div ref={shade} className="absolute inset-0 bg-bg opacity-0" />
@@ -307,16 +362,19 @@ function HeroTransition({
           top: "44%",
           width: "min(110vw, 620px)",
           height: "min(110vw, 620px)",
-          background: "radial-gradient(circle, rgba(240,196,48,.32) 0%, rgba(240,196,48,.10) 38%, rgba(240,196,48,0) 68%)",
+          background: "radial-gradient(circle, rgba(254,208,1,.32) 0%, rgba(254,208,1,.10) 38%, rgba(254,208,1,0) 68%)",
         }}
       />
       <div
         ref={ring}
         className="absolute"
-        style={{ left: r.left, top: r.top, width: r.width, height: r.height, transformOrigin: "50% 50%" }}
+        style={{ left: rr.left, top: rr.top, width: rr.width, height: rr.height, transformOrigin: "50% 50%" }}
       >
-        <EuStarsLogo size={r.width} />
+        <EuStarsLogo size={rr.width} />
       </div>
+      <div ref={rim} className={layer} style={{ background: MEDAL_YELLOW }} />
+      <div ref={gap} className={layer} style={{ background: "#080808" }} />
+      <div ref={field} className={layer} style={{ background: MEDAL_YELLOW }} />
       <img
         ref={emblem}
         src={HERO_EMBLEM_HD}
