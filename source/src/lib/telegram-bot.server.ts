@@ -1166,6 +1166,24 @@ function formatAccountLine(username: string, id: string, html = false) {
   return [name, id ? `Id: ${id}` : ""].filter(Boolean).join("\n");
 }
 
+// Earlier posts about the same account, so arbiters don't publish the same scam twice.
+function previousPosts(accounts: { username?: string; id?: string; telegramId?: string }[], exceptKey = ""): string {
+  const ids = new Set(accounts.map((a) => a.id || a.telegramId || "").filter(Boolean));
+  const names = new Set(accounts.map((a) => (a.username || "").replace(/^@/, "").toLowerCase()).filter(Boolean));
+  const hits = Object.entries(pendingPosts)
+    .filter(([key, rec]) => key !== exceptKey && rec.status === "published")
+    .filter(([, rec]) =>
+      pendingAccounts(rec).some((a) => (a.id && ids.has(a.id)) || (a.username && names.has(a.username.replace(/^@/, "").toLowerCase()))),
+    )
+    .sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+  if (!hits.length) return "";
+  const list = hits
+    .slice(0, 3)
+    .map(([key, rec]) => `${escapeHtml(key)} (${new Date(rec.createdAt || 0).toLocaleDateString("ru-RU")})`)
+    .join(", ");
+  return `⚠️ По этому аккаунту уже был пост: ${list}${hits.length > 3 ? ` и ещё ${hits.length - 3}` : ""}`;
+}
+
 // Shown to arbiters only: tells them whether the username/id pair is genuine.
 function accountCheckHtml(a: PersonRef): string {
   if (!a.username) return "❔ указан только ID, проверить по username нельзя";
@@ -1188,6 +1206,7 @@ function applicationBriefHtml(app: Application): string {
     "",
     `<b>Пострадавший</b>\n${victim}`,
     `<b>Аккаунт</b>\n${scammer}`,
+    ...(previousPosts(accounts) ? [previousPosts(accounts)] : []),
     `<b>Ущерб</b>\n${escapeHtml(app.damageAmount)} ${escapeHtml(app.damageCurrency)}`,
     "",
     `<b>Кратко (в пост)</b>\n${escapeHtml(brief)}`,
@@ -1963,8 +1982,25 @@ function parseEpbMarker(text: string): { username: string; id: string; story: st
   return { username: marker[1] ?? "", id: marker[2] ?? "", story, key: marker[3] ?? "" };
 }
 
+// Error that remembers what was already delivered before the failure.
+class PartialSendError extends Error {
+  sentIds: number[];
+  constructor(cause: unknown, sentIds: number[]) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.sentIds = sentIds;
+  }
+}
+
 async function sendPostToChat(chat_id: string, html: string, files: MediaRef[]): Promise<number[]> {
   const ids: number[] = [];
+  try {
+    return await sendPostParts(chat_id, html, files, ids);
+  } catch (err) {
+    throw new PartialSendError(err, ids);
+  }
+}
+
+async function sendPostParts(chat_id: string, html: string, files: MediaRef[], ids: number[]): Promise<number[]> {
   const collect = (sent: unknown) => {
     for (const m of Array.isArray(sent) ? sent : [sent]) {
       const id = (m as { message_id?: number })?.message_id;
@@ -2051,12 +2087,16 @@ function relayDestinations(): { id: string; title?: string; type?: string; statu
       .filter(Boolean)
       .map((id) => chatIdKey(id)),
   );
-  return (bindings.relayChats || []).filter(
-    (chat) => chat.status === "on" && isGroupOrChannel(chat) && !skip.has(chatIdKey(chat.id)),
-  );
+  const seen = new Set<string>();
+  return (bindings.relayChats || []).filter((chat) => {
+    const k = chatIdKey(chat.id);
+    if (chat.status !== "on" || !isGroupOrChannel(chat) || skip.has(k) || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
-type ChannelPost = { chatId: string; messageIds: number[] };
+type ChannelPost = { chatId: string; messageIds: number[]; partialError?: string };
 
 async function sendChannelPost(html: string, files: MediaRef[]): Promise<ChannelPost> {
   const ids = channelCandidates();
@@ -2067,6 +2107,11 @@ async function sendChannelPost(html: string, files: MediaRef[]): Promise<Channel
       const messageIds = await sendPostToChat(chat_id, html, files);
       return { chatId: chat_id, messageIds };
     } catch (err) {
+      // Something already reached the channel: that IS the post. Never retry it
+      // elsewhere or again, or the channel would get it twice.
+      if (err instanceof PartialSendError && err.sentIds.length) {
+        return { chatId: chat_id, messageIds: err.sentIds, partialError: err.message };
+      }
       lastError = err instanceof Error ? err.message : String(err);
     }
   }
@@ -2079,26 +2124,72 @@ type BroadcastReport = { total: number; sent: number; noRights: string[]; gone: 
 
 // Sends to every approved chat. Failures never remove a chat from the list:
 // a chat that lost rights starts receiving posts again as soon as rights are back.
-async function broadcastToRelays(html: string, files: MediaRef[], source?: ChannelPost): Promise<BroadcastReport> {
-  const approved = relayDestinations();
-  const report: BroadcastReport = { total: approved.length, sent: 0, noRights: [], gone: [], failed: [] };
+type BroadcastJob = {
+  id: string;
+  key: string;
+  html: string;
+  files: MediaRef[];
+  source?: ChannelPost;
+  // Chats already handled (sent or failed): never sent twice, also after a restart.
+  done: string[];
+  report: BroadcastReport;
+  reportTo?: { chatId: number | string; messageId: number };
+  startedAt: number;
+};
+
+const BROADCAST_PATH = join(DATA_DIR, "telegram-broadcasts.json");
+let broadcastJobs: BroadcastJob[] = readJson<BroadcastJob[]>(BROADCAST_PATH) || [];
+// Old id -> new id for groups that became supergroups during a broadcast.
+const migratedKeys = new Map<string, string>();
+
+function saveBroadcastJobs() {
+  try {
+    writeJsonAtomic(BROADCAST_PATH, broadcastJobs);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function channelAllowsForwarding(chatId: string): Promise<boolean> {
+  const chat = await tgSoft<{ has_protected_content?: boolean }>("getChat", { chat_id: chatId });
+  return !chat?.has_protected_content;
+}
+
+// Sends to every approved chat. Failures never remove a chat from the list:
+// a chat that lost rights starts receiving posts again as soon as rights are back.
+async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
+  const report = job.report;
+  const done = new Set(job.done);
+  const approved = relayDestinations().filter((c) => !done.has(chatIdKey(c.id)));
+  report.total = Math.max(report.total, done.size + approved.length);
   // Relay chats get the channel post itself ("Forwarded from ..."), albums stay albums.
-  let forward = Boolean(source?.messageIds.length);
+  let forward = Boolean(job.source?.messageIds.length) && (await channelAllowsForwarding(job.source!.chatId));
+  if (job.source?.messageIds.length && !forward && !report.failed.some((x) => x.startsWith("пересылка"))) {
+    report.failed.push("пересылка из канала запрещена (защита контента), в чаты ушли копии");
+  }
   for (const chat of approved) {
+    // A group may have been reached already under another id (old group -> supergroup).
+    if (job.done.includes(chatIdKey(chat.id))) continue;
     const label = chat.title ? `${chat.title} (${chat.id})` : chat.id;
     try {
-      if (forward && source) {
-        try {
-          await tg("forwardMessages", { chat_id: chat.id, from_chat_id: source.chatId, message_ids: source.messageIds });
-        } catch (err) {
-          // Channel forbids forwarding (protected content): send copies from now on.
-          if (!/can't be forwarded|protected|CHAT_FORWARDS_RESTRICTED|forward/i.test(String((err as Error)?.message))) throw err;
+      if (forward && job.source) {
+        const result = await tg<unknown[]>("forwardMessages", {
+          chat_id: chat.id,
+          from_chat_id: job.source.chatId,
+          message_ids: job.source.messageIds,
+        }).catch((err) => {
+          // The channel post can't be forwarded (protected or deleted): copies from now on.
+          if (/can't be forwarded|protected|CHAT_FORWARDS_RESTRICTED|message to forward not found/i.test(String((err as Error)?.message))) return null;
+          throw err;
+        });
+        // forwardMessages silently skips messages it can't forward and may return [].
+        if (!result || !result.length) {
           forward = false;
-          report.failed.push(`пересылка из канала запрещена (защита контента), отправляю копии`);
-          await sendPostToChat(chat.id, html, files);
+          report.failed.push("пересылка из канала не удалась, в чаты ушли копии");
+          await sendPostToChat(chat.id, job.html, job.files);
         }
       } else {
-        await sendPostToChat(chat.id, html, files);
+        await sendPostToChat(chat.id, job.html, job.files);
       }
       report.sent += 1;
     } catch (err) {
@@ -2119,10 +2210,61 @@ async function broadcastToRelays(html: string, files: MediaRef[], source?: Chann
         report.failed.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    // Remember the chat right away, under its old and new id if it migrated.
+    const k = chatIdKey(chat.id);
+    job.done.push(k);
+    const moved = migratedKeys.get(k);
+    if (moved) job.done.push(moved);
+    saveBroadcastJobs();
     // Telegram allows about 30 messages per second in total; an album counts per item.
-    await sleep(Math.max(50, 40 * (files.length + 1)));
+    await sleep(Math.max(50, 40 * ((forward ? job.source?.messageIds.length : job.files.length) || 1)));
   }
   return report;
+}
+
+async function finishBroadcast(job: BroadcastJob) {
+  const report = job.report;
+  bindings.lastBroadcast = {
+    at: Date.now(),
+    total: report.total,
+    sent: report.sent,
+    noRights: report.noRights.length,
+    gone: report.gone.length,
+    failed: report.failed.length,
+  };
+  saveBindings();
+  broadcastJobs = broadcastJobs.filter((j) => j.id !== job.id);
+  saveBroadcastJobs();
+  if (!job.reportTo || !report.total) return;
+  await tgSoft("sendMessage", {
+    chat_id: job.reportTo.chatId,
+    text: broadcastReportHtml(report),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_to_message_id: job.reportTo.messageId,
+  });
+}
+
+// Jobs run one after another: two publishes in a row must not double the rate.
+function enqueueBroadcast(job: BroadcastJob) {
+  broadcastQueue = broadcastQueue
+    .then(() => runBroadcast(job))
+    .then(() => finishBroadcast(job))
+    .catch((err) => console.error("[epb] broadcast", err));
+}
+
+// After a restart (e.g. a deploy in the middle of a broadcast) the remaining chats still
+// get the post; chats already done are skipped.
+function resumeBroadcasts() {
+  const fresh = broadcastJobs.filter((j) => Date.now() - j.startedAt < 12 * 60 * 60 * 1000);
+  if (fresh.length !== broadcastJobs.length) {
+    broadcastJobs = fresh;
+    saveBroadcastJobs();
+  }
+  for (const job of fresh) {
+    console.log(`[epb] resuming broadcast ${job.key}: ${job.done.length} chats already done`);
+    enqueueBroadcast(job);
+  }
 }
 
 function broadcastReportHtml(report: BroadcastReport): string {
@@ -2188,8 +2330,10 @@ function postPreviewHtml(key: string): string {
 async function sendPostPreview(chatId: number | string, key: string, replyTo?: number) {
   const rec = pendingPosts[key];
   if (!rec) return;
+  const repeat = previousPosts(pendingAccounts(rec), key);
   const head = `<b>Предпросмотр поста ${escapeHtml(key)}</b>${rec.postHtml ? " (текст изменён)" : ""}` +
-    (rec.files?.length ? `\nК посту приложится доказательств: ${rec.files.length}` : "");
+    (rec.files?.length ? `\nК посту приложится доказательств: ${rec.files.length}` : "") +
+    (repeat ? `\n${repeat}` : "");
   await tgSoft("sendMessage", {
     chat_id: chatId,
     text: `${head}\n━━━━━━━━━━\n${postPreviewHtml(key)}`,
@@ -2296,11 +2440,17 @@ async function publishFromMessage(
     });
     return false;
   }
-  if (key && publishing.has(key)) {
+  // Old review messages may have no key: lock on the text so a double tap can't post twice.
+  const lock = key || `txt:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+  if (!key && pendingPosts[lock]?.status === "published") {
+    await tgSoft("answerCallbackQuery", { callback_query_id: callbackId, text: "Уже опубликовано" });
+    return false;
+  }
+  if (publishing.has(lock)) {
     await tgSoft("answerCallbackQuery", { callback_query_id: callbackId, text: "Уже публикуем" });
     return false;
   }
-  if (key) publishing.add(key);
+  publishing.add(lock);
   const html = channelHtml(
     pendingAccounts(stored, parsed?.username || stored?.username || "", parsed?.id || stored?.id || ""),
     stored?.summary || stored?.story || parsed?.story || "",
@@ -2310,7 +2460,7 @@ async function publishFromMessage(
   );
   const files = stored?.files?.length ? stored.files : extraFiles;
   if (!channelCandidates().length) {
-    if (key) publishing.delete(key);
+    publishing.delete(lock);
     await tgSoft("answerCallbackQuery", {
       callback_query_id: callbackId,
       text: `Добавьте @${BOT_USERNAME} админом в канал Europe Private Blacklist`,
@@ -2322,7 +2472,7 @@ async function publishFromMessage(
   try {
     channelPost = await sendChannelPost(html, files);
   } catch {
-    if (key) publishing.delete(key);
+    publishing.delete(lock);
     await tgSoft("answerCallbackQuery", {
       callback_query_id: callbackId,
       text: relay
@@ -2334,40 +2484,42 @@ async function publishFromMessage(
   }
   if (key && pendingPosts[key]) {
     pendingPosts[key]!.status = "published";
-    savePending();
-    await notifyApplicant(pendingPosts[key], key, "published");
+  } else {
+    // Old message without a stored record: remember it so it can't be posted again.
+    pendingPosts[lock] = {
+      username: "", id: "", story: "", amount: "", currency: "", files: [],
+      createdAt: Date.now(), status: "published",
+    };
   }
-  if (key) publishing.delete(key);
+  savePending();
+  // The broadcast is saved before anything is sent, so a restart resumes it.
+  if (relay) {
+    const job: BroadcastJob = {
+      id: randomUUID(),
+      key: lock,
+      html,
+      files,
+      source: channelPost,
+      done: [],
+      report: { total: 0, sent: 0, noRights: [], gone: [], failed: [] },
+      reportTo,
+      startedAt: Date.now(),
+    };
+    broadcastJobs.push(job);
+    saveBroadcastJobs();
+    enqueueBroadcast(job);
+  }
+  publishing.delete(lock);
+  if (key && pendingPosts[key]) await notifyApplicant(pendingPosts[key], key, "published");
   await tgSoft("answerCallbackQuery", {
     callback_query_id: callbackId,
-    text: relay ? "Опубликовано в канал, рассылка по чатам идёт" : "Опубликовано без рассылки",
+    text: channelPost.partialError
+      ? "Пост в канале вышел не целиком. Повторно не публикуем — проверьте канал."
+      : relay
+        ? "Опубликовано в канал, рассылка по чатам идёт"
+        : "Опубликовано без рассылки",
+    show_alert: Boolean(channelPost.partialError),
   });
-  if (relay) {
-    // Can take minutes with many chats: do not hold the button, report when done.
-    // Queued: two publishes in a row must not double the sending rate.
-    broadcastQueue = broadcastQueue
-      .then(() => broadcastToRelays(html, files, channelPost))
-      .then(async (report) => {
-        bindings.lastBroadcast = {
-          at: Date.now(),
-          total: report.total,
-          sent: report.sent,
-          noRights: report.noRights.length,
-          gone: report.gone.length,
-          failed: report.failed.length,
-        };
-        saveBindings();
-        if (!reportTo || !report.total) return;
-        await tgSoft("sendMessage", {
-          chat_id: reportTo.chatId,
-          text: broadcastReportHtml(report),
-          parse_mode: "HTML",
-          disable_web_page_preview: true,
-          reply_to_message_id: reportTo.messageId,
-        });
-      })
-      .catch((err) => console.error("[epb] broadcast", err));
-  }
   return true;
 }
 
@@ -3132,6 +3284,7 @@ function pruneRelays(list: RelayChat[]): RelayChat[] {
 // A group upgraded to a supergroup gets a new id; keep its relay status and roles.
 function onChatMigrated(oldId: string, newId: string) {
   if (!oldId || !newId || sameChat(oldId, newId)) return;
+  migratedKeys.set(chatIdKey(oldId), chatIdKey(newId));
   let changed = false;
   const list = bindings.relayChats || [];
   const old = list.find((c) => sameChat(c.id, oldId));
@@ -3793,7 +3946,14 @@ async function askPublishChannel(arbiterChatId: number | string) {
   });
 }
 
+const seenUpdates = new Set<number>();
+
 export async function handleUpdate(update: TgUpdate) {
+  if (typeof update?.update_id === "number") {
+    if (seenUpdates.has(update.update_id)) return;
+    seenUpdates.add(update.update_id);
+    if (seenUpdates.size > 5000) seenUpdates.delete(seenUpdates.values().next().value!);
+  }
   try {
     await handleTelegramUpdate(update);
   } catch (err) {
@@ -4157,3 +4317,4 @@ export async function deleteWebhook() {
 if (botToken() && (process.env.PUBLIC_URL || process.env.NODE_ENV === "production")) {
   setTimeout(() => void ensureBotProfile().catch(() => {}), 3000);
 }
+if (botToken() && broadcastJobs.length) setTimeout(resumeBroadcasts, 5000);
