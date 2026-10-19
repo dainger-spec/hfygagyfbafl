@@ -248,6 +248,8 @@ type PendingPost = {
   victimUsername?: string;
   createdAt?: number;
   status?: "pending" | "published" | "rejected";
+  // Post body edited by an arbiter (Telegram HTML); replaces the summary in the post.
+  postHtml?: string;
   // Where the review message with the buttons is, so the admin panel can point to it.
   reviewChatId?: string;
   reviewMessageId?: number;
@@ -1238,10 +1240,11 @@ function channelHtml(
   story: string,
   amount = "",
   currency = "",
+  bodyHtml = "",
 ): string {
   const people = formatChannelAccounts(accounts, amount, currency);
   const subscribe = `<b>Subscribe:</b> <b><a href="${CHANNEL_URL}">Europe Private Blacklist</a></b>`;
-  return [...people, "", escapeHtml(story.trim()), "", subscribe]
+  return [...people, "", bodyHtml.trim() || escapeHtml(story.trim()), "", subscribe]
     .filter((line, i, arr) => line !== "" || (arr[i - 1] !== "" && i !== 0))
     .join("\n")
     .replace(/\n{3,}/g, "\n\n");
@@ -1323,12 +1326,18 @@ function reviewKeyboard(appId = "") {
 
 function publishChoiceKeyboard(key = "") {
   const suffix = key ? `:${key}` : "";
-  return {
-    inline_keyboard: [
-      [{ text: "Опубликовать с рассылкой", callback_data: `puball${suffix}`.slice(0, 64) }],
-      [{ text: "Опубликовать без рассылки", callback_data: `pubch${suffix}`.slice(0, 64) }],
-    ],
-  };
+  const rows = [
+    [{ text: "Опубликовать с рассылкой", callback_data: `puball${suffix}`.slice(0, 64) }],
+    [{ text: "Опубликовать без рассылки", callback_data: `pubch${suffix}`.slice(0, 64) }],
+  ];
+  if (key && pendingPosts[key]) {
+    rows.push([
+      { text: "✏ Изменить текст", callback_data: `pedit:${key}` },
+      { text: "👁 Предпросмотр", callback_data: `pview:${key}` },
+    ]);
+    if (pendingPosts[key]!.postHtml) rows.push([{ text: "↩ Вернуть исходный текст", callback_data: `porig:${key}` }]);
+  }
+  return { inline_keyboard: rows };
 }
 
 async function tgForm<T>(method: string, form: FormData): Promise<T> {
@@ -1954,20 +1963,29 @@ function parseEpbMarker(text: string): { username: string; id: string; story: st
   return { username: marker[1] ?? "", id: marker[2] ?? "", story, key: marker[3] ?? "" };
 }
 
-async function sendPostToChat(chat_id: string, html: string, files: MediaRef[]) {
+async function sendPostToChat(chat_id: string, html: string, files: MediaRef[]): Promise<number[]> {
+  const ids: number[] = [];
+  const collect = (sent: unknown) => {
+    for (const m of Array.isArray(sent) ? sent : [sent]) {
+      const id = (m as { message_id?: number })?.message_id;
+      if (id) ids.push(id);
+    }
+  };
   const packed = packCaption(html);
   const parts = packed.leftover ? splitHtml(packed.leftover, 4090) : [];
   if (!files.length) {
     const chunks = splitHtml(html, 4090);
     for (const part of chunks) {
-      await tg("sendMessage", {
-        chat_id,
-        text: part,
-        parse_mode: "HTML",
-        disable_web_page_preview: false,
-      });
+      collect(
+        await tg("sendMessage", {
+          chat_id,
+          text: part,
+          parse_mode: "HTML",
+          disable_web_page_preview: false,
+        }),
+      );
     }
-    return;
+    return ids;
   }
   for (const [i, chunk] of groupMedia(files).entries()) {
     const firstCaption = i === 0 && packed.caption ? packed.caption : undefined;
@@ -1983,26 +2001,31 @@ async function sendPostToChat(chat_id: string, html: string, files: MediaRef[]) 
       else payload.photo = file.file_id;
       const method =
         file.type === "video" ? "sendVideo" : file.type === "document" ? "sendDocument" : "sendPhoto";
-      await tg(method, payload);
+      collect(await tg(method, payload));
     } else {
-      await tg("sendMediaGroup", {
-        chat_id,
-        media: chunk.map((file, idx) => ({
-          type: file.type,
-          media: file.file_id,
-          ...(firstCaption && idx === 0 ? { caption: firstCaption, parse_mode: "HTML" } : {}),
-        })),
-      });
+      collect(
+        await tg("sendMediaGroup", {
+          chat_id,
+          media: chunk.map((file, idx) => ({
+            type: file.type,
+            media: file.file_id,
+            ...(firstCaption && idx === 0 ? { caption: firstCaption, parse_mode: "HTML" } : {}),
+          })),
+        }),
+      );
     }
   }
   for (const part of parts) {
-    await tg("sendMessage", {
-      chat_id,
-      text: part,
-      parse_mode: "HTML",
-      disable_web_page_preview: false,
-    });
+    collect(
+      await tg("sendMessage", {
+        chat_id,
+        text: part,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      }),
+    );
   }
+  return ids;
 }
 
 function isMissingRights(err: unknown) {
@@ -2033,21 +2056,21 @@ function relayDestinations(): { id: string; title?: string; type?: string; statu
   );
 }
 
-async function sendChannelPost(html: string, files: MediaRef[]) {
+type ChannelPost = { chatId: string; messageIds: number[] };
+
+async function sendChannelPost(html: string, files: MediaRef[]): Promise<ChannelPost> {
   const ids = channelCandidates();
   if (!ids.length) throw new Error("channel not found");
   let lastError = "channel not found";
-  let posted = false;
   for (const chat_id of ids) {
     try {
-      await sendPostToChat(chat_id, html, files);
-      posted = true;
-      break;
+      const messageIds = await sendPostToChat(chat_id, html, files);
+      return { chatId: chat_id, messageIds };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
   }
-  if (!posted) throw new Error(lastError);
+  throw new Error(lastError);
 }
 
 const RIGHTS_NOTICE_EVERY = 24 * 60 * 60 * 1000;
@@ -2056,13 +2079,27 @@ type BroadcastReport = { total: number; sent: number; noRights: string[]; gone: 
 
 // Sends to every approved chat. Failures never remove a chat from the list:
 // a chat that lost rights starts receiving posts again as soon as rights are back.
-async function broadcastToRelays(html: string, files: MediaRef[]): Promise<BroadcastReport> {
+async function broadcastToRelays(html: string, files: MediaRef[], source?: ChannelPost): Promise<BroadcastReport> {
   const approved = relayDestinations();
   const report: BroadcastReport = { total: approved.length, sent: 0, noRights: [], gone: [], failed: [] };
+  // Relay chats get the channel post itself ("Forwarded from ..."), albums stay albums.
+  let forward = Boolean(source?.messageIds.length);
   for (const chat of approved) {
     const label = chat.title ? `${chat.title} (${chat.id})` : chat.id;
     try {
-      await sendPostToChat(chat.id, html, files);
+      if (forward && source) {
+        try {
+          await tg("forwardMessages", { chat_id: chat.id, from_chat_id: source.chatId, message_ids: source.messageIds });
+        } catch (err) {
+          // Channel forbids forwarding (protected content): send copies from now on.
+          if (!/can't be forwarded|protected|CHAT_FORWARDS_RESTRICTED|forward/i.test(String((err as Error)?.message))) throw err;
+          forward = false;
+          report.failed.push(`пересылка из канала запрещена (защита контента), отправляю копии`);
+          await sendPostToChat(chat.id, html, files);
+        }
+      } else {
+        await sendPostToChat(chat.id, html, files);
+      }
       report.sent += 1;
     } catch (err) {
       if (isMissingRights(err)) {
@@ -2099,6 +2136,127 @@ function broadcastReportHtml(report: BroadcastReport): string {
   if (report.gone.length) lines.push("", `<b>Бот удалён или чат недоступен (${report.gone.length})</b>`, list(report.gone));
   if (report.failed.length) lines.push("", `<b>Ошибки (${report.failed.length})</b>`, list(report.failed));
   return lines.join("\n");
+}
+
+// ---------- Editing the post text before it is published ----------
+
+// Telegram message formatting (entities) -> Telegram HTML, so bold/italic/links survive.
+function entitiesToHtml(text: string, entities: TgEntity[] = []): string {
+  const tags: Record<string, [string, string]> = {
+    bold: ["<b>", "</b>"],
+    italic: ["<i>", "</i>"],
+    underline: ["<u>", "</u>"],
+    strikethrough: ["<s>", "</s>"],
+    spoiler: ["<tg-spoiler>", "</tg-spoiler>"],
+    code: ["<code>", "</code>"],
+    pre: ["<pre>", "</pre>"],
+    blockquote: ["<blockquote>", "</blockquote>"],
+    expandable_blockquote: ["<blockquote expandable>", "</blockquote>"],
+  };
+  const opens = new Map<number, string[]>();
+  const closes = new Map<number, string[]>();
+  const usable = entities
+    .filter((e) => typeof e.offset === "number" && typeof e.length === "number" && e.length > 0)
+    .filter((e) => tags[e.type] || (e.type === "text_link" && /^https?:\/\//i.test(e.url || "")))
+    .sort((a, b) => a.offset! - b.offset! || b.length! - a.length!);
+  for (const e of usable) {
+    const [open, close] =
+      e.type === "text_link" ? [`<a href="${escapeHtml(e.url || "")}">`, "</a>"] : tags[e.type]!;
+    if (e.offset! >= text.length) continue;
+    opens.set(e.offset!, [...(opens.get(e.offset!) || []), open]);
+    // Clamp to the text, otherwise a tag would never be closed.
+    const end = Math.min(e.offset! + e.length!, text.length);
+    closes.set(end, [close, ...(closes.get(end) || [])]);
+  }
+  let out = "";
+  for (let i = 0; i <= text.length; i++) {
+    out += (closes.get(i) || []).join("");
+    out += (opens.get(i) || []).join("");
+    if (i < text.length) out += escapeHtml(text[i]!);
+  }
+  return out;
+}
+
+// Prompt message id -> complaint key: the arbiter answers the prompt with the new text.
+const postEditPrompts = new Map<string, string>();
+
+function postPreviewHtml(key: string): string {
+  const rec = pendingPosts[key]!;
+  return channelHtml(pendingAccounts(rec), rec.summary || rec.story, rec.amount, rec.currency, rec.postHtml);
+}
+
+async function sendPostPreview(chatId: number | string, key: string, replyTo?: number) {
+  const rec = pendingPosts[key];
+  if (!rec) return;
+  const head = `<b>Предпросмотр поста ${escapeHtml(key)}</b>${rec.postHtml ? " (текст изменён)" : ""}` +
+    (rec.files?.length ? `\nК посту приложится доказательств: ${rec.files.length}` : "");
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: `${head}\n━━━━━━━━━━\n${postPreviewHtml(key)}`,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_to_message_id: replyTo,
+    reply_markup: publishChoiceKeyboard(key),
+  });
+}
+
+async function askPostEdit(chatId: number | string, key: string) {
+  const rec = pendingPosts[key];
+  if (!rec) return;
+  const prompt = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text: [
+      `<b>Новый текст поста ${escapeHtml(key)}</b>`,
+      "",
+      "Ответьте на это сообщение новым текстом. Можно жирный, курсив и ссылки.",
+      "Строки с аккаунтом и суммой и подпись Subscribe бот добавит сам.",
+      "",
+      "Сейчас в посте:",
+      rec.postHtml || escapeHtml((rec.summary || rec.story).trim()),
+    ].join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { force_reply: true, selective: false, input_field_placeholder: "Новый текст поста" },
+  });
+  if (prompt?.message_id) {
+    postEditPrompts.set(`${chatId}:${prompt.message_id}`, key);
+    if (postEditPrompts.size > 200) postEditPrompts.delete(postEditPrompts.keys().next().value!);
+  }
+}
+
+// Returns true when the message was an answer to an edit prompt.
+async function handlePostEditReply(msg: TgMessage): Promise<boolean> {
+  const replyTo = msg.reply_to_message?.message_id;
+  if (!replyTo) return false;
+  const key = postEditPrompts.get(`${msg.chat.id}:${replyTo}`);
+  if (!key) return false;
+  const rec = pendingPosts[key];
+  if (!rec || rec.status !== "pending") {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Заявка уже обработана, текст не изменён.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  const text = (msg.text || msg.caption || "").trim();
+  if (text.length < 5) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Слишком коротко. Ответьте на сообщение бота ещё раз.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  if (text.length > 3500) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Слишком длинно: максимум 3500 символов.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  const html = entitiesToHtml(msg.text || msg.caption || "", msg.entities || msg.caption_entities).trim();
+  const previous = rec.postHtml;
+  rec.postHtml = html;
+  // The whole post must still fit into one Telegram message.
+  if (postPreviewHtml(key).length > 3900) {
+    rec.postHtml = previous;
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Пост получается слишком длинным для Telegram. Сократите текст и ответьте ещё раз.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  savePending();
+  postEditPrompts.delete(`${msg.chat.id}:${replyTo}`);
+  await sendPostPreview(msg.chat.id, key, msg.message_id);
+  return true;
 }
 
 const publishing = new Set<string>();
@@ -2148,6 +2306,7 @@ async function publishFromMessage(
     stored?.summary || stored?.story || parsed?.story || "",
     stored?.amount,
     stored?.currency,
+    stored?.postHtml,
   );
   const files = stored?.files?.length ? stored.files : extraFiles;
   if (!channelCandidates().length) {
@@ -2159,8 +2318,9 @@ async function publishFromMessage(
     });
     return false;
   }
+  let channelPost: ChannelPost;
   try {
-    await sendChannelPost(html, files);
+    channelPost = await sendChannelPost(html, files);
   } catch {
     if (key) publishing.delete(key);
     await tgSoft("answerCallbackQuery", {
@@ -2186,7 +2346,7 @@ async function publishFromMessage(
     // Can take minutes with many chats: do not hold the button, report when done.
     // Queued: two publishes in a row must not double the sending rate.
     broadcastQueue = broadcastQueue
-      .then(() => broadcastToRelays(html, files))
+      .then(() => broadcastToRelays(html, files, channelPost))
       .then(async (report) => {
         bindings.lastBroadcast = {
           at: Date.now(),
@@ -2212,6 +2372,7 @@ async function publishFromMessage(
 }
 
 type TgUser = { id: number; username?: string; first_name?: string };
+type TgEntity = { type: string; offset?: number; length?: number; url?: string; language?: string; user?: TgUser };
 
 type TgMessage = {
   message_id: number;
@@ -2225,8 +2386,8 @@ type TgMessage = {
   forward_from?: TgUser;
   forward_origin?: { sender_user?: TgUser };
   reply_to_message?: TgMessage;
-  entities?: { type: string; user?: TgUser }[];
-  caption_entities?: { type: string; user?: TgUser }[];
+  entities?: TgEntity[];
+  caption_entities?: TgEntity[];
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;
 };
@@ -3746,7 +3907,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
       await handleRelayDecision(cb, cb.data.startsWith("rel:y:"));
       return;
     }
-    if ((cb.data === "pub" || cb.data.startsWith("pub:") || cb.data.startsWith("puball") || cb.data.startsWith("pubch") || cb.data === "rej" || cb.data.startsWith("rej:")) && !isOfficialArbiterChat(cb.message.chat.id)) {
+    if ((cb.data === "pub" || cb.data.startsWith("pub:") || cb.data.startsWith("puball") || cb.data.startsWith("pubch") || cb.data === "rej" || cb.data.startsWith("rej:") || /^p(edit|view|orig):/.test(cb.data)) && !isOfficialArbiterChat(cb.message.chat.id)) {
       await tgSoft("answerCallbackQuery", {
         callback_query_id: cb.id,
         text: "Чат не авторизован",
@@ -3776,6 +3937,27 @@ async function handleTelegramUpdate(update: TgUpdate) {
         });
       }
       await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Выберите тип публикации" });
+      return;
+    }
+    if (/^p(edit|view|orig):/.test(cb.data)) {
+      const [action, key = ""] = cb.data.split(":");
+      const rec = pendingPosts[key];
+      if (!rec || (rec.status || "pending") !== "pending") {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Заявка уже обработана", show_alert: true });
+        return;
+      }
+      if (action === "pedit") {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Ответьте на сообщение бота новым текстом" });
+        await askPostEdit(cb.message.chat.id, key);
+      } else if (action === "pview") {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+        await sendPostPreview(cb.message.chat.id, key, cb.message.message_id);
+      } else {
+        delete rec.postHtml;
+        savePending();
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Вернули исходный текст" });
+        await sendPostPreview(cb.message.chat.id, key, cb.message.message_id);
+      }
       return;
     }
     if (cb.data.startsWith("puball") || cb.data.startsWith("pubch")) {
@@ -3919,6 +4101,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
     return;
   }
 
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && channelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyPublishChannel(msg.chat.id, msg.text);
     return;
