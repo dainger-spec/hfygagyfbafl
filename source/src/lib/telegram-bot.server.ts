@@ -2132,20 +2132,16 @@ type BroadcastReport = {
   // Delivered, but not as a forward: a copy, or text only where media is forbidden.
   copies?: string[];
   textOnly?: string[];
+  // Telegram answered the forward with an error although the post usually arrives
+  // ("Message was not forwarded"): nothing more is sent there, just check the chat.
+  unconfirmed?: string[];
 };
 
 // Telegram refused media (photos/videos) in this chat, not the chat as a whole.
+// Permission checks happen before anything is sent, so nothing reached the chat.
 function isMediaForbidden(err: unknown) {
   const text = err instanceof Error ? err.message : String(err);
-  return /send (photos|videos|documents|media|audios|voice)|CHAT_SEND_(PHOTOS|VIDEOS|MEDIA|DOCS|GIFS)_FORBIDDEN|was not forwarded/i.test(text);
-}
-
-// What forwardMessages did in one chat: all delivered, nothing delivered (safe to send
-// a copy instead), or partly delivered (sending anything more would duplicate it).
-function forwardOutcome(result: unknown[] | null, err: unknown, expected: number): "all" | "none" | "partial" {
-  if (result) return result.length >= expected ? "all" : result.length ? "partial" : "none";
-  const failedAt = String((err as Error)?.message || "").match(/failed to send message #(\d+)/i);
-  return failedAt && Number(failedAt[1]) > 1 ? "partial" : "none";
+  return /rights to send (photos|videos|documents|media|audios|voice)|CHAT_SEND_(PHOTOS|VIDEOS|MEDIA|DOCS|GIFS)_FORBIDDEN/i.test(text);
 }
 
 // Sends to every approved chat. Failures never remove a chat from the list:
@@ -2193,6 +2189,8 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
   if (job.source?.messageIds.length && !forward && !report.failed.some((x) => x.startsWith("пересылка"))) {
     report.failed.push("пересылка из канала запрещена (защита контента), в чаты ушли копии");
   }
+  let forwardedOk = 0;
+  let emptyInARow = 0;
   for (const chat of approved) {
     // A group may have been reached already under another id (old group -> supergroup).
     if (job.done.includes(chatIdKey(chat.id))) continue;
@@ -2211,21 +2209,36 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
         } catch (err) {
           fwdErr = err;
         }
-        // No answer from Telegram (timeout, dropped connection): the forward may have gone
-        // through, so sending a copy could duplicate it. Report instead.
-        if (fwdErr && !(fwdErr instanceof TgError)) throw fwdErr;
-        const message = String((fwdErr as Error)?.message || "");
-        if (fwdErr && /protected|CHAT_FORWARDS_RESTRICTED|message to forward not found|message can't be forwarded/i.test(message)) {
+        // Real chats showed it: Telegram may answer a forward with an error (e.g. "Message
+        // was not forwarded") and still deliver it. So after a forward attempt a copy is sent
+        // ONLY when Telegram refused before sending: missing rights / media not allowed.
+        if (!fwdErr && result && result.length >= job.source.messageIds.length) {
+          viaForward = true;
+          forwardedOk += 1;
+          emptyInARow = 0;
+        } else if (fwdErr instanceof TgError && /protected|CHAT_FORWARDS_RESTRICTED|message to forward not found|message can't be forwarded/i.test(fwdErr.message)) {
           // The channel post itself can't be forwarded (protected or deleted): copies for everyone.
           forward = false;
           report.failed.push("пересылка из канала невозможна (защита контента или пост удалён), в чаты ушли копии");
-        } else if (fwdErr && (isChatGone(fwdErr) || (isMissingRights(fwdErr) && !isMediaForbidden(fwdErr)))) {
+        } else if (fwdErr instanceof TgError && (isChatGone(fwdErr) || (isMissingRights(fwdErr) && !isMediaForbidden(fwdErr)))) {
           throw fwdErr;
+        } else if (fwdErr instanceof TgError && isMediaForbidden(fwdErr)) {
+          // Media not allowed for the bot here: refused up front, a copy below gets the text out.
+        } else {
+          // Empty or partial result, "Message was not forwarded", no answer at all:
+          // the post may be there already. Never send anything more to this chat.
+          (report.unconfirmed ||= []).push(
+            `${label}: ${fwdErr instanceof Error ? fwdErr.message.replace(/^Bad Request: /, "") : `переслано ${result?.length ?? 0} из ${job.source.messageIds.length}`}`,
+          );
+          // Counted as handled (no copy below); the chat is still marked done after the try.
+          viaForward = true;
+          // Empty answers from the very first chats with no forward working at all: the channel
+          // post itself is the problem, so the remaining chats get copies.
+          if (!fwdErr && result && !result.length && !forwardedOk && ++emptyInARow >= 3) {
+            forward = false;
+            report.failed.push("пересылка из канала не работает (Telegram пропускает сообщения), остальным чатам ушли копии");
+          }
         }
-        const outcome = forwardOutcome(result, fwdErr, job.source.messageIds.length);
-        if (outcome === "all") viaForward = true;
-        if (outcome === "partial") throw new Error("пересланы не все части поста; повторно не отправляем, чтобы не было дублей");
-        // outcome "none": nothing reached this chat, a copy below is safe.
       }
       if (!viaForward) {
         try {
@@ -2327,7 +2340,17 @@ function broadcastReportHtml(report: BroadcastReport): string {
       .slice(0, 15)
       .map((x) => `• ${escapeHtml(x)}`)
       .join("\n") + (items.length > 15 ? `\n… и ещё ${items.length - 15}` : "");
-  const lines = [`<b>Рассылка завершена</b>: доставлено ${report.sent} из ${report.total}`];
+  const unsure = report.unconfirmed?.length || 0;
+  const lines = [
+    `<b>Рассылка завершена</b>: доставлено ${report.sent - unsure} из ${report.total}` +
+      (unsure ? `, без подтверждения ${unsure}` : ""),
+  ];
+  if (report.unconfirmed?.length)
+    lines.push(
+      "",
+      `<b>Telegram ответил ошибкой, но пост обычно доходит — проверьте чат, повторно не отправляли (${report.unconfirmed.length})</b>`,
+      list(report.unconfirmed),
+    );
   if (report.copies?.length)
     lines.push("", `<b>Пересылка в чат не прошла, отправлено копией (${report.copies.length})</b>`, list(report.copies));
   if (report.textOnly?.length)
