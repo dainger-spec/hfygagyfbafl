@@ -7,6 +7,7 @@ import {
   bootTelegramWebApp,
   CHANNEL_URL,
   lockTelegramViewport,
+  haptic,
   readTelegramWebUser,
   telegramInitData,
   waitForTelegramUser,
@@ -50,6 +51,7 @@ export function MiniApp({
       onPage("apply");
       return;
     }
+    haptic("medium");
     setHero(start);
   }, [hero, onPage]);
   const openHistory = useCallback(() => onPage("history"), [onPage]);
@@ -183,10 +185,16 @@ const HERO_EMBLEM_HD = "/brand/emblem-hd.webp";
 // Native height of emblem-hd.webp: the emblem never grows past it on screen.
 const HERO_EMBLEM_PX = 746;
 
-// Full-screen overlay: the emblem moves to the centre and grows with a golden glow while
-// the stars fade out in place; then its oval, with the same rim as the artwork, widens
-// past the screen edges until everything is yellow, and the yellow dissolves into the form.
-// The oval is drawn with clip-paths (vector), so it stays sharp at any size.
+// Full-screen overlay for "Подать жалобу":
+//  1. the emblem glides from the logo to the centre and settles with a short breath, the
+//     stars fade out where they are;
+//  2. the medal's yellow, with the same rim as the artwork (yellow line, dark line), opens
+//     from under the emblem past the screen edges while the face fades out in place;
+//  3. the yellow screen lifts like a curtain, its lower edge drawn as the same rim, and
+//     the form is underneath.
+// The emblem is laid out at its final size and starts scaled down, so the browser draws it
+// at full resolution and only ever shrinks it; it is never shown bigger than its pixels.
+// The oval and the curtain are plain shapes (clip-path / box), sharp at any size.
 const MEDAL_YELLOW = "#FED001";
 // Rim of the artwork, as parts of the emblem height: outer yellow line, then dark line.
 const MEDAL_RIM = 10 / 740;
@@ -208,53 +216,50 @@ function HeroTransition({
   const rim = useRef<HTMLDivElement>(null);
   const gap = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLDivElement>(null);
+  const curtain = useRef<HTMLDivElement>(null);
   const callbacks = useRef({ onMidpoint, onDone });
   callbacks.current = { onMidpoint, onDone };
 
-  useLayoutEffect(() => {
+  // Final geometry, computed once.
+  const [geo] = useState(() => {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const dpr = window.devicePixelRatio || 1;
     const e = start.emblem;
-    // Biggest size that stays sharp: the picture never shows more screen pixels than it has.
-    const grow = 1.06;
-    const targetH = Math.max(
-      e.height,
-      Math.min(vh * 0.4, vw * 0.68 * (e.height / e.width), HERO_EMBLEM_PX / dpr / grow),
-    );
-    const scale = targetH / e.height;
+    const breath = 1.025;
+    // Big, but never more screen pixels than the image has (also during the breath).
+    const h = Math.max(e.height, Math.min(vh * 0.42, vw * 0.7 * (e.height / e.width), HERO_EMBLEM_PX / dpr / breath));
+    const w = h * (e.width / e.height);
     const cx = vw / 2;
-    const cy = vh * 0.44;
-    const dx = cx - (e.left + e.width / 2);
-    const dy = cy - (e.top + e.height / 2);
+    const cy = vh * 0.45;
+    return { vw, vh, h, w, cx, cy, breath, from: e.height / h };
+  });
 
-    // The oval at the emblem's final size, and how much bigger it must get to cover the screen.
-    const a = (e.width * scale) / 2;
-    const b = (e.height * scale) / 2;
-    const r = targetH * MEDAL_RIM;
-    const g = targetH * MEDAL_GAP;
-    const corner = Math.max(
-      ...[
-        [0, 0],
-        [vw, 0],
-        [0, vh],
-        [vw, vh],
-      ].map(([x, y]) => Math.hypot((x! - cx) / (a - r - g), (y! - cy) / (b - r - g))),
-    );
-    const kEnd = corner * 1.04;
+  useLayoutEffect(() => {
+    const { vw, vh, h, w, cx, cy, breath, from } = geo;
+    const e = start.emblem;
+    const sx = e.left + e.width / 2 - cx;
+    const sy = e.top + e.height / 2 - cy;
+    const a = w / 2;
+    const b = h / 2;
+    const r = h * MEDAL_RIM;
+    const g = h * MEDAL_GAP;
+    // How much the oval must grow so its yellow field covers every corner of the screen.
+    const kEnd =
+      Math.max(...[[0, 0], [vw, 0], [0, vh], [vw, vh]].map(([x, y]) => Math.hypot((x! - cx) / (a - r - g), (y! - cy) / (b - r - g)))) * 1.03;
     const oval = (k: number, inset: number) =>
-      `ellipse(${Math.max(0, k * (a - inset)).toFixed(1)}px ${Math.max(0, k * (b - inset)).toFixed(1)}px at ${cx}px ${cy}px)`;
+      `ellipse(${(k * (a - inset)).toFixed(1)}px ${(k * (b - inset)).toFixed(1)}px at ${cx.toFixed(1)}px ${cy.toFixed(1)}px)`;
 
-    // Easing per step (an easing on the whole animation would squeeze the steps together).
-    const glide = "cubic-bezier(.22,.9,.24,1)";
+    const DURATION = 1550;
+    const ARRIVE = 0.3; // emblem in the centre
+    const OPEN = 0.41; // yellow starts to open
+    const FULL = 0.64; // screen fully yellow -> the form is put underneath
+    const LIFT = 0.67; // curtain starts to rise
+    const glide = "cubic-bezier(.2,.85,.25,1)";
     const soft = "cubic-bezier(.45,0,.55,1)";
-    const zoom = "cubic-bezier(.7,0,.84,0)";
-    const DURATION = 1450;
+    const open = "cubic-bezier(.62,0,.78,.38)";
+    const curtainEase = "cubic-bezier(.75,0,.25,1)";
     const timing = { duration: DURATION, easing: "linear", fill: "forwards" as const };
-    // Moments on the timeline (0..1).
-    const ARRIVE = 0.33; // emblem in the centre
-    const OPEN = 0.4; // the oval starts to widen
-    const FULL = 0.7; // screen fully yellow -> switch to the form
     start.source.style.visibility = "hidden";
 
     const widen = (el: HTMLDivElement, inset: number) =>
@@ -262,107 +267,112 @@ function HeroTransition({
         [
           { clipPath: oval(1, inset), opacity: 0 },
           { clipPath: oval(1, inset), opacity: 0, offset: OPEN - 0.001 },
-          { clipPath: oval(1, inset), opacity: 1, offset: OPEN, easing: zoom },
+          { clipPath: oval(1, inset), opacity: 1, offset: OPEN, easing: open },
           { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL },
-          { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL + 0.04, easing: soft },
+          { clipPath: oval(kEnd, inset), opacity: 1, offset: LIFT - 0.001 },
+          { clipPath: oval(kEnd, inset), opacity: 0, offset: LIFT },
           { clipPath: oval(kEnd, inset), opacity: 0 },
         ],
         timing,
       );
 
     const anims = [
-      // The home screen goes dark behind the emblem.
       shade.current!.animate(
         [
           { opacity: 0, easing: soft },
-          { opacity: 1, offset: 0.24 },
-          { opacity: 1, offset: FULL + 0.04, easing: soft },
+          { opacity: 1, offset: 0.22 },
+          { opacity: 1, offset: LIFT - 0.001 },
+          { opacity: 0, offset: LIFT },
           { opacity: 0 },
         ],
         timing,
       ),
-      // Stars keep turning where they are and fade out (no growing).
+      // Stars keep turning in place and fade out.
       ring.current!.animate(
         [
-          { transform: `rotate(${start.angle}deg)`, opacity: 1, easing: "linear" },
-          { transform: `rotate(${start.angle + 30}deg)`, opacity: 0, offset: 0.26 },
-          { transform: `rotate(${start.angle + 30}deg)`, opacity: 0 },
+          { transform: `rotate(${start.angle}deg)`, opacity: 1 },
+          { transform: `rotate(${start.angle + 22}deg)`, opacity: 0, offset: 0.22 },
+          { transform: `rotate(${start.angle + 22}deg)`, opacity: 0 },
         ],
         timing,
       ),
-      // The emblem glides to the centre and grows, then rides the widening oval.
       emblem.current!.animate(
         [
-          { transform: "translate(0px,0px) scale(1)", filter: "drop-shadow(0 0 0px rgba(254,208,1,0))", easing: glide },
-          { transform: `translate(${dx}px,${dy}px) scale(${scale})`, filter: "drop-shadow(0 0 24px rgba(254,208,1,.55))", offset: ARRIVE },
-          {
-            transform: `translate(${dx}px,${dy}px) scale(${scale})`,
-            filter: "drop-shadow(0 0 0px rgba(254,208,1,0))",
-            offset: OPEN,
-            easing: zoom,
-          },
-          { transform: `translate(${dx}px,${dy}px) scale(${scale * kEnd})`, filter: "drop-shadow(0 0 0px rgba(254,208,1,0))", offset: FULL },
-          { transform: `translate(${dx}px,${dy}px) scale(${scale * kEnd})`, filter: "drop-shadow(0 0 0px rgba(254,208,1,0))" },
+          { transform: `translate(${sx}px,${sy}px) scale(${from})`, opacity: 1, easing: glide },
+          { transform: "translate(0px,0px) scale(1)", opacity: 1, offset: ARRIVE, easing: soft },
+          { transform: `translate(0px,0px) scale(${breath})`, opacity: 1, offset: (ARRIVE + OPEN) / 2, easing: soft },
+          { transform: "translate(0px,0px) scale(1)", opacity: 1, offset: OPEN, easing: "cubic-bezier(.4,0,.9,.6)" },
+          { transform: "translate(0px,0px) scale(1)", opacity: 0, offset: OPEN + 0.12 },
+          { transform: "translate(0px,0px) scale(1)", opacity: 0 },
         ],
         timing,
       ),
-      // ...and melts into the yellow early in that zoom, before it gets big enough to blur.
-      emblem.current!.animate(
-        [
-          { opacity: 1 },
-          { opacity: 1, offset: OPEN + 0.1, easing: "cubic-bezier(.3,0,.7,1)" },
-          { opacity: 0, offset: OPEN + 0.22 },
-          { opacity: 0 },
-        ],
-        timing,
-      ),
-      // Golden halo while the emblem travels.
       glow.current!.animate(
         [
-          { transform: "translate(-50%,-50%) scale(.3)", opacity: 0, easing: glide },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: ARRIVE },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.9, offset: OPEN, easing: soft },
-          { transform: "translate(-50%,-50%) scale(1.2)", opacity: 0, offset: 0.55 },
-          { transform: "translate(-50%,-50%) scale(1.2)", opacity: 0 },
+          { transform: "translate(-50%,-50%) scale(.35)", opacity: 0, easing: glide },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, offset: ARRIVE, easing: soft },
+          { transform: "translate(-50%,-50%) scale(1.06)", opacity: 1, offset: (ARRIVE + OPEN) / 2, easing: soft },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.8, offset: OPEN },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0, offset: OPEN + 0.1 },
+          { transform: "translate(-50%,-50%) scale(1)", opacity: 0 },
         ],
         timing,
       ),
-      // The medal's oval: outer yellow line, dark line, yellow field, widening together.
       widen(rim.current!, 0),
       widen(gap.current!, r),
       widen(field.current!, r + g),
+      // The yellow screen rises like a curtain; its lower edge carries the medal's rim.
+      curtain.current!.animate(
+        [
+          { transform: "translateY(0%)", opacity: 0 },
+          { transform: "translateY(0%)", opacity: 0, offset: LIFT - 0.001 },
+          { transform: "translateY(0%)", opacity: 1, offset: LIFT, easing: curtainEase },
+          { transform: "translateY(-102%)", opacity: 1 },
+        ],
+        timing,
+      ),
     ];
-    // Switch to the form while the screen is fully yellow; on the same timeline as the
-    // animations, so it always lands at the same moment.
-    const mid = shade.current!.animate([], { duration: DURATION * (FULL + 0.01) });
+
+    // Moments on the same timeline: the page switch and the vibrations always line up with
+    // what is on screen.
     let cancelled = false;
-    void mid.finished.then(() => !cancelled && callbacks.current.onMidpoint()).catch(() => {});
+    const at = (part: number, fn: () => void) => {
+      const tick = shade.current!.animate([], { duration: DURATION * part });
+      void tick.finished.then(() => !cancelled && fn()).catch(() => {});
+      return tick;
+    };
+    const ticks = [
+      at(ARRIVE, () => haptic("light")),
+      at(FULL, () => {
+        haptic("rigid");
+        callbacks.current.onMidpoint();
+      }),
+    ];
     void Promise.all(anims.map((x) => x.finished))
       .then(() => !cancelled && callbacks.current.onDone())
       .catch(() => {});
     return () => {
       cancelled = true;
-      mid.cancel();
+      ticks.forEach((x) => x.cancel());
       anims.forEach((x) => x.cancel());
       start.source.style.visibility = "";
     };
-  }, [start]);
+  }, [start, geo]);
 
-  const e = start.emblem;
   const rr = start.ring;
   const layer = "absolute inset-0 opacity-0";
   return (
-    <div className="pointer-events-none fixed inset-0 z-[60]" aria-hidden>
+    <div className="pointer-events-none fixed inset-0 z-[60] overflow-hidden" aria-hidden>
       <div ref={shade} className="absolute inset-0 bg-bg opacity-0" />
       <div
         ref={glow}
         className="absolute rounded-full opacity-0"
         style={{
-          left: "50%",
-          top: "44%",
-          width: "min(110vw, 620px)",
-          height: "min(110vw, 620px)",
-          background: "radial-gradient(circle, rgba(254,208,1,.32) 0%, rgba(254,208,1,.10) 38%, rgba(254,208,1,0) 68%)",
+          left: geo.cx,
+          top: geo.cy,
+          width: geo.h * 2.2,
+          height: geo.h * 2.2,
+          background: "radial-gradient(circle, rgba(254,208,1,.30) 0%, rgba(254,208,1,.10) 40%, rgba(254,208,1,0) 70%)",
         }}
       />
       <div
@@ -375,21 +385,32 @@ function HeroTransition({
       <div ref={rim} className={layer} style={{ background: MEDAL_YELLOW }} />
       <div ref={gap} className={layer} style={{ background: "#080808" }} />
       <div ref={field} className={layer} style={{ background: MEDAL_YELLOW }} />
+      {/* Laid out at the final size: drawn at full resolution, only ever scaled down. */}
       <img
         ref={emblem}
         src={HERO_EMBLEM_HD}
         alt=""
         draggable={false}
+        decoding="sync"
         className="absolute select-none"
         style={{
-          left: e.left,
-          top: e.top,
-          width: e.width,
-          height: e.height,
+          left: geo.cx - geo.w / 2,
+          top: geo.cy - geo.h / 2,
+          width: geo.w,
+          height: geo.h,
           transformOrigin: "50% 50%",
-          willChange: "transform, opacity, filter",
         }}
       />
+      <div ref={curtain} className="absolute inset-0 opacity-0" style={{ background: MEDAL_YELLOW }}>
+        <div
+          className="absolute inset-x-0"
+          style={{
+            bottom: -(geo.h * (MEDAL_RIM + MEDAL_GAP)),
+            height: geo.h * (MEDAL_RIM + MEDAL_GAP),
+            background: `linear-gradient(#080808 0 ${(MEDAL_GAP / (MEDAL_RIM + MEDAL_GAP)) * 100}%, ${MEDAL_YELLOW} 0)`,
+          }}
+        />
+      </div>
     </div>
   );
 }

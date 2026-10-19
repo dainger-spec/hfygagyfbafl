@@ -370,6 +370,11 @@ declare global {
         setBackgroundColor?: (color: string) => void;
         setBottomBarColor?: (color: string) => void;
         disableVerticalSwipes?: () => void;
+        HapticFeedback?: {
+          impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
+          notificationOccurred?: (type: "error" | "success" | "warning") => void;
+          selectionChanged?: () => void;
+        };
         safeAreaInset?: { top?: number; bottom?: number; left?: number; right?: number };
         contentSafeAreaInset?: { top?: number; bottom?: number; left?: number; right?: number };
         onEvent?: (event: string, cb: () => void) => void;
@@ -392,5 +397,24 @@ declare global {
       first_name?: string;
       last_name?: string;
     };
+  }
+}
+
+// Phone vibration: Telegram's haptics (iPhone and Android), else the browser's vibrate().
+export function haptic(style: "light" | "medium" | "heavy" | "rigid" | "soft") {
+  try {
+    const hf = window.Telegram?.WebApp?.HapticFeedback;
+    if (hf?.impactOccurred && window.Telegram?.WebApp?.isVersionAtLeast?.("6.1")) {
+      hf.impactOccurred(style);
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ms = { light: 10, soft: 14, medium: 20, rigid: 24, heavy: 32 }[style];
+    navigator.vibrate?.(ms);
+  } catch {
+    /* no vibration */
   }
 }
