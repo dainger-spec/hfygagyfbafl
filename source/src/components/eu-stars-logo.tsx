@@ -18,10 +18,15 @@ export function EuStarsLogo({
   className,
   size = 64,
   title,
+  spin = false,
+  emblem = false,
 }: {
   className?: string;
   size?: number;
   title?: string;
+  // Only the ring of stars turns; the emblem in the middle stays still.
+  spin?: boolean;
+  emblem?: boolean;
 }) {
   const stars = Array.from({ length: 12 }, (_, i) => {
     const angle = ((i * 30 - 90) * Math.PI) / 180;
@@ -31,21 +36,43 @@ export function EuStarsLogo({
     };
   });
 
-  return (
+  const ring = (
     <svg
       viewBox="0 0 100 100"
       width={size}
       height={size}
-      className={cn("text-gold", className)}
-      role={title ? "img" : "presentation"}
-      aria-hidden={title ? undefined : true}
-      aria-label={title}
+      className={cn("text-gold", spin && "epb-spin-slow", !emblem && className)}
+      role={title && !emblem ? "img" : "presentation"}
+      aria-hidden={title && !emblem ? undefined : true}
+      aria-label={emblem ? undefined : title}
     >
-      {title ? <title>{title}</title> : null}
+      {title && !emblem ? <title>{title}</title> : null}
       {stars.map((s, i) => (
         <polygon key={i} points={starPoints(s.cx, s.cy)} fill="currentColor" />
       ))}
     </svg>
+  );
+  if (!emblem) return ring;
+  return (
+    <span
+      className={cn("relative inline-block shrink-0", className)}
+      style={{ width: size, height: size }}
+      role={title ? "img" : undefined}
+      aria-label={title}
+    >
+      {ring}
+      {/* Fits inside the ring of stars, like the brand artwork. */}
+      <picture>
+        <source srcSet="/brand/emblem.webp" type="image/webp" />
+        <img
+          src="/brand/emblem.png"
+          alt=""
+          aria-hidden
+          draggable={false}
+          className="pointer-events-none absolute left-1/2 top-1/2 h-[53%] w-auto -translate-x-1/2 -translate-y-1/2 select-none"
+        />
+      </picture>
+    </span>
   );
 }
 

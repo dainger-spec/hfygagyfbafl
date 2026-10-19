@@ -170,7 +170,7 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
   }
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
-      <EuStarsLogo size={104} title="Europe Private Blacklist" className="epb-spin-slow" />
+      <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem />
       <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
         Europe Private
         <span className="block text-gold">Blacklist</span>
@@ -191,7 +191,7 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
 function AccountLoading({ locale }: { locale: Locale }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
-      <EuStarsLogo size={96} title="Europe Private Blacklist" className="epb-spin-slow" />
+      <EuStarsLogo size={120} title="Europe Private Blacklist" spin emblem />
       <p className="mt-6 font-display text-lg font-bold">{t(locale, "loadingTitle")}</p>
       <p className="mt-2 max-w-xs text-sm leading-relaxed text-muted">{t(locale, "loadingText")}</p>
     </div>
@@ -219,7 +219,7 @@ function Home({
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <EuStarsLogo size={104} title="Europe Private Blacklist" className="epb-spin-slow mt-5" />
+        <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
         <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
           Europe Private
           <span className="block text-gold">Blacklist</span>
