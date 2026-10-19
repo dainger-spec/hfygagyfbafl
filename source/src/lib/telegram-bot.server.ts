@@ -251,6 +251,11 @@ type PendingPost = {
   status?: "pending" | "published" | "rejected";
   // Set only when the post actually reached the EPB channel.
   channelPosted?: boolean;
+  // The channel and message ids of that post, to verify it still exists.
+  channelChatId?: string;
+  channelMsgIds?: number[];
+  // The arbiter removed this complaint from the counterparty check.
+  removedFromCheck?: boolean;
   // Post body edited by an arbiter (Telegram HTML); replaces the summary in the post.
   postHtml?: string;
   // Where the review message with the buttons is, so the admin panel can point to it.
@@ -1156,6 +1161,41 @@ function snippetAround(text: string, needle: string): string {
   return (from > 0 ? "…" : "") + flat.slice(from, from + 180).trim() + (from + 180 < flat.length ? "…" : "");
 }
 
+// Whether a complaint's channel post was deleted. Only the user account can check this;
+// without it we cannot know, so we keep showing the complaint. Result cached briefly.
+const deletedCache = new Map<string, { at: number; deleted: boolean }>();
+
+type UserClientFull = UserClient & { getMessages: (ref: unknown, opts: { ids: number[] }) => Promise<unknown[]> };
+
+async function channelPostDeleted(rec: PendingPost): Promise<boolean> {
+  if (!userSession() || Date.now() < userBlockedUntil) return false;
+  const ids = rec.channelMsgIds || [];
+  const chat = rec.channelChatId || bindings.channelId || "";
+  if (!ids.length || !chat) return false;
+  const cacheKey = `${chat}:${ids.join(",")}`;
+  const cached = deletedCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 5 * 60_000) return cached.deleted;
+  try {
+    const { client } = await userbot();
+    const peer = await client.getInputEntity(chat);
+    const msgs = (await withTimeout(
+      (client as unknown as UserClientFull).getMessages(peer, { ids }),
+      12_000,
+      "getMessages timeout",
+    )) as ({ id?: number; className?: string } | undefined)[];
+    // A deleted message comes back as empty / without a real id.
+    const anyAlive = (msgs || []).some((m) => m && m.id && m.className !== "MessageEmpty");
+    const deleted = !anyAlive;
+    deletedCache.set(cacheKey, { at: Date.now(), deleted });
+    return deleted;
+  } catch (err) {
+    const wait = floodSeconds(err);
+    if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
+    else if (!(err as { errorMessage?: string })?.errorMessage) dropUserbot();
+    return false;
+  }
+}
+
 // Full-history search of one channel for a query, via the user account.
 async function userSearchChannel(channel: CheckChannel, query: string, needle: string): Promise<CheckHit[]> {
   if (Date.now() < userBlockedUntil) return [];
@@ -1838,15 +1878,25 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
   const parsed = parseTelegramInput(input);
   const uname = parsed.username.replace(/^@/, "").toLowerCase();
   const id = parsed.id;
-  const epb: CheckResult["epb"] = [];
+  const matched: { key: string; rec: PendingPost }[] = [];
   for (const [key, rec] of Object.entries(pendingPosts)) {
-    // Only approved complaints that actually went out to the EPB channel.
-    if (rec.status !== "published" || !rec.channelPosted) continue;
+    // Only approved complaints that actually went out to the EPB channel and were not removed.
+    if (rec.status !== "published" || !rec.channelPosted || rec.removedFromCheck) continue;
     const accounts = pendingAccounts(rec);
     const match =
       (uname && accounts.some((a) => a.username.replace(/^@/, "").toLowerCase() === uname)) ||
       (id && accounts.some((a) => a.id === id));
-    if (!match) continue;
+    if (match) matched.push({ key, rec });
+  }
+  // With a connected account, drop complaints whose channel post was deleted.
+  const epb: CheckResult["epb"] = [];
+  for (const { key, rec } of matched) {
+    if (await channelPostDeleted(rec)) {
+      rec.removedFromCheck = true;
+      savePending();
+      continue;
+    }
+    const accounts = pendingAccounts(rec);
     epb.push({
       id: key,
       accounts: accounts.map((a) => (a.username ? `@${a.username.replace(/^@/, "")}` : a.id ? `ID ${a.id}` : "")).filter(Boolean).join(", "),
@@ -2931,6 +2981,8 @@ async function publishFromMessage(
   if (key && pendingPosts[key]) {
     pendingPosts[key]!.status = "published";
     pendingPosts[key]!.channelPosted = true;
+    pendingPosts[key]!.channelChatId = channelPost.chatId;
+    pendingPosts[key]!.channelMsgIds = channelPost.messageIds;
   } else {
     // Old message without a stored record: remember it so it can't be posted again.
     pendingPosts[lock] = {
@@ -3045,6 +3097,7 @@ type ApplySession = {
 const sessions = new Map<string, ApplySession>();
 const channelSetup = new Set<string>();
 const checkChannelSetup = new Set<string>();
+const removeFromCheckSetup = new Set<string>();
 
 function gcSessions() {
   const now = Date.now();
@@ -4665,9 +4718,48 @@ function adminCheck(): AdminView {
     { text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `adm:ccdel:${c.id}` },
   ]);
   keyboard.push([{ text: "🔌 Проверить аккаунт", callback_data: "adm:ccping" }]);
+  keyboard.push([{ text: "🧹 Убрать жалобу из блеклиста", callback_data: "adm:ccrm" }]);
   keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
   keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
   return { text: lines.join("\n"), keyboard };
+}
+
+async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string) {
+  removeFromCheckSetup.delete(String(arbiterChatId));
+  const text = raw.trim();
+  let removed = 0;
+  const epbId = text.match(/\b(EPB-[A-Za-z0-9]+)\b/i)?.[1];
+  if (epbId) {
+    const rec = pendingPosts[epbId] || pendingPosts[epbId.toUpperCase()];
+    if (rec && !rec.removedFromCheck) {
+      rec.removedFromCheck = true;
+      removed = 1;
+    }
+  } else {
+    const parsed = parseTelegramInput(text);
+    const uname = parsed.username.replace(/^@/, "").toLowerCase();
+    const id = parsed.id;
+    if (!uname && !id) {
+      await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Не понял. Пришлите EPB-… или @username / ID." });
+      return;
+    }
+    for (const rec of Object.values(pendingPosts)) {
+      if (rec.removedFromCheck) continue;
+      const accounts = pendingAccounts(rec);
+      const hit =
+        (uname && accounts.some((a) => a.username.replace(/^@/, "").toLowerCase() === uname)) ||
+        (id && accounts.some((a) => a.id === id));
+      if (hit) {
+        rec.removedFromCheck = true;
+        removed += 1;
+      }
+    }
+  }
+  if (removed) savePending();
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: removed ? `Убрано из блеклиста: ${removed}. В проверке контрагента больше не показывается.` : "Ничего подходящего не нашёл.",
+  });
 }
 
 async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
@@ -4830,6 +4922,15 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await tgSoft("sendMessage", {
       chat_id: chatId,
       text: st.ok ? `Аккаунт подключён: ${escapeHtml(st.name || "аккаунт")}` : `Аккаунт не подключён: ${escapeHtml(st.error || "ошибка")}`,
+    });
+    return;
+  }
+  if (action === "ccrm") {
+    removeFromCheckSetup.add(String(chatId));
+    await answer("Пришлите номер жалобы или аккаунт");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите номер жалобы (EPB-…) либо @username / ID аккаунта, который нужно убрать из блеклиста (поиска). Жалоба останется в истории, но перестанет находиться в проверке контрагента.",
     });
     return;
   }
@@ -5325,6 +5426,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
+  if (isOfficialArbiterChat(msg.chat.id) && removeFromCheckSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyRemoveFromCheck(msg.chat.id, msg.text);
+    return;
+  }
   if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyCheckChannel(msg.chat.id, msg.text);
     return;
