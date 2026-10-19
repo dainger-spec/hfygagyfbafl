@@ -109,5 +109,5 @@ export const checkCounterparty = createServerFn({ method: "POST" })
     const bot = await import("@/lib/telegram-bot.server");
     const gate = bot.allowCheck(data.initData);
     if (!gate.ok) return { ok: false as const, error: gate.error };
-    return { ok: true as const, result: bot.checkCounterparty(data.input) };
+    return { ok: true as const, result: await bot.checkCounterparty(data.input) };
   });

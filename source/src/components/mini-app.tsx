@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
@@ -41,15 +41,7 @@ export function MiniApp({
   const setIdentity = useBlacklistStore((s) => s.setIdentity);
   const locale = useBlacklistStore((s) => s.locale);
 
-  // The emblem animation now plays once, on entry; the button just opens the form.
-  const [intro, setIntro] = useState<HeroStart | null>(null);
-  const [preIntro, setPreIntro] = useState(false);
-  const introStarted = useRef(false);
-  const [enterForm, setEnterForm] = useState(false);
-  const openComplaint = useCallback(() => {
-    setEnterForm(true);
-    onPage("apply");
-  }, [onPage]);
+  const openComplaint = useCallback(() => onPage("apply"), [onPage]);
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
   const openCheck = useCallback(() => onPage("check"), [onPage]);
@@ -87,28 +79,6 @@ export function MiniApp({
   const showLang = ready && langPicked === false;
   const showApp = ready && langPicked === true;
 
-  // Entry animation: the emblem returns into the ring of stars and the black clears.
-  useLayoutEffect(() => {
-    if (!showApp || page !== "home" || introStarted.current) return;
-    introStarted.current = true;
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (reduce || typeof Element.prototype.animate !== "function") return;
-    setPreIntro(true); // cover the home screen before it is painted
-    const img = new Image();
-    img.src = HERO_EMBLEM_HD;
-    void (img.decode?.() ?? Promise.resolve())
-      .catch(() => {})
-      .then(() =>
-        requestAnimationFrame(() => {
-          const start = measureHero();
-          if (start) {
-            haptic("light");
-            setIntro(start);
-          }
-          setPreIntro(false);
-        }),
-      );
-  }, [showApp, page]);
 
   return (
     <div
@@ -142,17 +112,12 @@ export function MiniApp({
           <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} />
         ) : null}
         {showApp && page === "apply" ? (
-          <div
-            className={cn("flex min-h-0 flex-1 flex-col", enterForm && "epb-page-enter")}
-            onAnimationEnd={() => setEnterForm(false)}
-          >
-            <ApplyForm
-              onSubmitted={(msg) => {
-                setNotice(msg ?? "");
-                onPage("done");
-              }}
-            />
-          </div>
+          <ApplyForm
+            onSubmitted={(msg) => {
+              setNotice(msg ?? "");
+              onPage("done");
+            }}
+          />
         ) : null}
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
         {showApp && page === "check" ? <CheckCounterparty /> : null}
@@ -166,162 +131,6 @@ export function MiniApp({
           />
         ) : null}
       </div>
-      {preIntro ? <div className="absolute inset-0 z-[55]" style={{ background: "#080808" }} /> : null}
-      {intro ? <IntroTransition start={intro} onDone={() => setIntro(null)} /> : null}
-    </div>
-  );
-}
-
-type HeroStart = { emblem: DOMRect; ring: DOMRect; angle: number; source: HTMLElement };
-
-function measureHero(): HeroStart | null {
-  const source = document.querySelector<HTMLElement>("[data-epb-hero]");
-  const img = source?.querySelector("img");
-  const svg = source?.querySelector("svg");
-  if (!source || !img || !svg) return null;
-  const emblem = img.getBoundingClientRect();
-  // The spinning svg's box grows while rotated: use the un-rotated wrapper for the ring.
-  const ring = source.firstElementChild!.getBoundingClientRect();
-  if (!emblem.width || !ring.width) return null;
-  // Current angle of the spinning stars, so the flying ring starts exactly where it is.
-  let angle = 0;
-  try {
-    const m = new DOMMatrixReadOnly(getComputedStyle(svg).transform);
-    angle = (Math.atan2(m.b, m.a) * 180) / Math.PI;
-  } catch {
-    /* no transform */
-  }
-  return { emblem, ring, angle, source };
-}
-
-const HERO_EMBLEM_HD = "/brand/emblem-hd.webp";
-// Native height of emblem-hd.webp: the emblem never grows past it on screen.
-const HERO_EMBLEM_PX = 746;
-
-// Entry animation (reverse of the old complaint transition): the screen starts black with
-// the emblem large in the centre; the emblem flies back into the ring of stars (the logo
-// spot) and shrinks, the stars fade in, and the black clears to reveal the home screen.
-// The emblem is laid out at the logo size and starts scaled up from there, so the browser
-// draws it at full resolution and only ever shrinks it.
-function IntroTransition({ start, onDone }: { start: HeroStart; onDone: () => void }) {
-  const shade = useRef<HTMLDivElement>(null);
-  const glow = useRef<HTMLDivElement>(null);
-  const ring = useRef<HTMLDivElement>(null);
-  const emblem = useRef<HTMLImageElement>(null);
-  const done = useRef(onDone);
-  done.current = onDone;
-
-  // Final "big centre" size (same sharpness cap as before).
-  const [geo] = useState(() => {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const dpr = window.devicePixelRatio || 1;
-    const e = start.emblem;
-    const h = Math.max(e.height, Math.min(vh * 0.42, vw * 0.7 * (e.height / e.width), HERO_EMBLEM_PX / dpr));
-    return { h, cx: vw / 2, cy: vh * 0.45 };
-  });
-
-  useLayoutEffect(() => {
-    const { h, cx, cy } = geo;
-    const e = start.emblem;
-    const big = h / e.height; // scale from the logo size up to the big centred emblem
-    const dx = cx - (e.left + e.width / 2);
-    const dy = cy - (e.top + e.height / 2);
-    const land = "cubic-bezier(.2,.8,.2,1)";
-    const soft = "cubic-bezier(.45,0,.55,1)";
-    const DURATION = 1300;
-    const timing = { duration: DURATION, easing: "linear" as const, fill: "forwards" as const };
-    start.source.style.visibility = "hidden";
-
-    const anims = [
-      // Black screen clears in the second half.
-      shade.current!.animate(
-        [
-          { opacity: 1 },
-          { opacity: 1, offset: 0.42, easing: soft },
-          { opacity: 0, offset: 0.82 },
-          { opacity: 0 },
-        ],
-        timing,
-      ),
-      // Emblem: big in the centre -> back into the ring, shrinking.
-      emblem.current!.animate(
-        [
-          { transform: `translate(${dx}px,${dy}px) scale(${big})`, easing: land },
-          { transform: `translate(${dx}px,${dy}px) scale(${big})`, offset: 0.12, easing: land },
-          { transform: "translate(0px,0px) scale(1)", offset: 0.74 },
-          { transform: "translate(0px,0px) scale(1)" },
-        ],
-        timing,
-      ),
-      // Golden halo fades as the emblem leaves the centre.
-      glow.current!.animate(
-        [
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, easing: soft },
-          { transform: "translate(-50%,-50%) scale(1)", opacity: 0.85, offset: 0.12 },
-          { transform: "translate(-50%,-50%) scale(.6)", opacity: 0, offset: 0.5 },
-          { transform: "translate(-50%,-50%) scale(.6)", opacity: 0 },
-        ],
-        timing,
-      ),
-      // Stars settle into place and fade in near the end.
-      ring.current!.animate(
-        [
-          { transform: `rotate(${start.angle - 26}deg)`, opacity: 0 },
-          { transform: `rotate(${start.angle - 26}deg)`, opacity: 0, offset: 0.5 },
-          { transform: `rotate(${start.angle}deg)`, opacity: 1, offset: 0.84, easing: land },
-          { transform: `rotate(${start.angle}deg)`, opacity: 1 },
-        ],
-        timing,
-      ),
-    ];
-
-    let cancelled = false;
-    const landTick = shade.current!.animate([], { duration: DURATION * 0.74 });
-    void landTick.finished.then(() => !cancelled && haptic("soft")).catch(() => {});
-    void Promise.all(anims.map((a) => a.finished))
-      .then(() => !cancelled && done.current())
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      landTick.cancel();
-      anims.forEach((a) => a.cancel());
-      start.source.style.visibility = "";
-    };
-  }, [start, geo]);
-
-  const rr = start.ring;
-  const e = start.emblem;
-  return (
-    <div className="pointer-events-none fixed inset-0 z-[60] overflow-hidden" aria-hidden>
-      <div ref={shade} className="absolute inset-0" style={{ background: "#080808" }} />
-      <div
-        ref={glow}
-        className="absolute rounded-full opacity-0"
-        style={{
-          left: geo.cx,
-          top: geo.cy,
-          width: geo.h * 2.2,
-          height: geo.h * 2.2,
-          background: "radial-gradient(circle, rgba(254,208,1,.30) 0%, rgba(254,208,1,.10) 40%, rgba(254,208,1,0) 70%)",
-        }}
-      />
-      <div
-        ref={ring}
-        className="absolute opacity-0"
-        style={{ left: rr.left, top: rr.top, width: rr.width, height: rr.height, transformOrigin: "50% 50%" }}
-      >
-        <EuStarsLogo size={rr.width} />
-      </div>
-      <img
-        ref={emblem}
-        src={HERO_EMBLEM_HD}
-        alt=""
-        draggable={false}
-        decoding="sync"
-        className="absolute select-none"
-        style={{ left: e.left, top: e.top, width: e.width, height: e.height, transformOrigin: "50% 50%" }}
-      />
     </div>
   );
 }
@@ -408,12 +217,6 @@ function Home({
   onCheck: () => void;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
-  // Load the sharp emblem in advance, so the transition never shows a blurry frame.
-  useEffect(() => {
-    const img = new Image();
-    img.src = HERO_EMBLEM_HD;
-    void img.decode?.().catch(() => {});
-  }, []);
   const handle = identity.username
     ? `@${identity.username}`
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
@@ -423,9 +226,7 @@ function Home({
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <div data-epb-hero className="mt-5">
-          <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem />
-        </div>
+        <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
         <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
           Europe Private
           <span className="block text-gold">Blacklist</span>

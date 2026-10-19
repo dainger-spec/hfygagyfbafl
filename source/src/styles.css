@@ -98,19 +98,3 @@
 .epb-spin-slow {
   animation: epb-spin-slow 16s linear infinite;
 }
-
-/* The complaint form arriving after the emblem transition. */
-@keyframes epb-page-enter {
-  from {
-    opacity: 0;
-    transform: translateY(22px) scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.epb-page-enter {
-  animation: epb-page-enter 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
