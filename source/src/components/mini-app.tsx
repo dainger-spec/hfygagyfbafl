@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, LoaderCircle } from "lucide-react";
+import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   bootTelegramWebApp,
   CHANNEL_URL,
@@ -12,13 +13,13 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { hasSavedLocale, t, type Locale } from "@/lib/i18n";
 
-export type MiniPage = "home" | "apply" | "history" | "done" | "owners";
+export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check";
 
 export function MiniApp({
   page,
@@ -56,6 +57,7 @@ export function MiniApp({
   }, [hero, onPage]);
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
+  const openCheck = useCallback(() => onPage("check"), [onPage]);
 
   useEffect(() => {
     rehydrateBlacklistStore();
@@ -119,7 +121,7 @@ export function MiniApp({
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
-          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} />
+          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} />
         ) : null}
         {showApp && page === "apply" ? (
           <div
@@ -135,6 +137,7 @@ export function MiniApp({
           </div>
         ) : null}
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
+        {showApp && page === "check" ? <CheckCounterparty /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "done" ? (
           <Done
@@ -470,11 +473,13 @@ function Home({
   onComplaint,
   onHistory,
   onOwners,
+  onCheck,
 }: {
   identity: { username: string; firstName?: string; telegramId: string };
   onComplaint: () => void;
   onHistory: () => void;
   onOwners: () => void;
+  onCheck: () => void;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
   // Load the sharp emblem in advance, so the transition never shows a blurry frame.
@@ -509,6 +514,9 @@ function Home({
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
           <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
             {t(locale, "fileComplaint")}
+          </Button>
+          <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
+            {t(locale, "checkBtn")}
           </Button>
           <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onHistory} disabled={!canUse}>
             {t(locale, "history")}
@@ -599,6 +607,144 @@ function History({ telegramId }: { telegramId: string }) {
         ) : (
           items.map((item) => <HistoryCard key={item.id} item={item} />)
         )}
+      </div>
+    </div>
+  );
+}
+
+type CheckData = {
+  query: { username: string; id: string };
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
+  channels: { channelTitle: string; link: string; date: number; snippet: string }[];
+};
+
+function CheckCounterparty() {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [value, setValue] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState<CheckData | null>(null);
+
+  async function run() {
+    const input = value.trim();
+    if (!input) {
+      setError(t(locale, "checkEmptyInput"));
+      return;
+    }
+    haptic("light");
+    setError("");
+    setLoading(true);
+    setData(null);
+    try {
+      const res = await checkCounterparty({ data: { input, initData: telegramInitData() } });
+      if (res.ok) {
+        setData(res.result as CheckData);
+        haptic(res.result.epb.length || res.result.channels.length ? "heavy" : "soft");
+      } else {
+        setError(t(locale, "checkFail"));
+      }
+    } catch {
+      setError(t(locale, "checkFail"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const found = data && (data.epb.length > 0 || data.channels.length > 0);
+  const fmtDate = (ms: number) =>
+    ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <div className="space-y-1">
+          <h2 className="font-display text-xl font-bold">{t(locale, "checkTitle")}</h2>
+          <p className="text-sm text-muted">{t(locale, "checkHint")}</p>
+        </div>
+        <div className="flex gap-2">
+          <Input
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value.slice(0, 200));
+              setError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void run();
+            }}
+            placeholder={t(locale, "checkPlaceholder")}
+            autoComplete="off"
+            autoCapitalize="none"
+          />
+          <Button className="shrink-0 rounded-xl px-4" onClick={() => void run()} disabled={loading}>
+            {loading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+          </Button>
+        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+        {loading ? (
+          <p className="flex items-center gap-2 py-10 text-sm text-muted">
+            <LoaderCircle className="size-4 animate-spin text-gold" />
+            {t(locale, "checkChecking")}
+          </p>
+        ) : null}
+
+        {data && !loading ? (
+          found ? (
+            <div className="space-y-4">
+              {data.epb.length ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-bold text-danger">
+                    <ShieldAlert className="size-4" />
+                    {t(locale, "checkInEpb")}
+                  </div>
+                  {data.epb.map((e) => (
+                    <div
+                      key={e.id}
+                      className="rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                    >
+                      <p className="font-semibold">{e.accounts || e.id}</p>
+                      <p className="mt-0.5 text-xs text-muted">
+                        {t(locale, "checkEpbItem", { id: e.id, amount: e.amount, currency: e.currency })}
+                        {fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : ""}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {data.channels.length ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
+                    <ShieldAlert className="size-4" />
+                    {t(locale, "checkInChannels")}
+                  </div>
+                  {data.channels.map((c, i) => (
+                    <a
+                      key={i}
+                      href={c.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-semibold">{c.channelTitle}</p>
+                        <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
+                          {t(locale, "checkOpen")} <ExternalLink className="size-3" />
+                        </span>
+                      </div>
+                      {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
+                      {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-3 py-10 text-center">
+              <ShieldCheck className="size-10 text-ok" />
+              <p className="font-display text-lg font-bold">{t(locale, "checkClean")}</p>
+              <p className="max-w-xs text-sm leading-relaxed text-muted">{t(locale, "checkCleanHint")}</p>
+            </div>
+          )
+        ) : null}
       </div>
     </div>
   );

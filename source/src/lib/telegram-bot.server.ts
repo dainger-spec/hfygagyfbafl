@@ -85,6 +85,7 @@ type Bindings = {
   cards?: Partial<Record<"welcome" | "submitted" | "published", string>>;
   cardStamp?: string;
   relayChats?: RelayChat[];
+  checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -755,7 +756,7 @@ function channelCandidates(): string[] {
 }
 
 async function chatReachable(id: string) {
-  return tgSoft<{ id: number; title?: string; type: string }>("getChat", { chat_id: id });
+  return tgSoft<{ id: number; title?: string; type: string; username?: string }>("getChat", { chat_id: id });
 }
 
 function refreshBindings() {
@@ -1540,6 +1541,152 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
       createdAt: c.createdAt || 0,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// ---------- Counterparty check: EPB blacklist + configured channels ----------
+
+type CheckChannel = { id: string; title?: string; username?: string; addedAt: number };
+type CheckHit = {
+  channelId: string;
+  channelTitle: string;
+  username?: string;
+  messageId: number;
+  link: string;
+  date: number;
+  snippet: string;
+};
+
+const CHECK_INDEX_PATH = join(DATA_DIR, "telegram-check-index.json");
+// token (lowercase @username or numeric id) -> posts that mention it.
+const checkIndex: Record<string, CheckHit[]> = readJson<Record<string, CheckHit[]>>(CHECK_INDEX_PATH) || {};
+
+let checkIndexTimer: ReturnType<typeof setTimeout> | null = null;
+function saveCheckIndex() {
+  if (checkIndexTimer) return;
+  checkIndexTimer = setTimeout(() => {
+    checkIndexTimer = null;
+    try {
+      writeJsonAtomic(CHECK_INDEX_PATH, checkIndex);
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+}
+
+function checkChannels(): CheckChannel[] {
+  return bindings.checkChannels || [];
+}
+
+function isCheckChannel(id: string | number | undefined): CheckChannel | undefined {
+  if (id == null) return undefined;
+  return checkChannels().find((c) => sameChat(c.id, id));
+}
+
+// Pull every telegram handle and numeric id out of a post, as search tokens.
+function tokensFromText(text: string): { usernames: string[]; ids: string[] } {
+  const usernames = new Set<string>();
+  const ids = new Set<string>();
+  for (const m of text.matchAll(/@([A-Za-z][A-Za-z0-9_]{3,31})/g)) usernames.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})/gi)) usernames.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/(?:tg:\/\/user\?id=|\bid[:\s=]*)(\d{5,15})/gi)) ids.add(m[1]!);
+  for (const m of text.matchAll(/\b(\d{7,15})\b/g)) ids.add(m[1]!);
+  return { usernames: [...usernames], ids: [...ids] };
+}
+
+function messageLink(channel: CheckChannel, messageId: number): string {
+  if (channel.username) return `https://t.me/${channel.username.replace(/^@/, "")}/${messageId}`;
+  const internal = String(channel.id).replace(/^-100/, "").replace(/^-/, "");
+  return `https://t.me/c/${internal}/${messageId}`;
+}
+
+function addCheckHit(token: string, hit: CheckHit) {
+  const list = checkIndex[token] || (checkIndex[token] = []);
+  if (list.some((h) => sameChat(h.channelId, hit.channelId) && h.messageId === hit.messageId)) return;
+  list.unshift(hit);
+  if (list.length > 25) list.length = 25;
+}
+
+// A post arrived in a configured check channel: index its handles and ids.
+function indexCheckPost(channel: CheckChannel, messageId: number, text: string, date: number) {
+  const body = (text || "").slice(0, 4096);
+  if (!body.trim()) return;
+  const { usernames, ids } = tokensFromText(body);
+  if (!usernames.length && !ids.length) return;
+  const snippet = body.replace(/\s+/g, " ").trim().slice(0, 160);
+  const hit: CheckHit = {
+    channelId: String(channel.id),
+    channelTitle: channel.title || "канал",
+    messageId,
+    link: messageLink(channel, messageId),
+    date: date * 1000 || Date.now(),
+    snippet,
+  };
+  for (const u of usernames) addCheckHit(`@${u}`, { ...hit, username: u });
+  for (const id of ids) addCheckHit(id, hit);
+  // Keep the whole index bounded.
+  const keys = Object.keys(checkIndex);
+  if (keys.length > 200000) for (const k of keys.slice(0, keys.length - 180000)) delete checkIndex[k];
+  saveCheckIndex();
+}
+
+function removeCheckChannelFromIndex(channelId: string) {
+  for (const [token, list] of Object.entries(checkIndex)) {
+    const kept = list.filter((h) => !sameChat(h.channelId, channelId));
+    if (kept.length) checkIndex[token] = kept;
+    else delete checkIndex[token];
+  }
+  saveCheckIndex();
+}
+
+export type CheckResult = {
+  query: { username: string; id: string };
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
+  channels: CheckHit[];
+};
+
+// Search the EPB blacklist (published complaints) and the configured channels.
+export function checkCounterparty(input: string): CheckResult {
+  const parsed = parseTelegramInput(input);
+  const uname = parsed.username.replace(/^@/, "").toLowerCase();
+  const id = parsed.id;
+  const epb: CheckResult["epb"] = [];
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    if (rec.status !== "published") continue;
+    const accounts = pendingAccounts(rec);
+    const match =
+      (uname && accounts.some((a) => a.username.replace(/^@/, "").toLowerCase() === uname)) ||
+      (id && accounts.some((a) => a.id === id));
+    if (!match) continue;
+    epb.push({
+      id: key,
+      accounts: accounts.map((a) => (a.username ? `@${a.username.replace(/^@/, "")}` : a.id ? `ID ${a.id}` : "")).filter(Boolean).join(", "),
+      amount: rec.amount || "",
+      currency: rec.currency || "",
+      date: rec.createdAt || 0,
+    });
+  }
+  epb.sort((a, b) => b.date - a.date);
+
+  const hits: CheckHit[] = [];
+  const seen = new Set<string>();
+  for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) {
+    for (const h of checkIndex[token] || []) {
+      const key = `${chatIdKey(h.channelId)}:${h.messageId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push(h);
+    }
+  }
+  hits.sort((a, b) => b.date - a.date);
+  return { query: { username: uname, id }, epb, channels: hits.slice(0, 30) };
+}
+
+export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
+  const user = verifyTelegramInitData(initData);
+  if (!user) return { ok: false, error: "telegram auth required" };
+  if (tooMany(`check:${user.id}`, 40, 60_000)) return { ok: false, error: "too many" };
+  if (tooMany("check:global", 1500, 60_000)) return { ok: false, error: "busy" };
+  return { ok: true, userId: user.id };
 }
 
 function packCaption(full: string, _fallback = "") {
@@ -2638,9 +2785,19 @@ type TgMessage = {
   media_group_id?: string;
 };
 
+type TgChannelPost = {
+  message_id: number;
+  chat: { id: number; type: string; title?: string; username?: string };
+  text?: string;
+  caption?: string;
+  date?: number;
+};
+
 type TgUpdate = {
   update_id: number;
   message?: TgMessage;
+  channel_post?: TgChannelPost;
+  edited_channel_post?: TgChannelPost;
   my_chat_member?: {
     chat: { id: number; type: string; title?: string };
     from?: TgUser;
@@ -2680,6 +2837,7 @@ type ApplySession = {
 
 const sessions = new Map<string, ApplySession>();
 const channelSetup = new Set<string>();
+const checkChannelSetup = new Set<string>();
 
 function gcSessions() {
   const now = Date.now();
@@ -4142,6 +4300,7 @@ function adminHome(): AdminView {
       ],
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
+      [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
         { text: "✖ Закрыть", callback_data: "adm:x" },
@@ -4283,6 +4442,66 @@ async function adminShowComplaint(arbiterChatId: number | string, key: string) {
   return true;
 }
 
+function adminCheck(): AdminView {
+  const list = checkChannels();
+  const lines = [
+    "<b>Каналы для проверки контрагента</b>",
+    `Подключено: ${list.length}`,
+    "",
+    "Посты из этих каналов индексируются, и по ним идёт поиск в разделе «Проверка контрагента» мини-приложения.",
+    "Бот должен быть участником или админом канала. Индексируются посты с момента подключения (прошлые Telegram ботам читать не даёт).",
+  ];
+  const keyboard: AdminView["keyboard"] = list.map((c) => [
+    { text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `adm:ccdel:${c.id}` },
+  ]);
+  keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return { text: lines.join("\n"), keyboard };
+}
+
+async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
+  checkChannelSetup.delete(String(arbiterChatId));
+  const ref = await parseChannelRef(raw);
+  if (!ref) {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Пришлите ID канала (-100…) или @username." });
+    return;
+  }
+  const chat = await chatReachable(ref);
+  if (!chat) {
+    await tgSoft("sendMessage", {
+      chat_id: arbiterChatId,
+      text: "Не вижу этот канал. Сначала добавьте бота в канал (участником или админом), потом пришлите ID ещё раз.",
+    });
+    return;
+  }
+  if (chat.type !== "channel" && chat.type !== "supergroup") {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Это не канал и не супергруппа." });
+    return;
+  }
+  const id = String(chat.id);
+  if (isOfficialChannel(id) || isOfficialArbiterChat(id)) {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Это служебный канал бота, добавлять его не нужно." });
+    return;
+  }
+  const list = [...checkChannels()];
+  if (!list.some((c) => sameChat(c.id, id))) {
+    list.push({ id, title: chat.title, username: chat.username, addedAt: Date.now() });
+    bindings.checkChannels = list.slice(-100);
+    saveBindings();
+  }
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: [
+      "Канал подключён для проверки.",
+      escapeHtml(chat.title || id),
+      `ID: <code>${escapeHtml(id)}</code>`,
+      "",
+      "Новые посts этого канала будут попадать в поиск.",
+    ].join("\n").replace("посts", "посты"),
+    parse_mode: "HTML",
+  });
+}
+
 function adminChannel(): AdminView {
   return {
     text: [
@@ -4381,6 +4600,29 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     const shown = (pendingPosts[key]?.status || "pending") === "pending" && (await adminShowComplaint(chatId, key));
     await answer(shown ? "Заявка отправлена ниже" : "Заявка уже обработана", !shown);
     if (!shown) await renderAdmin(cb, adminPendingList(0));
+    return;
+  }
+  if (action === "cc") {
+    await answer();
+    await renderAdmin(cb, adminCheck());
+    return;
+  }
+  if (action === "ccadd") {
+    checkChannelSetup.add(String(chatId));
+    await answer("Пришлите ID канала следующим сообщением");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите ID канала (-100…) или @username для проверки. Бот должен быть в этом канале.",
+    });
+    return;
+  }
+  if (action === "ccdel") {
+    const target = rest.join(":");
+    bindings.checkChannels = checkChannels().filter((c) => !sameChat(c.id, target));
+    saveBindings();
+    removeCheckChannelFromIndex(target);
+    await answer("Канал убран");
+    await renderAdmin(cb, adminCheck());
     return;
   }
   if (action === "ch") {
@@ -4533,6 +4775,21 @@ export async function handleUpdate(update: TgUpdate) {
 
 async function handleTelegramUpdate(update: TgUpdate) {
   void ensureBotProfile();
+
+  // Posts from channels added for counterparty checks get indexed; nothing else happens.
+  const post = update.channel_post || update.edited_channel_post;
+  if (post) {
+    const ch = isCheckChannel(post.chat.id);
+    if (ch) {
+      if (post.chat.title && post.chat.title !== ch.title) {
+        ch.title = post.chat.title;
+        saveBindings();
+      }
+      indexCheckPost(ch, post.message_id, post.text || post.caption || "", post.date || 0);
+    }
+    return;
+  }
+
   rememberUser(update.message?.from);
   rememberUser(update.message?.forward_from);
   rememberUser(update.message?.forward_origin?.sender_user);
@@ -4842,6 +5099,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
+  if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyCheckChannel(msg.chat.id, msg.text);
+    return;
+  }
   if (isOfficialArbiterChat(msg.chat.id) && channelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyPublishChannel(msg.chat.id, msg.text);
     return;
@@ -4864,7 +5125,7 @@ export async function registerMiniAppUrl(url: string) {
   const set = await tgSoft("setWebhook", {
     url: `${clean}/api/telegram/webhook`,
     secret_token: webhookSecret(),
-    allowed_updates: ["message", "callback_query", "my_chat_member"],
+    allowed_updates: ["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
     drop_pending_updates: false,
   });
   if (set) {
