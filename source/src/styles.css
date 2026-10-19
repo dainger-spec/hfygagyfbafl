@@ -112,5 +112,5 @@
 }
 
 .epb-page-enter {
-  animation: epb-page-enter 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: epb-page-enter 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }

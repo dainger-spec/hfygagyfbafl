@@ -250,10 +250,11 @@ function HeroTransition({
     const ARRIVE = 0.31; // emblem in the centre
     const OPEN = 0.42; // the black oval starts to open
     const FULL = 0.66; // screen fully black -> the form is put underneath
-    const REVEAL = 0.7; // the form fades in
+    const REVEAL = 0.82; // the black clears quickly onto the form
     const glide = "cubic-bezier(.2,.85,.25,1)";
     const soft = "cubic-bezier(.45,0,.55,1)";
     const open = "cubic-bezier(.62,0,.78,.38)";
+    const clear = "cubic-bezier(.4,0,.1,1)"; // quick black fade-out onto the next page
 
     const timing = { duration: DURATION, easing: "linear", fill: "forwards" as const };
     start.source.style.visibility = "hidden";
@@ -269,7 +270,7 @@ function HeroTransition({
           { clipPath: oval(kEnd, inset), opacity: 1, offset: FULL },
           ...(fadeAfter
             ? [
-                { clipPath: oval(kEnd, inset), opacity: 1, offset: REVEAL, easing: soft },
+                { clipPath: oval(kEnd, inset), opacity: 1, offset: REVEAL, easing: clear },
                 { clipPath: oval(kEnd, inset), opacity: 0 },
               ]
             : [
@@ -285,7 +286,7 @@ function HeroTransition({
         [
           { opacity: 0, easing: soft },
           { opacity: 1, offset: 0.22 },
-          { opacity: 1, offset: REVEAL, easing: soft },
+          { opacity: 1, offset: REVEAL, easing: clear },
           { opacity: 0 },
         ],
         timing,
