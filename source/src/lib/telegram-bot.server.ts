@@ -86,6 +86,8 @@ type Bindings = {
   cardStamp?: string;
   relayChats?: RelayChat[];
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
+  userbotApi?: { apiId: number; apiHash: string };
+  blacklistCleanupStamp?: string;
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -279,6 +281,24 @@ try {
 // Before the channelPosted marker existed, "published" already meant "posted to channel".
 for (const rec of Object.values(pendingPosts)) {
   if (rec.status === "published" && rec.channelPosted === undefined) rec.channelPosted = true;
+}
+
+// One-time cleanup: remove test blacklist entries for these usernames from the check.
+const BLACKLIST_CLEANUP = ["hugos", "mkcrd", "annuit1", "ballin812"];
+const BLACKLIST_CLEANUP_STAMP = "cleanup-v1";
+if (bindings.blacklistCleanupStamp !== BLACKLIST_CLEANUP_STAMP) {
+  let changed = false;
+  for (const rec of Object.values(pendingPosts)) {
+    if (rec.removedFromCheck) continue;
+    const names = pendingAccounts(rec).map((a) => a.username.replace(/^@/, "").toLowerCase());
+    if (names.some((n) => BLACKLIST_CLEANUP.includes(n))) {
+      rec.removedFromCheck = true;
+      changed = true;
+    }
+  }
+  if (changed) savePending();
+  bindings.blacklistCleanupStamp = BLACKLIST_CLEANUP_STAMP;
+  saveBindings();
 }
 
 let idCacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1032,6 +1052,247 @@ function floodSeconds(err: unknown): number {
   return m ? Number(m[1] || m[2]) : 0;
 }
 
+// ---------- Userbot: a connected user account for reading channels the bot is not in ----------
+// A user account (unlike a bot) can read channel history, including old posts, in every
+// channel it is subscribed to. The owner logs in once with scripts/login-user.mjs, which
+// writes the session string to data/user-session.txt (or env TELEGRAM_USER_SESSION).
+
+const USER_SESSION_PATH = join(DATA_DIR, "user-session.txt");
+
+function userSession(): string {
+  const env = (process.env.TELEGRAM_USER_SESSION || "").trim();
+  if (env) return env;
+  try {
+    return readFileSync(USER_SESSION_PATH, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function hasUserbot(): boolean {
+  return Boolean(userSession());
+}
+
+type UserClient = {
+  invoke: (req: unknown) => Promise<unknown>;
+  getInputEntity: (ref: unknown) => Promise<unknown>;
+  connected?: boolean;
+  disconnect?: () => Promise<void>;
+  destroy?: () => Promise<void>;
+};
+let userClient: Promise<{ client: UserClient; Api: any }> | null = null;
+let userIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let userBlockedUntil = 0;
+
+function userApiCreds() {
+  const apiId = Number(process.env.TELEGRAM_API_ID || bindings.userbotApi?.apiId || 0);
+  const apiHash = (process.env.TELEGRAM_API_HASH || bindings.userbotApi?.apiHash || "").trim();
+  return { apiId, apiHash };
+}
+
+const OWNER_ID = "1457986905";
+function isOwner(id: string | number | undefined): boolean {
+  return String(id || "") === OWNER_ID;
+}
+
+function saveUserSession(session: string) {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(USER_SESSION_PATH, session, { mode: 0o600 });
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearUserSession() {
+  dropUserbot();
+  try {
+    if (existsSync(USER_SESSION_PATH)) unlinkSync(USER_SESSION_PATH);
+  } catch {
+    /* ignore */
+  }
+}
+
+function userbot() {
+  if (!userClient) {
+    userClient = (async () => {
+      const session = userSession();
+      if (!session) throw new Error("no user session");
+      const { apiId, apiHash } = userApiCreds();
+      if (!apiId || !apiHash) throw new Error("set TELEGRAM_API_ID and TELEGRAM_API_HASH for the userbot");
+      const { TelegramClient } = await import("telegram");
+      const { StringSession } = await import("telegram/sessions/index.js");
+      const { Api } = await import("telegram/tl/index.js");
+      const { Logger } = await import("telegram/extensions/Logger.js");
+      const client = new TelegramClient(new StringSession(session), apiId, apiHash, {
+        connectionRetries: 1,
+        timeout: 15,
+        floodSleepThreshold: 0,
+        autoReconnect: false,
+        baseLogger: new Logger("none" as never),
+      });
+      await withTimeout(client.connect(), 20_000, "userbot connect timeout");
+      return { client: client as unknown as UserClient, Api };
+    })();
+    userClient.catch(() => dropUserbot());
+  }
+  if (userIdleTimer) clearTimeout(userIdleTimer);
+  userIdleTimer = setTimeout(() => dropUserbot(), 20 * 60_000);
+  return userClient;
+}
+
+function dropUserbot() {
+  const pending = userClient;
+  userClient = null;
+  if (userIdleTimer) clearTimeout(userIdleTimer);
+  userIdleTimer = null;
+  pending
+    ?.then(async ({ client }) => {
+      await client.disconnect?.().catch(() => {});
+      await client.destroy?.().catch(() => {});
+    })
+    .catch(() => {});
+}
+
+// Does the userbot session work at all? Used by the admin panel.
+export async function userbotStatus(): Promise<{ ok: boolean; name?: string; error?: string }> {
+  if (!userSession()) return { ok: false, error: "нет сессии" };
+  const { apiId, apiHash } = userApiCreds();
+  if (!apiId || !apiHash) return { ok: false, error: "нет TELEGRAM_API_ID / TELEGRAM_API_HASH" };
+  try {
+    const { client, Api } = await userbot();
+    const me = (await withTimeout(client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] })), 12_000, "timeout")) as {
+      username?: string;
+      firstName?: string;
+    }[];
+    const u = me?.[0];
+    return { ok: true, name: u?.username ? `@${u.username}` : u?.firstName || "аккаунт" };
+  } catch (err) {
+    return { ok: false, error: (err as Error)?.message || "ошибка" };
+  }
+}
+
+// Resolve a channel ref (@username or -100id) to a stored entry using the userbot.
+export async function resolveChannelAsUser(ref: string): Promise<CheckChannel | null> {
+  if (!userSession()) return null;
+  try {
+    const { client } = await userbot();
+    const entity = (await withTimeout(client.getInputEntity(ref), 12_000, "timeout")) as {
+      channelId?: unknown;
+      className?: string;
+    };
+    const chan = entity as { channelId?: { toString(): string } };
+    if (!chan?.channelId) return null;
+    const id = `-100${chan.channelId.toString()}`;
+    // getEntity for the title/username.
+    const full = (await (client as unknown as { getEntity: (r: unknown) => Promise<unknown> }).getEntity(ref).catch(() => null)) as {
+      title?: string;
+      username?: string;
+    } | null;
+    return { id, title: full?.title, username: full?.username, addedAt: Date.now() };
+  } catch {
+    return null;
+  }
+}
+
+function snippetAround(text: string, needle: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!needle) return flat.slice(0, 180);
+  const i = flat.toLowerCase().indexOf(needle.toLowerCase());
+  if (i < 0) return flat.slice(0, 180);
+  const from = Math.max(0, i - 60);
+  return (from > 0 ? "…" : "") + flat.slice(from, from + 180).trim() + (from + 180 < flat.length ? "…" : "");
+}
+
+// Whether a complaint's channel post was deleted. Only the user account can check this;
+// without it we cannot know, so we keep showing the complaint. Result cached briefly.
+const deletedCache = new Map<string, { at: number; deleted: boolean }>();
+
+type UserClientFull = UserClient & { getMessages: (ref: unknown, opts: { ids: number[] }) => Promise<unknown[]> };
+
+async function channelPostDeleted(rec: PendingPost): Promise<boolean> {
+  if (!userSession() || Date.now() < userBlockedUntil) return false;
+  const ids = rec.channelMsgIds || [];
+  const chat = rec.channelChatId || bindings.channelId || "";
+  if (!ids.length || !chat) return false;
+  const cacheKey = `${chat}:${ids.join(",")}`;
+  const cached = deletedCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 5 * 60_000) return cached.deleted;
+  try {
+    const { client } = await userbot();
+    const peer = await client.getInputEntity(chat);
+    const msgs = (await withTimeout(
+      (client as unknown as UserClientFull).getMessages(peer, { ids }),
+      12_000,
+      "getMessages timeout",
+    )) as ({ id?: number; className?: string } | undefined)[];
+    // A deleted message comes back as empty / without a real id.
+    const anyAlive = (msgs || []).some((m) => m && m.id && m.className !== "MessageEmpty");
+    const deleted = !anyAlive;
+    deletedCache.set(cacheKey, { at: Date.now(), deleted });
+    return deleted;
+  } catch (err) {
+    const wait = floodSeconds(err);
+    if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
+    else if (!(err as { errorMessage?: string })?.errorMessage) dropUserbot();
+    return false;
+  }
+}
+
+// Full-history search of one channel for a query, via the user account.
+async function userSearchChannel(channel: CheckChannel, query: string, needle: string): Promise<CheckHit[]> {
+  if (Date.now() < userBlockedUntil) return [];
+  try {
+    const { client, Api } = await userbot();
+    const ref: string | number = channel.username ? `@${channel.username.replace(/^@/, "")}` : channel.id;
+    const peer = await client.getInputEntity(ref);
+    const res = (await withTimeout(
+      client.invoke(
+        new Api.messages.Search({
+          peer,
+          q: query,
+          filter: new Api.InputMessagesFilterEmpty(),
+          minDate: 0,
+          maxDate: 0,
+          offsetId: 0,
+          addOffset: 0,
+          limit: 15,
+          maxId: 0,
+          minId: 0,
+          hash: BigInt(0) as unknown as number,
+        }),
+      ),
+      15_000,
+      "search timeout",
+    )) as { messages?: { id: number; message?: string; date?: number; className?: string }[] };
+    const out: CheckHit[] = [];
+    for (const m of res.messages || []) {
+      const body = m.message || "";
+      if (!body) continue;
+      out.push({
+        channelId: channel.id,
+        channelTitle: channel.title || "канал",
+        messageId: m.id,
+        link: messageLink(channel, m.id),
+        date: (m.date || 0) * 1000,
+        snippet: snippetAround(body, needle),
+      });
+    }
+    return out;
+  } catch (err) {
+    const wait = floodSeconds(err);
+    if (wait) {
+      userBlockedUntil = Date.now() + (wait + 5) * 1000;
+      console.warn(`[epb] userbot FLOOD_WAIT ${wait}s`);
+    } else if (!(err as { errorMessage?: string })?.errorMessage) {
+      dropUserbot();
+    }
+    return [];
+  }
+}
+
+
+
 // "busy" = not looked up because of limits (try again later), null = no such username.
 type Lookup = { username: string; id: string } | null | "busy";
 
@@ -1552,6 +1813,453 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
       createdAt: c.createdAt || 0,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// ---------- Owner userbot setup (connect an account, pick channels to parse) ----------
+// Only the bot owner (OWNER_ID) can do this, in a private chat with the bot.
+
+type LoginStep = "apiId" | "apiHash" | "phone" | "code" | "password";
+type LoginState = {
+  step: LoginStep;
+  apiId?: number;
+  apiHash?: string;
+  phone?: string;
+  phoneCodeHash?: string;
+  // The gramjs client, kept alive between the code request and sign-in.
+  client?: any;
+  Api?: any;
+  touched: number;
+};
+const loginStates = new Map<string, LoginState>();
+
+function ownerLoginActive(chatId: string | number): boolean {
+  const st = loginStates.get(String(chatId));
+  if (!st) return false;
+  if (Date.now() - st.touched > 10 * 60_000) {
+    void st.client?.disconnect?.().catch(() => {});
+    loginStates.delete(String(chatId));
+    return false;
+  }
+  return true;
+}
+
+async function sendOwnerPanel(chatId: string | number) {
+  const st = await userbotStatus();
+  const connected = st.ok;
+  const channels = checkChannels();
+  const rows: { text: string; callback_data: string }[][] = [];
+  if (connected) {
+    rows.push([{ text: "📡 Выбрать каналы для поиска", callback_data: "ub:chans" }]);
+    rows.push([{ text: "🔌 Переподключить аккаунт", callback_data: "ub:connect" }]);
+    rows.push([{ text: "❌ Отключить аккаунт", callback_data: "ub:off" }]);
+  } else {
+    rows.push([{ text: "➕ Подключить аккаунт", callback_data: "ub:connect" }]);
+  }
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: [
+      "<b>Юзербот для поиска по блеклистам</b>",
+      connected ? `Аккаунт: ${escapeHtml(st.name || "подключён")} ✅` : "Аккаунт не подключён",
+      `Каналов выбрано для поиска: ${channels.length}`,
+      "",
+      connected
+        ? "Поиск в мини-приложении идёт по выложенным жалобам EPB и по выбранным каналам (через аккаунт, по username, включая старые посты)."
+        : "Подключите свой аккаунт Telegram, затем выберите каналы, по которым искать. Понадобятся api_id и api_hash с my.telegram.org.",
+    ].join("\n"),
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: rows },
+  });
+}
+
+async function startOwnerLogin(chatId: string | number) {
+  const existing = loginStates.get(String(chatId));
+  if (existing?.client) await existing.client.disconnect?.().catch(() => {});
+  loginStates.set(String(chatId), { step: "apiId", touched: Date.now() });
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: [
+      "<b>Подключение аккаунта</b>",
+      "",
+      "Нужны api_id и api_hash: зайдите на https://my.telegram.org → API development tools.",
+      "",
+      "Пришлите <b>api_id</b> (число).",
+      "Отмена: /cancel_userbot",
+    ].join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  });
+}
+
+// Handles the owner's text replies during login. Returns true when consumed.
+async function handleOwnerLogin(chatId: string | number, text: string): Promise<boolean> {
+  const key = String(chatId);
+  const st = loginStates.get(key);
+  if (!st) return false;
+  st.touched = Date.now();
+  const value = text.trim();
+  const fail = async (msg: string) => {
+    await tgSoft("sendMessage", { chat_id: chatId, text: msg });
+  };
+  try {
+    if (st.step === "apiId") {
+      const n = Number(value);
+      if (!n || !Number.isInteger(n)) return (await fail("api_id — это число. Пришлите ещё раз."), true);
+      st.apiId = n;
+      st.step = "apiHash";
+      await tgSoft("sendMessage", { chat_id: chatId, text: "Теперь пришлите <b>api_hash</b>.", parse_mode: "HTML" });
+      return true;
+    }
+    if (st.step === "apiHash") {
+      if (!/^[a-f0-9]{16,}$/i.test(value)) return (await fail("Похоже, это не api_hash. Пришлите ещё раз."), true);
+      st.apiHash = value;
+      st.step = "phone";
+      await tgSoft("sendMessage", { chat_id: chatId, text: "Пришлите номер телефона аккаунта в формате +7999…" });
+      return true;
+    }
+    if (st.step === "phone") {
+      if (!/^\+?\d{7,15}$/.test(value.replace(/\s/g, ""))) return (await fail("Неверный номер. Пример: +79991234567"), true);
+      st.phone = value.replace(/\s/g, "");
+      const { TelegramClient } = await import("telegram");
+      const { StringSession } = await import("telegram/sessions/index.js");
+      const { Api } = await import("telegram/tl/index.js");
+      const { Logger } = await import("telegram/extensions/Logger.js");
+      st.client = new TelegramClient(new StringSession(""), st.apiId!, st.apiHash!, {
+        connectionRetries: 2,
+        baseLogger: new Logger("none" as never),
+      });
+      st.Api = Api;
+      await withTimeout(st.client.connect(), 25_000, "connect timeout");
+      const sent = (await withTimeout(st.client.sendCode({ apiId: st.apiId, apiHash: st.apiHash }, st.phone), 25_000, "sendCode timeout")) as { phoneCodeHash: string };
+      st.phoneCodeHash = sent.phoneCodeHash;
+      st.step = "code";
+      await tgSoft("sendMessage", {
+        chat_id: chatId,
+        text: "Код отправлен в Telegram на этот аккаунт. Пришлите код. Если боитесь, что Telegram заблокирует код в сообщении — вставьте пробелы: 1 2 3 4 5.",
+      });
+      return true;
+    }
+    if (st.step === "code") {
+      const code = value.replace(/\D/g, "");
+      if (!code) return (await fail("Пришлите код из Telegram."), true);
+      try {
+        await withTimeout(
+          st.client.invoke(new st.Api.auth.SignIn({ phoneNumber: st.phone, phoneCodeHash: st.phoneCodeHash, phoneCode: code })),
+          25_000,
+          "signin timeout",
+        );
+      } catch (err) {
+        const m = (err as { errorMessage?: string })?.errorMessage || (err as Error)?.message || "";
+        if (/SESSION_PASSWORD_NEEDED/.test(m)) {
+          st.step = "password";
+          await tgSoft("sendMessage", { chat_id: chatId, text: "На аккаунте включена двухфакторная защита. Пришлите пароль." });
+          return true;
+        }
+        if (/PHONE_CODE_INVALID|PHONE_CODE_EXPIRED/.test(m)) return (await fail("Код неверный или просрочен. Пришлите ещё раз, либо начните заново: /cancel_userbot."), true);
+        throw err;
+      }
+      await finishOwnerLogin(chatId, st);
+      return true;
+    }
+    if (st.step === "password") {
+      const { computeCheck } = await import("telegram/Password.js");
+      const pwd = await st.client.invoke(new st.Api.account.GetPassword());
+      const check = await computeCheck(pwd, value);
+      try {
+        await withTimeout(st.client.invoke(new st.Api.auth.CheckPassword({ password: check })), 25_000, "password timeout");
+      } catch (err) {
+        const m = (err as { errorMessage?: string })?.errorMessage || "";
+        if (/PASSWORD_HASH_INVALID/.test(m)) return (await fail("Пароль неверный. Пришлите ещё раз."), true);
+        throw err;
+      }
+      await finishOwnerLogin(chatId, st);
+      return true;
+    }
+  } catch (err) {
+    loginStates.delete(key);
+    await st.client?.disconnect?.().catch(() => {});
+    await fail(`Не удалось подключить аккаунт: ${(err as Error)?.message || "ошибка"}. Начните заново: /userbot`);
+    return true;
+  }
+  return true;
+}
+
+async function finishOwnerLogin(chatId: string | number, st: LoginState) {
+  const session = st.client.session.save() as string;
+  saveUserSession(session);
+  bindings.userbotApi = { apiId: st.apiId!, apiHash: st.apiHash! };
+  saveBindings();
+  await st.client.disconnect?.().catch(() => {});
+  loginStates.delete(String(chatId));
+  dropUserbot(); // reconnect lazily with the saved session
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: "Аккаунт подключён ✅\nТеперь выберите каналы для поиска.",
+  });
+  await sendChannelPicker(chatId);
+}
+
+// List the account's channels with on/off toggles.
+async function sendChannelPicker(chatId: string | number, editMessageId?: number) {
+  const dialogs: { id: string; title: string; username?: string }[] = [];
+  try {
+    const { client } = await userbot();
+    const list = (await withTimeout((client as any).getDialogs({ limit: 200 }), 20_000, "dialogs timeout")) as any[];
+    for (const d of list) {
+      const e = d?.entity;
+      if (!e || e.className !== "Channel") continue; // channels and megagroups
+      dialogs.push({ id: `-100${e.id?.toString?.() ?? e.id}`, title: d.title || e.title || "канал", username: e.username || undefined });
+    }
+  } catch (err) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: `Не удалось получить список каналов: ${(err as Error)?.message || "ошибка"}` });
+    return;
+  }
+  if (!dialogs.length) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "У аккаунта нет каналов. Подпишитесь на нужные каналы и откройте список снова: /userbot" });
+    return;
+  }
+  const selected = new Set(checkChannels().map((c) => chatIdKey(c.id)));
+  const rows = dialogs.slice(0, 60).map((d) => [
+    { text: `${selected.has(chatIdKey(d.id)) ? "✅" : "▫️"} ${cut(d.title, 40)}`, callback_data: `ub:tgl:${d.id}` },
+  ]);
+  rows.push([{ text: "Готово", callback_data: "ub:done" }]);
+  const text = "<b>Каналы для поиска</b>\nОтметьте, по каким каналам искать. Нажмите «Готово», когда закончите.";
+  if (editMessageId) {
+    await tgSoft("editMessageText", { chat_id: chatId, message_id: editMessageId, text, parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+  } else {
+    await tgSoft("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+  }
+  // Remember the titles/usernames so search can build links even without re-fetching.
+  dialogCache.clear();
+  for (const d of dialogs) dialogCache.set(chatIdKey(d.id), d);
+}
+
+const dialogCache = new Map<string, { id: string; title: string; username?: string }>();
+
+async function toggleCheckChannel(id: string) {
+  const list = [...checkChannels()];
+  const idx = list.findIndex((c) => sameChat(c.id, id));
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  } else {
+    const d = dialogCache.get(chatIdKey(id));
+    list.push({ id, title: d?.title, username: d?.username, addedAt: Date.now() });
+  }
+  bindings.checkChannels = list.slice(-100);
+  saveBindings();
+}
+
+// Owner callbacks (ub:*). Returns true when handled.
+async function handleOwnerCallback(cb: NonNullable<TgUpdate["callback_query"]>): Promise<boolean> {
+  const data = cb.data || "";
+  if (!data.startsWith("ub:")) return false;
+  const chatId = cb.message?.chat.id;
+  if (!chatId || !isOwner(cb.from?.id)) {
+    await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Недоступно", show_alert: true });
+    return true;
+  }
+  const [, action, ...rest] = data.split(":");
+  const answer = (t = "") => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: t || undefined });
+  if (action === "connect") {
+    await answer();
+    await startOwnerLogin(chatId);
+  } else if (action === "off") {
+    clearUserSession();
+    delete bindings.userbotApi;
+    saveBindings();
+    await answer("Аккаунт отключён");
+    await sendOwnerPanel(chatId);
+  } else if (action === "chans") {
+    await answer();
+    await sendChannelPicker(chatId);
+  } else if (action === "tgl") {
+    await toggleCheckChannel(rest.join(":"));
+    await answer();
+    await sendChannelPicker(chatId, cb.message!.message_id);
+  } else if (action === "done") {
+    await answer("Сохранено");
+    await tgSoft("editMessageText", {
+      chat_id: chatId,
+      message_id: cb.message!.message_id,
+      text: `Готово. Каналов для поиска: ${checkChannels().length}.`,
+    });
+  } else {
+    await answer();
+  }
+  return true;
+}
+
+
+// ---------- Counterparty check: EPB blacklist + configured channels ----------
+
+type CheckChannel = { id: string; title?: string; username?: string; addedAt: number };
+type CheckHit = {
+  channelId: string;
+  channelTitle: string;
+  username?: string;
+  messageId: number;
+  link: string;
+  date: number;
+  snippet: string;
+};
+
+const CHECK_INDEX_PATH = join(DATA_DIR, "telegram-check-index.json");
+// token (lowercase @username or numeric id) -> posts that mention it.
+const checkIndex: Record<string, CheckHit[]> = readJson<Record<string, CheckHit[]>>(CHECK_INDEX_PATH) || {};
+
+let checkIndexTimer: ReturnType<typeof setTimeout> | null = null;
+function saveCheckIndex() {
+  if (checkIndexTimer) return;
+  checkIndexTimer = setTimeout(() => {
+    checkIndexTimer = null;
+    try {
+      writeJsonAtomic(CHECK_INDEX_PATH, checkIndex);
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+}
+
+function checkChannels(): CheckChannel[] {
+  return bindings.checkChannels || [];
+}
+
+function isCheckChannel(id: string | number | undefined): CheckChannel | undefined {
+  if (id == null) return undefined;
+  return checkChannels().find((c) => sameChat(c.id, id));
+}
+
+// Pull every telegram handle and numeric id out of a post, as search tokens.
+function tokensFromText(text: string): { usernames: string[]; ids: string[] } {
+  const usernames = new Set<string>();
+  const ids = new Set<string>();
+  for (const m of text.matchAll(/@([A-Za-z][A-Za-z0-9_]{3,31})/g)) usernames.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})/gi)) usernames.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/(?:tg:\/\/user\?id=|\bid[:\s=]*)(\d{5,15})/gi)) ids.add(m[1]!);
+  for (const m of text.matchAll(/\b(\d{7,15})\b/g)) ids.add(m[1]!);
+  return { usernames: [...usernames], ids: [...ids] };
+}
+
+function messageLink(channel: CheckChannel, messageId: number): string {
+  if (channel.username) return `https://t.me/${channel.username.replace(/^@/, "")}/${messageId}`;
+  const internal = String(channel.id).replace(/^-100/, "").replace(/^-/, "");
+  return `https://t.me/c/${internal}/${messageId}`;
+}
+
+function addCheckHit(token: string, hit: CheckHit) {
+  const list = checkIndex[token] || (checkIndex[token] = []);
+  if (list.some((h) => sameChat(h.channelId, hit.channelId) && h.messageId === hit.messageId)) return;
+  list.unshift(hit);
+  if (list.length > 25) list.length = 25;
+}
+
+// A post arrived in a configured check channel: index its handles and ids.
+function indexCheckPost(channel: CheckChannel, messageId: number, text: string, date: number) {
+  const body = (text || "").slice(0, 4096);
+  if (!body.trim()) return;
+  const { usernames, ids } = tokensFromText(body);
+  if (!usernames.length && !ids.length) return;
+  const snippet = body.replace(/\s+/g, " ").trim().slice(0, 160);
+  const hit: CheckHit = {
+    channelId: String(channel.id),
+    channelTitle: channel.title || "канал",
+    messageId,
+    link: messageLink(channel, messageId),
+    date: date * 1000 || Date.now(),
+    snippet,
+  };
+  for (const u of usernames) addCheckHit(`@${u}`, { ...hit, username: u });
+  for (const id of ids) addCheckHit(id, hit);
+  // Keep the whole index bounded.
+  const keys = Object.keys(checkIndex);
+  if (keys.length > 200000) for (const k of keys.slice(0, keys.length - 180000)) delete checkIndex[k];
+  saveCheckIndex();
+}
+
+function removeCheckChannelFromIndex(channelId: string) {
+  for (const [token, list] of Object.entries(checkIndex)) {
+    const kept = list.filter((h) => !sameChat(h.channelId, channelId));
+    if (kept.length) checkIndex[token] = kept;
+    else delete checkIndex[token];
+  }
+  saveCheckIndex();
+}
+
+export type CheckResult = {
+  query: { username: string; id: string };
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
+  channels: CheckHit[];
+};
+
+// Search the EPB blacklist (published complaints) and the configured channels.
+export async function checkCounterparty(input: string): Promise<CheckResult> {
+  const parsed = parseTelegramInput(input);
+  const uname = parsed.username.replace(/^@/, "").toLowerCase();
+  const id = parsed.id;
+  const matched: { key: string; rec: PendingPost }[] = [];
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    // Only approved complaints that actually went out to the EPB channel and were not removed.
+    if (rec.status !== "published" || !rec.channelPosted || rec.removedFromCheck) continue;
+    const accounts = pendingAccounts(rec);
+    const match =
+      (uname && accounts.some((a) => a.username.replace(/^@/, "").toLowerCase() === uname)) ||
+      (id && accounts.some((a) => a.id === id));
+    if (match) matched.push({ key, rec });
+  }
+  // With a connected account, drop complaints whose channel post was deleted.
+  const epb: CheckResult["epb"] = [];
+  for (const { key, rec } of matched) {
+    if (await channelPostDeleted(rec)) {
+      rec.removedFromCheck = true;
+      savePending();
+      continue;
+    }
+    const accounts = pendingAccounts(rec);
+    epb.push({
+      id: key,
+      accounts: accounts.map((a) => (a.username ? `@${a.username.replace(/^@/, "")}` : a.id ? `ID ${a.id}` : "")).filter(Boolean).join(", "),
+      amount: rec.amount || "",
+      currency: rec.currency || "",
+      date: rec.createdAt || 0,
+    });
+  }
+  epb.sort((a, b) => b.date - a.date);
+
+  const hits: CheckHit[] = [];
+  const seen = new Set<string>();
+  const push = (list: CheckHit[]) => {
+    for (const h of list) {
+      const dkey = `${chatIdKey(h.channelId)}:${h.messageId}`;
+      if (seen.has(dkey)) continue;
+      seen.add(dkey);
+      hits.push(h);
+    }
+  };
+
+  const channels = checkChannels();
+  if (hasUserbot() && channels.length) {
+    // Live full-history search in every configured channel (old posts included).
+    const queries: { q: string; needle: string }[] = [];
+    if (uname) queries.push({ q: uname, needle: uname });
+    if (id) queries.push({ q: id, needle: id });
+    for (const channel of channels) {
+      for (const { q, needle } of queries) {
+        push(await userSearchChannel(channel, q, needle));
+      }
+    }
+  } else {
+    // Fallback: posts indexed by the bot since each channel was connected.
+    for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
+  }
+  hits.sort((a, b) => b.date - a.date);
+  return { query: { username: uname, id }, epb, channels: hits.slice(0, 30) };
+}
+
+export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
+  const user = verifyTelegramInitData(initData);
+  if (!user) return { ok: false, error: "telegram auth required" };
+  if (tooMany(`check:${user.id}`, 40, 60_000)) return { ok: false, error: "too many" };
+  if (tooMany("check:global", 1500, 60_000)) return { ok: false, error: "busy" };
+  return { ok: true, userId: user.id };
 }
 
 function packCaption(full: string, _fallback = "") {
@@ -2653,9 +3361,19 @@ type TgMessage = {
   media_group_id?: string;
 };
 
+type TgChannelPost = {
+  message_id: number;
+  chat: { id: number; type: string; title?: string; username?: string };
+  text?: string;
+  caption?: string;
+  date?: number;
+};
+
 type TgUpdate = {
   update_id: number;
   message?: TgMessage;
+  channel_post?: TgChannelPost;
+  edited_channel_post?: TgChannelPost;
   my_chat_member?: {
     chat: { id: number; type: string; title?: string };
     from?: TgUser;
@@ -2695,6 +3413,8 @@ type ApplySession = {
 
 const sessions = new Map<string, ApplySession>();
 const channelSetup = new Set<string>();
+const checkChannelSetup = new Set<string>();
+const removeFromCheckSetup = new Set<string>();
 
 function gcSessions() {
   const now = Date.now();
@@ -4157,6 +4877,7 @@ function adminHome(): AdminView {
       ],
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
+      [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
         { text: "✖ Закрыть", callback_data: "adm:x" },
@@ -4298,6 +5019,115 @@ async function adminShowComplaint(arbiterChatId: number | string, key: string) {
   return true;
 }
 
+function adminCheck(): AdminView {
+  const list = checkChannels();
+  const ub = hasUserbot();
+  const lines = [
+    "<b>Каналы для проверки контрагента</b>",
+    `Подключено: ${list.length}`,
+    `Аккаунт (юзербот): ${ub ? "подключён ✅" : "не подключён"}`,
+    "",
+    ub
+      ? "Поиск идёт через подключённый аккаунт по всем постам этих каналов, включая старые. Бота в каналы добавлять не нужно — аккаунт должен быть на них подписан."
+      : "Сейчас бот индексирует только новые посты каналов, где он сам состоит. Чтобы искать по старым постам чужих каналов без добавления бота, подключите аккаунт (юзербот) — см. HOSTING.md.",
+  ];
+  const keyboard: AdminView["keyboard"] = list.map((c) => [
+    { text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `adm:ccdel:${c.id}` },
+  ]);
+  keyboard.push([{ text: "🔌 Проверить аккаунт", callback_data: "adm:ccping" }]);
+  keyboard.push([{ text: "🧹 Убрать жалобу из блеклиста", callback_data: "adm:ccrm" }]);
+  keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return { text: lines.join("\n"), keyboard };
+}
+
+async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string) {
+  removeFromCheckSetup.delete(String(arbiterChatId));
+  const text = raw.trim();
+  let removed = 0;
+  const epbId = text.match(/\b(EPB-[A-Za-z0-9]+)\b/i)?.[1];
+  if (epbId) {
+    const rec = pendingPosts[epbId] || pendingPosts[epbId.toUpperCase()];
+    if (rec && !rec.removedFromCheck) {
+      rec.removedFromCheck = true;
+      removed = 1;
+    }
+  } else {
+    const parsed = parseTelegramInput(text);
+    const uname = parsed.username.replace(/^@/, "").toLowerCase();
+    const id = parsed.id;
+    if (!uname && !id) {
+      await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Не понял. Пришлите EPB-… или @username / ID." });
+      return;
+    }
+    for (const rec of Object.values(pendingPosts)) {
+      if (rec.removedFromCheck) continue;
+      const accounts = pendingAccounts(rec);
+      const hit =
+        (uname && accounts.some((a) => a.username.replace(/^@/, "").toLowerCase() === uname)) ||
+        (id && accounts.some((a) => a.id === id));
+      if (hit) {
+        rec.removedFromCheck = true;
+        removed += 1;
+      }
+    }
+  }
+  if (removed) savePending();
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: removed ? `Убрано из блеклиста: ${removed}. В проверке контрагента больше не показывается.` : "Ничего подходящего не нашёл.",
+  });
+}
+
+async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
+  checkChannelSetup.delete(String(arbiterChatId));
+  const ref = await parseChannelRef(raw);
+  if (!ref) {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Пришлите ID канала (-100…) или @username." });
+    return;
+  }
+  // The bot may not be in the channel; the userbot can still resolve and search it.
+  let entry: CheckChannel | null = null;
+  const chat = await chatReachable(ref);
+  if (chat && (chat.type === "channel" || chat.type === "supergroup")) {
+    entry = { id: String(chat.id), title: chat.title, username: chat.username, addedAt: Date.now() };
+  } else if (hasUserbot()) {
+    entry = await resolveChannelAsUser(String(ref));
+  }
+  if (!entry) {
+    await tgSoft("sendMessage", {
+      chat_id: arbiterChatId,
+      text: hasUserbot()
+        ? "Не удалось открыть этот канал. Подключённый аккаунт должен быть подписан на него. Пришлите @username или ID ещё раз."
+        : "Не вижу этот канал. Добавьте бота в канал (участником или админом) и пришлите ID ещё раз — или подключите аккаунт (юзербот), тогда бота добавлять не нужно.",
+    });
+    return;
+  }
+  if (isOfficialChannel(entry.id) || isOfficialArbiterChat(entry.id)) {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Это служебный канал бота, добавлять его не нужно." });
+    return;
+  }
+  const list = [...checkChannels()];
+  if (!list.some((c) => sameChat(c.id, entry!.id))) {
+    list.push(entry);
+    bindings.checkChannels = list.slice(-100);
+    saveBindings();
+  }
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: [
+      "Канал подключён для проверки.",
+      escapeHtml(entry.title || entry.id),
+      `ID: <code>${escapeHtml(entry.id)}</code>`,
+      "",
+      hasUserbot()
+        ? "Поиск по этому каналу идёт через подключённый аккаунт, включая старые посты."
+        : "Новые посты этого канала будут попадать в поиск. Для старых постов подключите аккаунт (юзербот).",
+    ].join("\n"),
+    parse_mode: "HTML",
+  });
+}
+
 function adminChannel(): AdminView {
   return {
     text: [
@@ -4396,6 +5226,47 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     const shown = (pendingPosts[key]?.status || "pending") === "pending" && (await adminShowComplaint(chatId, key));
     await answer(shown ? "Заявка отправлена ниже" : "Заявка уже обработана", !shown);
     if (!shown) await renderAdmin(cb, adminPendingList(0));
+    return;
+  }
+  if (action === "cc") {
+    await answer();
+    await renderAdmin(cb, adminCheck());
+    return;
+  }
+  if (action === "ccping") {
+    await answer("Проверяем аккаунт…");
+    const st = await userbotStatus();
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: st.ok ? `Аккаунт подключён: ${escapeHtml(st.name || "аккаунт")}` : `Аккаунт не подключён: ${escapeHtml(st.error || "ошибка")}`,
+    });
+    return;
+  }
+  if (action === "ccrm") {
+    removeFromCheckSetup.add(String(chatId));
+    await answer("Пришлите номер жалобы или аккаунт");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите номер жалобы (EPB-…) либо @username / ID аккаунта, который нужно убрать из блеклиста (поиска). Жалоба останется в истории, но перестанет находиться в проверке контрагента.",
+    });
+    return;
+  }
+  if (action === "ccadd") {
+    checkChannelSetup.add(String(chatId));
+    await answer("Пришлите ID канала следующим сообщением");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите ID канала (-100…) или @username для проверки. Бот должен быть в этом канале.",
+    });
+    return;
+  }
+  if (action === "ccdel") {
+    const target = rest.join(":");
+    bindings.checkChannels = checkChannels().filter((c) => !sameChat(c.id, target));
+    saveBindings();
+    removeCheckChannelFromIndex(target);
+    await answer("Канал убран");
+    await renderAdmin(cb, adminCheck());
     return;
   }
   if (action === "ch") {
@@ -4548,6 +5419,21 @@ export async function handleUpdate(update: TgUpdate) {
 
 async function handleTelegramUpdate(update: TgUpdate) {
   void ensureBotProfile();
+
+  // Posts from channels added for counterparty checks get indexed; nothing else happens.
+  const post = update.channel_post || update.edited_channel_post;
+  if (post) {
+    const ch = isCheckChannel(post.chat.id);
+    if (ch) {
+      if (post.chat.title && post.chat.title !== ch.title) {
+        ch.title = post.chat.title;
+        saveBindings();
+      }
+      indexCheckPost(ch, post.message_id, post.text || post.caption || "", post.date || 0);
+    }
+    return;
+  }
+
   rememberUser(update.message?.from);
   rememberUser(update.message?.forward_from);
   rememberUser(update.message?.forward_origin?.sender_user);
@@ -4639,6 +5525,9 @@ async function handleTelegramUpdate(update: TgUpdate) {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: tb(locale, "langSaved") });
       await replyStart(cb.message.chat.id, cb.from?.id);
       return;
+    }
+    if (cb.data.startsWith("ub:")) {
+      if (await handleOwnerCallback(cb)) return;
     }
     if (cb.data.startsWith("adm:")) {
       if (!isOfficialArbiterChat(cb.message.chat.id)) {
@@ -4800,6 +5689,19 @@ async function handleTelegramUpdate(update: TgUpdate) {
     await sendAdminPanel(msg.chat.id);
     return;
   }
+  if (cmd === "userbot") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    await sendOwnerPanel(msg.chat.id);
+    return;
+  }
+  if (cmd === "cancel_userbot") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    const stt = loginStates.get(String(msg.chat.id));
+    await stt?.client?.disconnect?.().catch(() => {});
+    loginStates.delete(String(msg.chat.id));
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Подключение отменено." });
+    return;
+  }
   if (cmd === "relays" || cmd === "relay_on" || cmd === "relay_off") {
     if (!isOfficialArbiterChat(msg.chat.id)) return;
     await handleRelayCommand(msg.chat.id, cmd, (msg.text || "").split(/\s+/).slice(1).join(" "));
@@ -4857,12 +5759,23 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
+  if (isOfficialArbiterChat(msg.chat.id) && removeFromCheckSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyRemoveFromCheck(msg.chat.id, msg.text);
+    return;
+  }
+  if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyCheckChannel(msg.chat.id, msg.text);
+    return;
+  }
   if (isOfficialArbiterChat(msg.chat.id) && channelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyPublishChannel(msg.chat.id, msg.text);
     return;
   }
 
   if (msg.chat.type !== "private") return;
+  if (isOwner(msg.from?.id) && !cmd && ownerLoginActive(msg.chat.id) && msg.text) {
+    if (await handleOwnerLogin(msg.chat.id, msg.text)) return;
+  }
   const session = sessions.get(userId);
   if (session) await handleApplyMessage(msg, session);
 }
@@ -4879,7 +5792,7 @@ export async function registerMiniAppUrl(url: string) {
   const set = await tgSoft("setWebhook", {
     url: `${clean}/api/telegram/webhook`,
     secret_token: webhookSecret(),
-    allowed_updates: ["message", "callback_query", "my_chat_member"],
+    allowed_updates: ["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
     drop_pending_updates: false,
   });
   if (set) {
