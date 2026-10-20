@@ -111,3 +111,8 @@ export const checkCounterparty = createServerFn({ method: "POST" })
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return { ok: true as const, result: await bot.checkCounterparty(data.input) };
   });
+
+export const getFeatures = createServerFn({ method: "GET" }).handler(async () => {
+  const { featuresEnabled } = await import("@/lib/telegram-bot.server");
+  return featuresEnabled();
+});

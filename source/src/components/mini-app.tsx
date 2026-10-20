@@ -13,7 +13,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getFeatures, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -45,6 +45,12 @@ export function MiniApp({
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
   const openCheck = useCallback(() => onPage("check"), [onPage]);
+  const [checkOn, setCheckOn] = useState(false);
+  useEffect(() => {
+    void getFeatures()
+      .then((f) => setCheckOn(Boolean(f?.check)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     rehydrateBlacklistStore();
@@ -109,7 +115,7 @@ export function MiniApp({
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
-          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} />
+          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} checkOn={checkOn} />
         ) : null}
         {showApp && page === "apply" ? (
           <ApplyForm
@@ -120,7 +126,7 @@ export function MiniApp({
           />
         ) : null}
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
-        {showApp && page === "check" ? <CheckCounterparty /> : null}
+        {showApp && page === "check" && checkOn ? <CheckCounterparty /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "done" ? (
           <Done
@@ -209,12 +215,14 @@ function Home({
   onHistory,
   onOwners,
   onCheck,
+  checkOn,
 }: {
   identity: { username: string; firstName?: string; telegramId: string };
   onComplaint: () => void;
   onHistory: () => void;
   onOwners: () => void;
   onCheck: () => void;
+  checkOn: boolean;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
   const handle = identity.username
@@ -242,9 +250,11 @@ function Home({
           <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
             {t(locale, "fileComplaint")}
           </Button>
-          <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
-            {t(locale, "checkBtn")}
-          </Button>
+          {checkOn ? (
+            <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
+              {t(locale, "checkBtn")}
+            </Button>
+          ) : null}
           <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onHistory} disabled={!canUse}>
             {t(locale, "history")}
           </Button>

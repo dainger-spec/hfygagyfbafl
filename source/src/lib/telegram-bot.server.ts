@@ -88,6 +88,7 @@ type Bindings = {
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
   userbotApi?: { apiId: number; apiHash: string };
   blacklistCleanupStamp?: string;
+  checkEnabled?: boolean;
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -1093,6 +1094,14 @@ function userApiCreds() {
 const OWNER_ID = "1457986905";
 function isOwner(id: string | number | undefined): boolean {
   return String(id || "") === OWNER_ID;
+}
+
+// The counterparty check + userbot are hidden until turned on (env or owner command).
+function checkEnabled(): boolean {
+  return process.env.EPB_CHECK_ENABLED === "1" || bindings.checkEnabled === true;
+}
+export function featuresEnabled() {
+  return { check: checkEnabled() };
 }
 
 function saveUserSession(session: string) {
@@ -2192,6 +2201,7 @@ export type CheckResult = {
 
 // Search the EPB blacklist (published complaints) and the configured channels.
 export async function checkCounterparty(input: string): Promise<CheckResult> {
+  if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [] };
   const parsed = parseTelegramInput(input);
   const uname = parsed.username.replace(/^@/, "").toLowerCase();
   const id = parsed.id;
@@ -2255,6 +2265,7 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
 }
 
 export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
+  if (!checkEnabled()) return { ok: false, error: "disabled" };
   const user = verifyTelegramInitData(initData);
   if (!user) return { ok: false, error: "telegram auth required" };
   if (tooMany(`check:${user.id}`, 40, 60_000)) return { ok: false, error: "too many" };
@@ -4877,7 +4888,7 @@ function adminHome(): AdminView {
       ],
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
-      [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
+      ...(checkEnabled() ? [[{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }]] : []),
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
         { text: "✖ Закрыть", callback_data: "adm:x" },
@@ -5689,8 +5700,18 @@ async function handleTelegramUpdate(update: TgUpdate) {
     await sendAdminPanel(msg.chat.id);
     return;
   }
-  if (cmd === "userbot") {
+  if (cmd === "checkon" || cmd === "checkoff") {
     if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    bindings.checkEnabled = cmd === "checkon";
+    saveBindings();
+    await tgSoft("sendMessage", {
+      chat_id: msg.chat.id,
+      text: cmd === "checkon" ? "Проверка контрагента включена." : "Проверка контрагента выключена и скрыта.",
+    });
+    return;
+  }
+  if (cmd === "userbot") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id) || !checkEnabled()) return;
     await sendOwnerPanel(msg.chat.id);
     return;
   }
