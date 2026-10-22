@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiTelegramBannerRouteImport } from './routes/api/telegram/banner'
 import { Route as ApiTelegramEvidenceRouteImport } from './routes/api/telegram/evidence'
 import { Route as ApiTelegramResolveRouteImport } from './routes/api/telegram/resolve'
 import { Route as ApiTelegramWebhookRouteImport } from './routes/api/telegram/webhook'
@@ -17,6 +18,11 @@ import { Route as ApiTelegramWebhookRouteImport } from './routes/api/telegram/we
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiTelegramBannerRoute = ApiTelegramBannerRouteImport.update({
+  id: '/api/telegram/banner',
+  path: '/api/telegram/banner',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiTelegramEvidenceRoute = ApiTelegramEvidenceRouteImport.update({
@@ -37,12 +43,14 @@ const ApiTelegramWebhookRoute = ApiTelegramWebhookRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
@@ -50,6 +58,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
@@ -58,18 +67,21 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
     | '/api/telegram/webhook'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
     | '/api/telegram/webhook'
   id:
     | '__root__'
     | '/'
+    | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
     | '/api/telegram/webhook'
@@ -77,6 +89,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiTelegramBannerRoute: typeof ApiTelegramBannerRoute
   ApiTelegramEvidenceRoute: typeof ApiTelegramEvidenceRoute
   ApiTelegramResolveRoute: typeof ApiTelegramResolveRoute
   ApiTelegramWebhookRoute: typeof ApiTelegramWebhookRoute
@@ -89,6 +102,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/telegram/banner': {
+      id: '/api/telegram/banner'
+      path: '/api/telegram/banner'
+      fullPath: '/api/telegram/banner'
+      preLoaderRoute: typeof ApiTelegramBannerRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/telegram/evidence': {
@@ -117,6 +137,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiTelegramBannerRoute: ApiTelegramBannerRoute,
   ApiTelegramEvidenceRoute: ApiTelegramEvidenceRoute,
   ApiTelegramResolveRoute: ApiTelegramResolveRoute,
   ApiTelegramWebhookRoute: ApiTelegramWebhookRoute,

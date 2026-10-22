@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
@@ -9,11 +9,12 @@ import {
   CHANNEL_URL,
   lockTelegramViewport,
   haptic,
+  openExternal,
   readTelegramWebUser,
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getFeatures, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getBanners, getFeatures, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -209,6 +210,83 @@ function AccountLoading({ locale }: { locale: Locale }) {
   );
 }
 
+type BannerItem = { id: string; type: "image" | "video"; link: string; src: string };
+
+// Promo banners at the very top of the app. A horizontal, swipeable strip;
+// videos and GIFs play muted and looped; a tap opens the banner's link.
+function Banners() {
+  const [items, setItems] = useState<BannerItem[]>([]);
+  const [active, setActive] = useState(0);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    void getBanners()
+      .then((list) => setItems(Array.isArray(list) ? (list as BannerItem[]) : []))
+      .catch(() => {});
+  }, []);
+
+  if (!items.length) return null;
+
+  const open = (link: string) => {
+    if (!link) return;
+    haptic("light");
+    openExternal(link);
+  };
+
+  const onScroll = () => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    setActive(Math.round(el.scrollLeft / (el.clientWidth || 1)));
+  };
+
+  return (
+    <div className="pt-3">
+      <div
+        ref={scrollerRef}
+        onScroll={onScroll}
+        className="flex snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
+        {items.map((b) => (
+          <button
+            key={b.id}
+            type="button"
+            onClick={() => open(b.link)}
+            aria-label="banner"
+            className={cn(
+              "relative aspect-[16/7] w-full shrink-0 snap-center overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
+              b.link ? "cursor-pointer" : "cursor-default",
+            )}
+          >
+            {b.type === "video" ? (
+              <video
+                src={b.src}
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="metadata"
+                className="size-full object-cover"
+              />
+            ) : (
+              <img src={b.src} alt="" className="size-full object-cover" loading="lazy" />
+            )}
+          </button>
+        ))}
+      </div>
+      {items.length > 1 ? (
+        <div className="mt-2 flex justify-center gap-1.5">
+          {items.map((b, i) => (
+            <span
+              key={b.id}
+              className={cn("h-1.5 rounded-full transition-all", i === active ? "w-4 bg-gold" : "w-1.5 bg-muted/40")}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Home({
   identity,
   onComplaint,
@@ -232,6 +310,7 @@ function Home({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
+      <Banners />
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />

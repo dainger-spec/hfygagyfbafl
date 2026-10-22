@@ -78,6 +78,18 @@ type RelayChat = {
   rightsNoticeAt?: number;
 };
 
+// A promo banner shown at the top of the mini app. "video" covers real videos
+// and GIFs (Telegram animations are mp4), which the app plays muted and looped.
+type Banner = {
+  id: string;
+  type: "image" | "video";
+  file: string;
+  mime: string;
+  link: string;
+  title?: string;
+  createdAt: number;
+};
+
 type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
@@ -89,6 +101,7 @@ type Bindings = {
   userbotApi?: { apiId: number; apiHash: string };
   blacklistCleanupStamp?: string;
   checkEnabled?: boolean;
+  banners?: Banner[];
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -649,6 +662,112 @@ export function uploadedEvidencePath(id: string): string | null {
   const path = join(EVIDENCE_DIR, safe);
   if (!path.startsWith(EVIDENCE_DIR)) return null;
   return existsSync(path) ? path : null;
+}
+
+// ---- Promo banners (top of the mini app) --------------------------------
+const BANNER_DIR = join(DATA_DIR, "banners");
+// Bot API getFile can only download files up to 20 MB.
+const MAX_BANNER_BYTES = 20 * 1024 * 1024;
+const MAX_BANNERS = 20;
+
+function sanitizeBannerId(id: string): string | null {
+  const safe = String(id || "").replace(/[^a-zA-Z0-9]/g, "");
+  if (safe.length < 10 || safe.length > 40) return null;
+  return safe;
+}
+
+function newBannerId(): string {
+  return createHash("sha256").update(randomUUID()).digest("hex").slice(0, 24);
+}
+
+function saveBannerFile(id: string, bytes: Buffer) {
+  mkdirSync(BANNER_DIR, { recursive: true });
+  writeFileSync(join(BANNER_DIR, id), bytes);
+}
+
+export function bannerById(id: string): Banner | null {
+  const safe = sanitizeBannerId(id);
+  if (!safe) return null;
+  return (bindings.banners || []).find((b) => b.id === safe) || null;
+}
+
+export function bannerFilePath(id: string): string | null {
+  const safe = sanitizeBannerId(id);
+  if (!safe) return null;
+  const path = join(BANNER_DIR, safe);
+  if (!path.startsWith(BANNER_DIR)) return null;
+  return existsSync(path) ? path : null;
+}
+
+// What the mini app shows. Media is served from our own origin so the bot
+// token never reaches the browser.
+export function listBanners() {
+  return (bindings.banners || []).map((b) => ({
+    id: b.id,
+    type: b.type,
+    link: b.link,
+    src: `/api/telegram/banner?id=${encodeURIComponent(b.id)}`,
+  }));
+}
+
+function removeBannerById(id: string) {
+  const safe = sanitizeBannerId(id);
+  if (!safe) return;
+  bindings.banners = (bindings.banners || []).filter((b) => b.id !== safe);
+  saveBindings();
+  try {
+    const path = join(BANNER_DIR, safe);
+    if (path.startsWith(BANNER_DIR) && existsSync(path)) unlinkSync(path);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Downloads a Telegram file by file_id into memory (<= 20 MB).
+async function downloadTelegramFile(fileId: string): Promise<Buffer | null> {
+  const info = await tgSoft<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
+  if (!info?.file_path) return null;
+  if (info.file_size && info.file_size > MAX_BANNER_BYTES) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const res = await fetch(`https://api.telegram.org/file/bot${requireToken()}/${info.file_path}`, {
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > MAX_BANNER_BYTES) return null;
+    return bytes;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Picks banner media out of an incoming message. A Telegram "animation" (GIF)
+// is really an mp4, so it is treated as a looping video.
+function extractBannerMedia(msg: TgMessage): { type: "image" | "video"; fileId: string; mime: string } | null {
+  if (msg.animation?.file_id) return { type: "video", fileId: msg.animation.file_id, mime: msg.animation.mime_type || "video/mp4" };
+  if (msg.video?.file_id) return { type: "video", fileId: msg.video.file_id, mime: msg.video.mime_type || "video/mp4" };
+  if (msg.photo?.length) return { type: "image", fileId: msg.photo.at(-1)!.file_id, mime: "image/jpeg" };
+  const doc = msg.document;
+  if (doc?.file_id && doc.mime_type) {
+    if (doc.mime_type.startsWith("image/")) return { type: "image", fileId: doc.file_id, mime: doc.mime_type };
+    if (doc.mime_type.startsWith("video/")) return { type: "video", fileId: doc.file_id, mime: doc.mime_type };
+  }
+  return null;
+}
+
+function normalizeBannerLink(raw: string): string | null {
+  const text = raw.trim();
+  if (text === "-" || text === "—" || text.toLowerCase() === "нет") return "";
+  if (/^https:\/\/[^\s]+$/i.test(text)) return text;
+  if (/^tg:\/\/[^\s]+$/i.test(text)) return text;
+  if (/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[^\s]+$/i.test(text)) {
+    return text.startsWith("http") ? text : `https://${text}`;
+  }
+  return null;
 }
 
 type TgResult<T> =
@@ -3360,8 +3479,9 @@ type TgMessage = {
   caption?: string;
   from?: TgUser;
   photo?: { file_id: string }[];
-  video?: { file_id: string };
-  document?: { mime_type?: string; file_id?: string };
+  video?: { file_id: string; mime_type?: string; file_size?: number };
+  animation?: { file_id: string; mime_type?: string; file_size?: number };
+  document?: { mime_type?: string; file_id?: string; file_size?: number };
   forward_from?: TgUser;
   forward_origin?: { sender_user?: TgUser };
   reply_to_message?: TgMessage;
@@ -3426,6 +3546,8 @@ const sessions = new Map<string, ApplySession>();
 const channelSetup = new Set<string>();
 const checkChannelSetup = new Set<string>();
 const removeFromCheckSetup = new Set<string>();
+// Two-step "add banner" flow in the admin panel: first the media, then the link.
+const bannerSetup = new Map<string, { phase: "media" | "link"; draft?: { type: "image" | "video"; file: string; mime: string } }>();
 
 function gcSessions() {
   const now = Date.now();
@@ -4888,6 +5010,7 @@ function adminHome(): AdminView {
       ],
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
+      [{ text: `🖼 Баннеры (${(bindings.banners || []).length})`, callback_data: "adm:bn" }],
       ...(checkEnabled() ? [[{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }]] : []),
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
@@ -5050,6 +5173,100 @@ function adminCheck(): AdminView {
   keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
   keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
   return { text: lines.join("\n"), keyboard };
+}
+
+function adminBanners(): AdminView {
+  const list = bindings.banners || [];
+  const lines = [
+    "<b>Баннеры в мини-аппе</b>",
+    `Сейчас: ${list.length} из ${MAX_BANNERS}`,
+    "",
+    list.length
+      ? "Баннеры показываются сверху в приложении. Видео и GIF идут без звука и по кругу. Тап по баннеру открывает ссылку."
+      : "Пока нет ни одного баннера. Нажмите «Добавить баннер», пришлите картинку / видео / GIF, затем ссылку.",
+  ];
+  const keyboard: AdminView["keyboard"] = list.map((b, i) => [
+    {
+      text: `🗑 ${i + 1}. ${b.type === "video" ? "🎞" : "🖼"} ${cut(b.link || "без ссылки", 34)}`,
+      callback_data: `adm:bndel:${b.id}`,
+    },
+  ]);
+  if (list.length < MAX_BANNERS) keyboard.push([{ text: "➕ Добавить баннер", callback_data: "adm:bnadd" }]);
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return { text: lines.join("\n"), keyboard };
+}
+
+// Replies in the arbiter chat while adding a banner: media first, then the link.
+async function handleBannerInput(msg: TgMessage): Promise<boolean> {
+  const key = String(msg.chat.id);
+  const st = bannerSetup.get(key);
+  if (!st) return false;
+  if (st.phase === "media") {
+    const media = extractBannerMedia(msg);
+    if (!media) {
+      await tgSoft("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "Пришлите картинку, видео или GIF одним сообщением (не текстом). Или /admin, чтобы выйти.",
+      });
+      return true;
+    }
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Загружаю медиа…" });
+    const bytes = await downloadTelegramFile(media.fileId);
+    if (!bytes) {
+      await tgSoft("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "Не удалось загрузить файл. Для баннера подойдёт картинка / видео / GIF до 20 МБ. Пришлите ещё раз.",
+      });
+      return true;
+    }
+    const id = newBannerId();
+    saveBannerFile(id, bytes);
+    st.draft = { type: media.type, file: id, mime: media.mime };
+    st.phase = "link";
+    await tgSoft("sendMessage", {
+      chat_id: msg.chat.id,
+      text: "Медиа сохранено. Теперь пришлите ссылку (https://… или t.me/…), которая откроется по тапу на баннер.\nЕсли ссылка не нужна — отправьте «-».",
+    });
+    return true;
+  }
+  // Link phase.
+  if (!msg.text) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Пришлите ссылку текстом (https://…) или «-», чтобы без ссылки." });
+    return true;
+  }
+  const link = normalizeBannerLink(msg.text);
+  if (link === null) {
+    await tgSoft("sendMessage", {
+      chat_id: msg.chat.id,
+      text: "Это не похоже на ссылку. Пришлите адрес вида https://… или t.me/…, либо «-» без ссылки.",
+    });
+    return true;
+  }
+  const draft = st.draft;
+  bannerSetup.delete(key);
+  if (!draft) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Медиа не найдено, начните заново: /admin → Баннеры." });
+    return true;
+  }
+  const banner: Banner = {
+    id: draft.file,
+    type: draft.type,
+    file: draft.file,
+    mime: draft.mime,
+    link,
+    createdAt: Date.now(),
+  };
+  bindings.banners = [...(bindings.banners || []), banner].slice(-MAX_BANNERS);
+  saveBindings();
+  const view = adminBanners();
+  await tgSoft("sendMessage", {
+    chat_id: msg.chat.id,
+    text: `Баннер добавлен${link ? "" : " (без ссылки)"}.\n\n${view.text}`,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: view.keyboard },
+  });
+  return true;
 }
 
 async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string) {
@@ -5278,6 +5495,32 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     removeCheckChannelFromIndex(target);
     await answer("Канал убран");
     await renderAdmin(cb, adminCheck());
+    return;
+  }
+  if (action === "bn") {
+    bannerSetup.delete(String(chatId));
+    await answer();
+    await renderAdmin(cb, adminBanners());
+    return;
+  }
+  if (action === "bnadd") {
+    if ((bindings.banners || []).length >= MAX_BANNERS) {
+      await answer("Достигнут лимит баннеров", true);
+      await renderAdmin(cb, adminBanners());
+      return;
+    }
+    bannerSetup.set(String(chatId), { phase: "media" });
+    await answer("Пришлите медиа для баннера");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите картинку, видео или GIF для баннера (до 20 МБ). Следующим сообщением попрошу ссылку.",
+    });
+    return;
+  }
+  if (action === "bndel") {
+    removeBannerById(rest.join(":"));
+    await answer("Баннер удалён");
+    await renderAdmin(cb, adminBanners());
     return;
   }
   if (action === "ch") {
@@ -5777,6 +6020,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
     return;
   }
 
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && bannerSetup.has(String(msg.chat.id)) && (await handleBannerInput(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;

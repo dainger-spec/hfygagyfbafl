@@ -366,6 +366,8 @@ declare global {
         viewportHeight?: number;
         viewportStableHeight?: number;
         close?: () => void;
+        openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+        openTelegramLink?: (url: string) => void;
         setHeaderColor?: (color: string) => void;
         setBackgroundColor?: (color: string) => void;
         setBottomBarColor?: (color: string) => void;
@@ -397,6 +399,31 @@ declare global {
       first_name?: string;
       last_name?: string;
     };
+  }
+}
+
+// Opens a link from inside Telegram: t.me / tg:// links go through the native
+// handler, everything else opens in the in-app browser, with a plain-tab fallback.
+export function openExternal(url: string) {
+  if (!url) return;
+  try {
+    const tg = window.Telegram?.WebApp;
+    const isTg = /^tg:\/\//i.test(url) || /(?:t\.me|telegram\.me)\//i.test(url);
+    if (isTg && tg?.openTelegramLink) {
+      tg.openTelegramLink(url);
+      return;
+    }
+    if (tg?.openLink) {
+      tg.openLink(url);
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch {
+    /* ignore */
   }
 }
 

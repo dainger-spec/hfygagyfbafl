@@ -116,3 +116,8 @@ export const getFeatures = createServerFn({ method: "GET" }).handler(async () =>
   const { featuresEnabled } = await import("@/lib/telegram-bot.server");
   return featuresEnabled();
 });
+
+export const getBanners = createServerFn({ method: "GET" }).handler(async () => {
+  const { listBanners } = await import("@/lib/telegram-bot.server");
+  return listBanners();
+});
