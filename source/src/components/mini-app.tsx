@@ -694,6 +694,15 @@ const RECENT_CACHE_KEY = "epb-recent-bl";
 
 const EUROPE_PROMO_URL = "https://t.me/EuropePromo";
 
+// Short, clean label for a source forum/channel in the "Найден на форумах" list
+// (e.g. "WWH Info" → "WWH"). Easy to extend with more aliases.
+const FORUM_ALIASES: { re: RegExp; name: string }[] = [{ re: /wwh/i, name: "WWH" }];
+function forumName(title: string): string {
+  const t = (title || "").trim();
+  for (const a of FORUM_ALIASES) if (a.re.test(t)) return a.name;
+  return t || "форум";
+}
+
 const fmtBlDate = (locale: Locale, ms: number) =>
   ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
 
@@ -865,7 +874,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                       className="block rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="font-semibold">{c.channelTitle}</p>
+                        <p className="font-semibold">{forumName(c.channelTitle)}</p>
                         <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
                           {t(locale, "checkOpen")} <ExternalLink className="size-3" />
                         </span>
