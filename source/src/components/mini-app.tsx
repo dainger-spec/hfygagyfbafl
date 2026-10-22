@@ -358,15 +358,16 @@ function Banners() {
   );
 }
 
-type TickerItem = { id: string; account: string; amount?: string; currency?: string; source?: string };
+type TickerItem = { kind: "epb" | "manual"; id: string; account: string; amount?: string; currency?: string; source?: string };
 
 // Yellow running line on the home screen: up to 7 recent blacklists.
+// Only our own EPB blacklist is shown here — external/manual ones are excluded.
 function BlacklistTicker({ onOpen }: { onOpen?: () => void }) {
   const [items, setItems] = useState<TickerItem[]>([]);
   useEffect(() => {
     void getRecentBlacklist({ data: { initData: telegramInitData() } })
       .then((r) => {
-        if (r.ok) setItems((r.items as TickerItem[]).slice(0, 7));
+        if (r.ok) setItems((r.items as TickerItem[]).filter((e) => e.kind === "epb").slice(0, 7));
       })
       .catch(() => {});
   }, []);
@@ -374,7 +375,7 @@ function BlacklistTicker({ onOpen }: { onOpen?: () => void }) {
 
   const label = (e: TickerItem) => {
     const amt = `${e.amount || ""} ${e.currency || ""}`.trim();
-    return `${e.account}${amt ? ` — ${amt}` : e.source ? ` — ${e.source}` : ""}`;
+    return `${e.account}${amt ? ` — ${amt}` : ""}`;
   };
   const Seq = () => (
     <>

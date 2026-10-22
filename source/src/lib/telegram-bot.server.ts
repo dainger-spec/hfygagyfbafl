@@ -735,29 +735,49 @@ export function listBanners() {
 }
 
 // Sponsors = the chats that receive the broadcast. Shown on a page in the app:
-// chat title + link (public @username, else the bot-admin invite link).
+// chat title + a link that an admin set by hand (never auto-pulled). Chats
+// without an admin-set link are shown by name only.
 let sponsorsCache: { at: number; value: { id: string; title: string; link: string }[] } | null = null;
+
+function invalidateSponsors() {
+  sponsorsCache = null;
+}
 
 export async function listSponsors(): Promise<{ id: string; title: string; link: string }[]> {
   if (sponsorsCache && Date.now() - sponsorsCache.at < 10 * 60 * 1000) return sponsorsCache.value;
   const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
   const value = await Promise.all(
     chats.map(async (c) => {
-      let username = c.username;
-      let link = c.link;
       let title = c.title;
-      if (!username && !link) {
-        const chat = await tgSoft<{ title?: string; username?: string; invite_link?: string }>("getChat", { chat_id: c.id });
-        if (chat?.username) username = chat.username;
-        else if (chat?.invite_link) link = chat.invite_link;
+      // Only a missing title is refreshed from Telegram; the link is never auto-set.
+      if (!title) {
+        const chat = await tgSoft<{ title?: string }>("getChat", { chat_id: c.id });
         if (chat?.title) title = chat.title;
       }
-      const finalLink = username ? `https://t.me/${username.replace(/^@/, "")}` : link || "";
-      return { id: String(c.id), title: title || "Чат", link: finalLink };
+      return { id: String(c.id), title: title || "Чат", link: c.link || "" };
     }),
   );
   sponsorsCache = { at: Date.now(), value };
   return value;
+}
+
+// Admin sets (or clears with "") a chat's sponsor link. Only https / t.me links.
+export function setSponsorLink(chatId: string | number, raw: string): "set" | "cleared" | "bad" {
+  const relay = findRelay(chatId);
+  if (!relay) return "bad";
+  const text = (raw || "").trim();
+  if (text === "-" || text === "—" || text === "") {
+    delete relay.link;
+    saveBindings();
+    invalidateSponsors();
+    return "cleared";
+  }
+  const ok = /^https:\/\/[^\s]+$/i.test(text) || /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[^\s]+$/i.test(text);
+  if (!ok) return "bad";
+  relay.link = text.startsWith("http") ? text : `https://${text}`;
+  saveBindings();
+  invalidateSponsors();
+  return "set";
 }
 
 function removeBannerById(id: string) {
@@ -2396,8 +2416,9 @@ export type BlacklistEntry = {
 
 const DEFAULT_MANUAL_SOURCE = "Сторонний источник";
 
-// The most recent blacklist entries, newest first. Only our own EPB blacklist
-// (published complaints) — third-party / manual entries are not listed here.
+// The most recent blacklist entries, newest first: our EPB blacklist plus the
+// manually added (third-party) ones. The home ticker filters to EPB only; the
+// check page shows both.
 export function recentBlacklist(limit = 24): BlacklistEntry[] {
   if (!checkEnabled()) return [];
   const out: BlacklistEntry[] = [];
@@ -2410,6 +2431,16 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
+    });
+  }
+  for (const e of bindings.manualBlacklist || []) {
+    out.push({
+      kind: "manual",
+      id: e.id,
+      account: e.username ? `@${e.username.replace(/^@/, "")}` : e.telegramId ? `ID ${e.telegramId}` : "",
+      date: e.addedAt || 0,
+      source: e.source || DEFAULT_MANUAL_SOURCE,
+      note: e.note,
     });
   }
   out.sort((a, b) => b.date - a.date);
@@ -3787,6 +3818,8 @@ const channelSetup = new Set<string>();
 const checkChannelSetup = new Set<string>();
 const removeFromCheckSetup = new Set<string>();
 const addBlacklistSetup = new Set<string>();
+// Arbiter chat -> which relay chat we are setting a sponsor link for.
+const sponsorLinkSetup = new Map<string, { relayId: string; filter: string; page: string }>();
 // Two-step "add banner" flow in the admin panel: first the media, then the link.
 const bannerSetup = new Map<string, { phase: "media" | "link"; draft?: { type: "image" | "video"; file: string; mime: string; width?: number; height?: number } }>();
 
@@ -5360,12 +5393,18 @@ async function adminRelayCard(chatId: string, filter: string, page: string, note
       `ID: <code>${escapeHtml(relay.id)}</code>`,
       `Тип: ${chatKindLabel(relay.type)}`,
       `Статус: ${statusIcon(relay.status)} ${statusText(relay.status)}`,
+      `Ссылка спонсора: ${relay.link ? `<code>${escapeHtml(relay.link)}</code>` : "не задана"}`,
       relay.requestedAt ? `Запрос: ${ago(relay.requestedAt)}` : "",
       note ? `\n${note}` : "",
     ]
       .filter(Boolean)
       .join("\n"),
-    keyboard: [[toggle], [{ text: "🔍 Проверить права бота", callback_data: `adm:rchk:${suffix}` }], [back]],
+    keyboard: [
+      [toggle],
+      [{ text: relay.link ? "🔗 Изменить ссылку спонсора" : "🔗 Задать ссылку спонсора", callback_data: `adm:rlink:${suffix}` }],
+      [{ text: "🔍 Проверить права бота", callback_data: `adm:rchk:${suffix}` }],
+      [back],
+    ],
   };
 }
 
@@ -5568,6 +5607,25 @@ async function handleBannerInput(msg: TgMessage): Promise<boolean> {
     reply_markup: { inline_keyboard: view.keyboard },
   });
   return true;
+}
+
+async function applySponsorLink(arbiterChatId: number | string, raw: string) {
+  const st = sponsorLinkSetup.get(String(arbiterChatId));
+  sponsorLinkSetup.delete(String(arbiterChatId));
+  if (!st) return;
+  const res = setSponsorLink(st.relayId, raw);
+  if (res === "bad") {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Это не похоже на ссылку. Пришлите https://… или t.me/…, либо «-», чтобы убрать." });
+    return;
+  }
+  const view = await adminRelayCard(st.relayId, st.filter, st.page, res === "set" ? "Ссылка спонсора сохранена." : "Ссылка спонсора убрана.");
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: view.text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: view.keyboard },
+  });
 }
 
 async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string) {
@@ -5792,6 +5850,19 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
   if (action === "rchk") {
     await answer("Проверяем…");
     await renderAdmin(cb, await adminRelayCard(target, filter, page, await botRightsNote(target)));
+    return;
+  }
+  if (action === "rlink") {
+    if (!findRelay(target)) {
+      await answer("Чата уже нет в списке", true);
+      return;
+    }
+    sponsorLinkSetup.set(String(chatId), { relayId: target, filter, page });
+    await answer("Пришлите ссылку");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите ссылку на чат (https://… или t.me/…), которая будет прикреплена к названию на странице «Спонсоры проекта». Чтобы убрать ссылку — отправьте «-».",
+    });
     return;
   }
   if (action === "ap") {
@@ -6424,6 +6495,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   }
   if (isOfficialArbiterChat(msg.chat.id) && addBlacklistSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyAddToBlacklist(msg.chat.id, msg.text);
+    return;
+  }
+  if (isOfficialArbiterChat(msg.chat.id) && sponsorLinkSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applySponsorLink(msg.chat.id, msg.text);
     return;
   }
   if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
