@@ -122,6 +122,11 @@ export const getBanners = createServerFn({ method: "GET" }).handler(async () => 
   return listBanners();
 });
 
+export const getSponsors = createServerFn({ method: "GET" }).handler(async () => {
+  const { listSponsors } = await import("@/lib/telegram-bot.server");
+  return listSponsors();
+});
+
 export const getRecentBlacklist = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384) }))
   .handler(async ({ data }) => {

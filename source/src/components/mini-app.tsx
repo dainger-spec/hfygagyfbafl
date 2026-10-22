@@ -14,13 +14,13 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { hasSavedLocale, t, type Locale } from "@/lib/i18n";
 
-export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check";
+export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors";
 
 export function MiniApp({
   page,
@@ -46,6 +46,7 @@ export function MiniApp({
   const openHistory = useCallback(() => onPage("history"), [onPage]);
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
   const openCheck = useCallback(() => onPage("check"), [onPage]);
+  const openSponsors = useCallback(() => onPage("sponsors"), [onPage]);
   const [checkOn, setCheckOn] = useState(false);
   const [introDone, setIntroDone] = useState(false);
   const onIntroDone = useCallback(() => setIntroDone(true), []);
@@ -118,7 +119,7 @@ export function MiniApp({
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
-          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} checkOn={checkOn} />
+          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} checkOn={checkOn} />
         ) : null}
         {showApp && page === "apply" ? (
           <ApplyForm
@@ -131,6 +132,7 @@ export function MiniApp({
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
         {showApp && page === "check" && checkOn ? <CheckCounterparty /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
+        {showApp && page === "sponsors" ? <SponsorsPage /> : null}
         {showApp && page === "done" ? (
           <Done
             onPage={onPage}
@@ -415,6 +417,7 @@ function Home({
   onHistory,
   onOwners,
   onCheck,
+  onSponsors,
   checkOn,
 }: {
   identity: { username: string; firstName?: string; telegramId: string };
@@ -422,6 +425,7 @@ function Home({
   onHistory: () => void;
   onOwners: () => void;
   onCheck: () => void;
+  onSponsors: () => void;
   checkOn: boolean;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
@@ -472,13 +476,119 @@ function Home({
           {t(locale, "subscribe")}
         </a>
       </div>
+      <div className="mx-auto w-full max-w-md">
+        <SponsorsTicker onOpen={onSponsors} />
+      </div>
       <button
         type="button"
         onClick={onOwners}
-        className="mx-auto mb-5 text-sm font-medium text-muted underline underline-offset-4"
+        className="mx-auto mb-5 mt-4 text-sm font-medium text-muted underline underline-offset-4"
       >
         {t(locale, "ownersLink")}
       </button>
+    </div>
+  );
+}
+
+// Yellow running line at the bottom of the home screen: the broadcast sponsors.
+function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [items, setItems] = useState<{ id: string; title: string; link: string }[]>([]);
+  useEffect(() => {
+    void getSponsors()
+      .then((s) => setItems(Array.isArray(s) ? s : []))
+      .catch(() => {});
+  }, []);
+  if (!items.length) return null;
+
+  const Seq = () => (
+    <>
+      <span className="inline-flex items-center">
+        <span className="text-gold/70">{t(locale, "sponsorsTitle")}</span>
+        <span className="mx-3 text-gold/40">·</span>
+      </span>
+      {items.map((s) => (
+        <span key={s.id} className="inline-flex items-center">
+          <span>{s.title}</span>
+          <span className="mx-3 text-gold/40">/</span>
+        </span>
+      ))}
+    </>
+  );
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (onOpen) {
+          haptic("light");
+          onOpen();
+        }
+      }}
+      aria-label="project sponsors"
+      className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      style={{ "--epb-marquee-dur": `${Math.max(18, items.length * 5)}s` } as CSSProperties}
+    >
+      <div className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
+        <Seq />
+        <Seq />
+      </div>
+      <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
+      <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
+    </button>
+  );
+}
+
+function SponsorsPage() {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [items, setItems] = useState<{ id: string; title: string; link: string }[] | null>(null);
+  useEffect(() => {
+    void getSponsors()
+      .then((s) => setItems(Array.isArray(s) ? s : []))
+      .catch(() => setItems([]));
+  }, []);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
+        <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
+        {items === null ? (
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="h-[52px] animate-pulse rounded-2xl bg-surface/60" />
+            ))}
+          </div>
+        ) : items.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted">{t(locale, "sponsorsEmpty")}</p>
+        ) : (
+          <div className="space-y-2">
+            {items.map((s) =>
+              s.link ? (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => {
+                    haptic("light");
+                    openExternal(s.link);
+                  }}
+                  className="flex w-full items-center justify-between gap-2 rounded-2xl bg-surface/70 p-3 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                >
+                  <span className="truncate font-semibold text-gold">{s.title}</span>
+                  <ExternalLink className="size-4 shrink-0 text-gold" />
+                </button>
+              ) : (
+                <div
+                  key={s.id}
+                  className="rounded-2xl bg-surface/70 p-3 font-semibold shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                >
+                  {s.title}
+                </div>
+              ),
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

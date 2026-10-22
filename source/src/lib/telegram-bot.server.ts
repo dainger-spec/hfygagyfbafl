@@ -76,6 +76,9 @@ type RelayChat = {
   requestedAt?: number;
   // Last "not enough rights" notice, so admins are not spammed on every post.
   rightsNoticeAt?: number;
+  // Public handle / invite link, shown on the "Sponsors" page (filled lazily).
+  username?: string;
+  link?: string;
 };
 
 // A promo banner shown at the top of the mini app. "video" covers real videos
@@ -729,6 +732,32 @@ export function listBanners() {
     height: b.height,
     src: `/api/telegram/banner?id=${encodeURIComponent(b.id)}`,
   }));
+}
+
+// Sponsors = the chats that receive the broadcast. Shown on a page in the app:
+// chat title + link (public @username, else the bot-admin invite link).
+let sponsorsCache: { at: number; value: { id: string; title: string; link: string }[] } | null = null;
+
+export async function listSponsors(): Promise<{ id: string; title: string; link: string }[]> {
+  if (sponsorsCache && Date.now() - sponsorsCache.at < 10 * 60 * 1000) return sponsorsCache.value;
+  const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
+  const value = await Promise.all(
+    chats.map(async (c) => {
+      let username = c.username;
+      let link = c.link;
+      let title = c.title;
+      if (!username && !link) {
+        const chat = await tgSoft<{ title?: string; username?: string; invite_link?: string }>("getChat", { chat_id: c.id });
+        if (chat?.username) username = chat.username;
+        else if (chat?.invite_link) link = chat.invite_link;
+        if (chat?.title) title = chat.title;
+      }
+      const finalLink = username ? `https://t.me/${username.replace(/^@/, "")}` : link || "";
+      return { id: String(c.id), title: title || "Чат", link: finalLink };
+    }),
+  );
+  sponsorsCache = { at: Date.now(), value };
+  return value;
 }
 
 function removeBannerById(id: string) {
