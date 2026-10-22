@@ -278,7 +278,7 @@ export const botDict = {
     applyBtn: "📝 Подать жалобу",
     langBtn: "🌐 Язык / Language",
     back: "Назад",
-    statsLine: "📡 Подключено чатов: {chats} · аудитория ~{audience}",
+    statsLine: "📊 Подключено чатов: {chats} · аудитория ~{audience}",
     owners:
       "<b>Для владельцев чатов</b>\n\nБот можно добавить в группу или канал. Тогда при публикации с рассылкой туда уйдёт тот же пост, что в Europe Private Blacklist.\n\n<b>Как подключить</b>\n1. Добавьте @{bot} в чат или канал.\n\n<b>2. Сделайте бота администратором и выдайте права:</b>\n- группа: отправка сообщений и медиа\n- канал: публикация сообщений и медиа\n\n3. Все новые блеки будут автоматом публиковаться в Ваш чат/канал\n\nНужна помощь с добавлением - напишите <a href=\"https://t.me/EuropePromo\">@EuropePromo</a>",
     applyStart: "📝 Заявка на блеклист\nЗаполните по шагам. Отменить можно кнопкой ниже в любой момент.",
@@ -340,7 +340,7 @@ export const botDict = {
     applyBtn: "📝 File a complaint",
     langBtn: "🌐 Language / Язык",
     back: "Back",
-    statsLine: "📡 Connected chats: {chats} · audience ~{audience}",
+    statsLine: "📊 Connected chats: {chats} · audience ~{audience}",
     owners:
       "<b>For chat owners</b>\n\nYou can add the bot to a group or channel. Then broadcast posts go there the same way as to Europe Private Blacklist.\n\n<b>How to connect</b>\n1. Add @{bot} to the chat or channel.\n\n<b>2. Make the bot an admin and grant:</b>\n- group: send messages and media\n- channel: post messages and media\n\n3. New blacklist posts will be published to your chat/channel automatically\n\nNeed help adding it - write <a href=\"https://t.me/EuropePromo\">@EuropePromo</a>",
     applyStart: "📝 Blacklist complaint\nFill it step by step. You can cancel with the button below any time.",

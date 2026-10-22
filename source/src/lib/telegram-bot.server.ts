@@ -7,6 +7,7 @@ import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonR
 import { scammerAccounts } from "@/lib/types";
 import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
+import { applyCustomEmoji, hasCustomEmoji, stripCustomEmoji } from "@/lib/telegram-emoji";
 
 function botToken() {
   return process.env.TELEGRAM_BOT_TOKEN || "";
@@ -122,6 +123,8 @@ type Bindings = {
   manualBlacklist?: ManualBlacklistEntry[];
   // Baseline total audience shown in the stats line (owner can set it).
   audienceBase?: number;
+  // Premium custom emoji in private-chat messages (default on).
+  customEmoji?: boolean;
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -985,6 +988,46 @@ async function tgSoft<T>(method: string, body: Record<string, unknown> = {}): Pr
   } catch {
     return null;
   }
+}
+
+// Premium custom emoji are on by default (the owner has Premium); EPB_CUSTOM_EMOJI=0
+// or the /emoji off command turns them off, and the runtime fallback below means
+// they can never break a message either way.
+function customEmojiEnabled(): boolean {
+  if (typeof bindings.customEmoji === "boolean") return bindings.customEmoji;
+  return process.env.EPB_CUSTOM_EMOJI === "0" ? false : true;
+}
+
+// Telegram private chats have positive ids; groups/channels are negative. Custom
+// emoji here are only ever put in private-chat text, so this gates the transform.
+function isPrivateChat(chatId: string | number): boolean {
+  return Number(chatId) > 0;
+}
+
+function isCustomEmojiError(err: unknown): boolean {
+  return err instanceof TgError && /emoji/i.test(err.message || "");
+}
+
+// Sends a private-chat text message, upgrading known plain emoji to Premium
+// custom emoji. If Telegram rejects the custom emoji (e.g. premium lapsed), it
+// resends once as plain text so the message is never lost. Behaves like tgSoft.
+async function sendCeMessage(
+  chatId: string | number,
+  text: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ message_id: number } | null> {
+  if (customEmojiEnabled() && isPrivateChat(chatId)) {
+    const rich = applyCustomEmoji(text);
+    if (hasCustomEmoji(rich)) {
+      try {
+        return await tg("sendMessage", { chat_id: chatId, text: rich, parse_mode: "HTML", ...extra });
+      } catch (err) {
+        if (!isCustomEmojiError(err)) return null;
+        // fall through to plain send
+      }
+    }
+  }
+  return tgSoft("sendMessage", { chat_id: chatId, text, ...extra });
 }
 
 function escapeHtml(value: string): string {
@@ -4081,29 +4124,55 @@ async function sendCard(
   caption: string,
   extra: Record<string, unknown> = {},
 ) {
+  // Premium custom emoji in private-chat captions, with a plain-caption retry
+  // if Telegram rejects them, so the card is never lost.
+  const useCe = customEmojiEnabled() && isPrivateChat(chatId);
+  const rich = useCe ? applyCustomEmoji(caption) : caption;
+  const cap = hasCustomEmoji(rich) ? rich : caption;
+  const plain = caption;
+  const trySend = async (method: string, build: (c: string) => Record<string, unknown>) => {
+    try {
+      return await tg(method, build(cap));
+    } catch (err) {
+      if (cap !== plain && isCustomEmojiError(err)) {
+        return await tgSoft(method, build(plain));
+      }
+      return null;
+    }
+  };
+
   const cached = bindings.cards?.[kind];
   if (cached) {
-    const sent = await tgSoft("sendPhoto", {
+    const sent = await trySend("sendPhoto", (c) => ({
       chat_id: chatId,
       photo: cached,
-      caption,
+      caption: c,
       parse_mode: "HTML",
       ...extra,
-    });
+    }));
     if (sent) return;
     if (bindings.cards) delete bindings.cards[kind];
     saveBindings();
   }
   const bytes = cardBytes(kind);
   if (bytes?.length) {
-    const form = new FormData();
-    form.set("chat_id", String(chatId));
-    form.set("caption", caption);
-    form.set("parse_mode", "HTML");
-    if (extra.reply_markup) form.set("reply_markup", JSON.stringify(extra.reply_markup));
-    form.set("photo", new File([new Uint8Array(bytes)], `${kind}.jpg`, { type: "image/jpeg" }));
+    const sendForm = (c: string) => {
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("caption", c);
+      form.set("parse_mode", "HTML");
+      if (extra.reply_markup) form.set("reply_markup", JSON.stringify(extra.reply_markup));
+      form.set("photo", new File([new Uint8Array(bytes)], `${kind}.jpg`, { type: "image/jpeg" }));
+      return tgForm<{ photo?: { file_id: string }[] }>("sendPhoto", form);
+    };
     try {
-      const sent = await tgForm<{ photo?: { file_id: string }[] }>("sendPhoto", form);
+      let sent: { photo?: { file_id: string }[] };
+      try {
+        sent = await sendForm(cap);
+      } catch (err) {
+        if (cap !== plain && isCustomEmojiError(err)) sent = await sendForm(plain);
+        else throw err;
+      }
       const fileId = sent.photo?.at(-1)?.file_id;
       if (fileId) {
         bindings.cards = { ...bindings.cards, [kind]: fileId };
@@ -4114,13 +4183,13 @@ async function sendCard(
       /* fall through to text */
     }
   }
-  await tgSoft("sendMessage", {
+  await trySend("sendMessage", (c) => ({
     chat_id: chatId,
-    text: caption,
+    text: c,
     parse_mode: "HTML",
     disable_web_page_preview: true,
     ...extra,
-  });
+  }));
 }
 
 async function replyStart(chatId: number, userId?: string | number) {
@@ -4185,13 +4254,13 @@ async function askScammer(chatId: number, session?: ApplySession) {
     ]);
   }
   rows.push(applyCancelRow(chatId));
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: session?.accounts.length
+  await sendCeMessage(
+    chatId,
+    session?.accounts.length
       ? btUser(chatId, "accountsListed", { list: listed })
       : btUser(chatId, "stepAccounts"),
-    reply_markup: { inline_keyboard: rows },
-  });
+    { reply_markup: { inline_keyboard: rows } },
+  );
 }
 
 async function askVictim(chatId: number, session: ApplySession) {
@@ -4208,33 +4277,25 @@ async function askVictim(chatId: number, session: ApplySession) {
 }
 
 async function askSummary(chatId: number) {
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "stepSummary"),
+  await sendCeMessage(chatId, btUser(chatId, "stepSummary"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askStory(chatId: number) {
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "stepStory"),
+  await sendCeMessage(chatId, btUser(chatId, "stepStory"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askAmount(chatId: number) {
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "stepAmount"),
+  await sendCeMessage(chatId, btUser(chatId, "stepAmount"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askCurrency(chatId: number, amount: string) {
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "pickCurrency", { amount: formatAmount(amount) }),
+  await sendCeMessage(chatId, btUser(chatId, "pickCurrency", { amount: formatAmount(amount) }), {
     reply_markup: {
       inline_keyboard: [
         [
@@ -4248,9 +4309,7 @@ async function askCurrency(chatId: number, amount: string) {
 }
 
 async function askEvidence(chatId: number) {
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "stepEvidence"),
+  await sendCeMessage(chatId, btUser(chatId, "stepEvidence"), {
     reply_markup: {
       inline_keyboard: [
         [
@@ -4294,10 +4353,7 @@ async function askConfirm(chatId: number, session: ApplySession) {
 async function startApply(chatId: number, from: TgUser) {
   const session = newSession(from);
   sessions.set(String(from.id), session);
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(from.id, "applyStart"),
-  });
+  await sendCeMessage(chatId, btUser(from.id, "applyStart"));
   await askScammer(chatId, session);
 }
 
@@ -6594,6 +6650,23 @@ async function handleTelegramUpdate(update: TgUpdate) {
     await tgSoft("sendMessage", {
       chat_id: msg.chat.id,
       text: `Базовая аудитория обновлена: ~${n.toLocaleString("ru-RU")}. Показывается в приложении (с учётом реального числа участников чатов).`,
+    });
+    return;
+  }
+  if (cmd === "emoji") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    const arg = (msg.text || "").replace(/^\/\S+\s*/, "").trim().toLowerCase();
+    if (arg === "on" || arg === "off") {
+      bindings.customEmoji = arg === "on";
+      saveBindings();
+    }
+    const state = customEmojiEnabled() ? "включены" : "выключены";
+    await tgSoft("sendMessage", {
+      chat_id: msg.chat.id,
+      text:
+        arg === "on" || arg === "off"
+          ? `Премиум-эмодзи ${state}. Работают в личных сообщениях бота (меню и шаги жалобы), пока у владельца активен Telegram Premium.`
+          : `Премиум-эмодзи сейчас ${state}. Включить: /emoji on · выключить: /emoji off`,
     });
     return;
   }
