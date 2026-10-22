@@ -240,11 +240,11 @@ function Banners() {
   };
 
   return (
-    <div className="pt-3">
+    <div className="mx-auto w-full max-w-md pt-3">
       <div
         ref={scrollerRef}
         onScroll={onScroll}
-        className="flex snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex snap-x snap-mandatory items-start gap-3 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {items.map((b) => (
           <button
@@ -253,10 +253,12 @@ function Banners() {
             onClick={() => open(b.link)}
             aria-label="banner"
             className={cn(
-              "relative aspect-[16/7] w-full shrink-0 snap-center overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
+              "relative block w-full shrink-0 snap-center overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
               b.link ? "cursor-pointer" : "cursor-default",
             )}
           >
+            {/* Height follows the media's own aspect ratio (max 80vh so a tall
+                portrait never swallows the whole screen). */}
             {b.type === "video" ? (
               <video
                 src={b.src}
@@ -265,10 +267,10 @@ function Banners() {
                 loop
                 playsInline
                 preload="metadata"
-                className="size-full object-cover"
+                className="block h-auto max-h-[80vh] w-full object-contain"
               />
             ) : (
-              <img src={b.src} alt="" className="size-full object-cover" loading="lazy" />
+              <img src={b.src} alt="" className="block h-auto max-h-[80vh] w-full object-contain" loading="lazy" />
             )}
           </button>
         ))}
