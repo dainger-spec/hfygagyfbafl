@@ -1662,10 +1662,12 @@ async function searchMessages(
   peer: unknown,
   query: string,
 ): Promise<{ id?: number; message?: string; date?: number }[]> {
-  const get = (client as unknown as UserClientSearch).getMessages;
-  const found = (await withTimeout(get(peer, { search: searchQueryFor(query), limit: 40 }), 15_000, "search timeout")) || [];
+  // Must be called as a method on the client — gramjs getMessages uses `this`
+  // internally (this.iterMessages), so a detached reference would throw.
+  const c = client as unknown as UserClientSearch;
+  const found = (await withTimeout(c.getMessages(peer, { search: searchQueryFor(query), limit: 40 }), 15_000, "search timeout")) || [];
   if (found.length > 0) return found;
-  return (await withTimeout(get(peer, { limit: 200 }), 20_000, "scan timeout")) || [];
+  return (await withTimeout(c.getMessages(peer, { limit: 200 }), 20_000, "scan timeout")) || [];
 }
 
 // Telegram's full-text search splits on underscores/punctuation, so a username
