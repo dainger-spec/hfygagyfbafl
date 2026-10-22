@@ -1418,9 +1418,38 @@ function userbot() {
   return userClient;
 }
 
+// A fresh client from a saved session only knows the channels whose access
+// hashes were in that session. Private channels (no @username) can't be resolved
+// by id until the dialog list is loaded once; we then re-save the session so the
+// access hashes persist for the next process.
+let userEntitiesLoaded = false;
+async function ensureUserEntities(client: UserClient): Promise<void> {
+  if (userEntitiesLoaded) return;
+  userEntitiesLoaded = true;
+  try {
+    await withTimeout((client as unknown as { getDialogs: (o: unknown) => Promise<unknown> }).getDialogs({ limit: 300 }), 25_000, "dialogs timeout");
+    const saved = (client as unknown as { session?: { save?: () => string } }).session?.save?.();
+    if (typeof saved === "string" && saved) saveUserSession(saved);
+  } catch {
+    userEntitiesLoaded = false; // allow a later retry
+  }
+}
+
+// Resolve a channel to an input peer, loading the dialog list once if a private
+// channel isn't cached yet.
+async function userInputPeer(client: UserClient, ref: string | number): Promise<unknown> {
+  try {
+    return await client.getInputEntity(ref);
+  } catch {
+    await ensureUserEntities(client);
+    return client.getInputEntity(ref);
+  }
+}
+
 function dropUserbot() {
   const pending = userClient;
   userClient = null;
+  userEntitiesLoaded = false;
   if (userIdleTimer) clearTimeout(userIdleTimer);
   userIdleTimer = null;
   pending
@@ -1497,7 +1526,7 @@ async function channelPostDeleted(rec: PendingPost): Promise<boolean> {
   if (cached && Date.now() - cached.at < 5 * 60_000) return cached.deleted;
   try {
     const { client } = await userbot();
-    const peer = await client.getInputEntity(chat);
+    const peer = await userInputPeer(client, chat);
     const msgs = (await withTimeout(
       (client as unknown as UserClientFull).getMessages(peer, { ids }),
       12_000,
@@ -1522,7 +1551,7 @@ async function userSearchChannel(channel: CheckChannel, query: string, needle: s
   try {
     const { client, Api } = await userbot();
     const ref: string | number = channel.username ? `@${channel.username.replace(/^@/, "")}` : channel.id;
-    const peer = await client.getInputEntity(ref);
+    const peer = await userInputPeer(client, ref);
     const res = (await withTimeout(
       client.invoke(
         new Api.messages.Search({
@@ -3912,11 +3941,18 @@ function applyKeyboard(locale: Locale) {
   if (url) {
     rows.push([{ text: tb(locale, "openApp"), web_app: { url } }]);
   }
-  rows.push([{ text: tb(locale, "channel"), url: CHANNEL_URL }]);
-  rows.push([{ text: tb(locale, "ownersBtn"), callback_data: "owners" }]);
   rows.push([{ text: tb(locale, "applyBtn"), callback_data: "apply" }]);
+  rows.push([
+    { text: tb(locale, "channel"), url: CHANNEL_URL },
+    { text: tb(locale, "ownersBtn"), callback_data: "owners" },
+  ]);
   rows.push([{ text: tb(locale, "langBtn"), callback_data: "lang" }]);
   return { inline_keyboard: rows };
+}
+
+// Cancel row shown on every step of the in-bot complaint flow.
+function applyCancelRow(chatId: number | string) {
+  return [{ text: btUser(chatId, "cancelBtn"), callback_data: "apply:cancel" }];
 }
 
 function startText(locale: Locale) {
@@ -4101,12 +4137,13 @@ async function askScammer(chatId: number, session?: ApplySession) {
       { text: btUser(chatId, "next"), callback_data: "apply:next" },
     ]);
   }
+  rows.push(applyCancelRow(chatId));
   await tgSoft("sendMessage", {
     chat_id: chatId,
     text: session?.accounts.length
       ? btUser(chatId, "accountsListed", { list: listed })
       : btUser(chatId, "stepAccounts"),
-    reply_markup: rows.length ? { inline_keyboard: rows } : undefined,
+    reply_markup: { inline_keyboard: rows },
   });
 }
 
@@ -4116,9 +4153,9 @@ async function askVictim(chatId: number, session: ApplySession) {
     : `id ${session.victimId} (username нет)`;
   await tgSoft("sendMessage", {
     chat_id: chatId,
-    text: `Шаг 2/5. Ваш контакт, чтобы арбитры могли связаться.\nСейчас: ${current}\nНапишите другой @username или нажмите «Оставить».`,
+    text: `📇 Контакт для связи\nАрбитрам, если понадобится уточнить.\nСейчас: ${current}\nНапишите другой @username или нажмите «Оставить».`,
     reply_markup: {
-      inline_keyboard: [[{ text: "Оставить", callback_data: "apply:keep" }]],
+      inline_keyboard: [[{ text: "✅ Оставить", callback_data: "apply:keep" }], applyCancelRow(chatId)],
     },
   });
 }
@@ -4127,6 +4164,7 @@ async function askSummary(chatId: number) {
   await tgSoft("sendMessage", {
     chat_id: chatId,
     text: btUser(chatId, "stepSummary"),
+    reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
@@ -4134,6 +4172,7 @@ async function askStory(chatId: number) {
   await tgSoft("sendMessage", {
     chat_id: chatId,
     text: btUser(chatId, "stepStory"),
+    reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
@@ -4141,6 +4180,7 @@ async function askAmount(chatId: number) {
   await tgSoft("sendMessage", {
     chat_id: chatId,
     text: btUser(chatId, "stepAmount"),
+    reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
@@ -4151,9 +4191,10 @@ async function askCurrency(chatId: number, amount: string) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "USD", callback_data: "apply:cur:USD" },
-          { text: "EUR", callback_data: "apply:cur:EUR" },
+          { text: "💵 USD", callback_data: "apply:cur:USD" },
+          { text: "💶 EUR", callback_data: "apply:cur:EUR" },
         ],
+        applyCancelRow(chatId),
       ],
     },
   });
@@ -4169,6 +4210,7 @@ async function askEvidence(chatId: number) {
           { text: btUser(chatId, "done"), callback_data: "apply:done" },
           { text: btUser(chatId, "skipFiles"), callback_data: "apply:skip" },
         ],
+        applyCancelRow(chatId),
       ],
     },
   });
