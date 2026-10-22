@@ -306,7 +306,7 @@ for (const rec of Object.values(pendingPosts)) {
 
 // One-time cleanup: remove test blacklist entries for these usernames from the check.
 const BLACKLIST_CLEANUP = ["hugos", "mkcrd", "annuit1", "ballin812"];
-const BLACKLIST_CLEANUP_STAMP = "cleanup-v1";
+const BLACKLIST_CLEANUP_STAMP = "cleanup-v2";
 if (bindings.blacklistCleanupStamp !== BLACKLIST_CLEANUP_STAMP) {
   let changed = false;
   for (const rec of Object.values(pendingPosts)) {
@@ -1233,9 +1233,12 @@ function isOwner(id: string | number | undefined): boolean {
   return String(id || "") === OWNER_ID;
 }
 
-// The counterparty check + userbot are hidden until turned on (env or owner command).
+// Blacklist search (counterparty check) is ON by default. The owner can still
+// hide it with /checkoff, or the host with EPB_CHECK_ENABLED=0.
 function checkEnabled(): boolean {
-  return process.env.EPB_CHECK_ENABLED === "1" || bindings.checkEnabled === true;
+  if (typeof bindings.checkEnabled === "boolean") return bindings.checkEnabled;
+  if (process.env.EPB_CHECK_ENABLED === "0") return false;
+  return true;
 }
 export function featuresEnabled() {
   return { check: checkEnabled() };
@@ -5163,7 +5166,12 @@ function adminHome(): AdminView {
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
       [{ text: `🖼 Баннеры (${(bindings.banners || []).length})`, callback_data: "adm:bn" }],
-      ...(checkEnabled() ? [[{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }]] : []),
+      ...(checkEnabled()
+        ? [
+            [{ text: "🧹 Убрать юзера из блеклиста", callback_data: "adm:ccrm" }],
+            [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
+          ]
+        : []),
       [
         { text: "🔄 Обновить", callback_data: "adm:home" },
         { text: "✖ Закрыть", callback_data: "adm:x" },
