@@ -1546,35 +1546,26 @@ async function channelPostDeleted(rec: PendingPost): Promise<boolean> {
 }
 
 // Full-history search of one channel for a query, via the user account.
+type UserClientSearch = UserClient & {
+  getMessages: (entity: unknown, opts: { search?: string; limit?: number; ids?: number[] }) => Promise<{ id?: number; message?: string; date?: number }[]>;
+};
+
 async function userSearchChannel(channel: CheckChannel, query: string, needle: string): Promise<CheckHit[]> {
   if (Date.now() < userBlockedUntil) return [];
   try {
-    const { client, Api } = await userbot();
+    const { client } = await userbot();
     const ref: string | number = channel.username ? `@${channel.username.replace(/^@/, "")}` : channel.id;
     const peer = await userInputPeer(client, ref);
-    const res = (await withTimeout(
-      client.invoke(
-        new Api.messages.Search({
-          peer,
-          q: query,
-          filter: new Api.InputMessagesFilterEmpty(),
-          minDate: 0,
-          maxDate: 0,
-          offsetId: 0,
-          addOffset: 0,
-          limit: 15,
-          maxId: 0,
-          minId: 0,
-          hash: BigInt(0) as unknown as number,
-        }),
-      ),
+    // High-level search: gramjs builds messages.Search with the right types.
+    const msgs = (await withTimeout(
+      (client as unknown as UserClientSearch).getMessages(peer, { search: query, limit: 20 }),
       15_000,
       "search timeout",
-    )) as { messages?: { id: number; message?: string; date?: number; className?: string }[] };
+    )) as { id?: number; message?: string; date?: number }[];
     const out: CheckHit[] = [];
-    for (const m of res.messages || []) {
+    for (const m of msgs || []) {
       const body = m.message || "";
-      if (!body) continue;
+      if (!m.id || !body) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
@@ -1595,6 +1586,43 @@ async function userSearchChannel(channel: CheckChannel, query: string, needle: s
     }
     return [];
   }
+}
+
+// Diagnostic for the owner: runs a real username search across the configured
+// channels and reports what came back (or the exact error), so a failing search
+// is no longer silent.
+export async function diagnoseUserSearch(input: string): Promise<string> {
+  const parsed = parseTelegramInput(input);
+  const uname = parsed.username.replace(/^@/, "").toLowerCase();
+  const id = parsed.id;
+  const q = uname || id;
+  if (!q) return "Укажите @username или ID для проверки.";
+  if (!hasUserbot()) return "Юзербот не подключён (нет сессии). Подключите: /userbot.";
+  const channels = checkChannels();
+  if (!channels.length) return "Не выбрано ни одного канала для поиска. Выберите: /userbot → каналы.";
+  const st = await userbotStatus();
+  if (!st.ok) return `Аккаунт не отвечает: ${st.error || "ошибка"}`;
+  const lines: string[] = [`Аккаунт: ${st.name || "ок"}. Каналов: ${channels.length}. Ищу «${q}»…`];
+  let total = 0;
+  for (const ch of channels) {
+    const ref = ch.username ? `@${ch.username.replace(/^@/, "")}` : ch.id;
+    try {
+      const { client } = await userbot();
+      const peer = await userInputPeer(client, ref);
+      const msgs = (await withTimeout(
+        (client as unknown as UserClientSearch).getMessages(peer, { search: q, limit: 20 }),
+        15_000,
+        "search timeout",
+      )) as { id?: number }[];
+      const n = (msgs || []).filter((m) => m.id).length;
+      total += n;
+      lines.push(`• ${ch.title || ch.username || ch.id}: найдено ${n}`);
+    } catch (err) {
+      lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
+    }
+  }
+  lines.push(`Итого совпадений: ${total}.`);
+  return lines.join("\n");
 }
 
 
@@ -6548,6 +6576,18 @@ async function handleTelegramUpdate(update: TgUpdate) {
       chat_id: msg.chat.id,
       text: `Базовая аудитория обновлена: ~${n.toLocaleString("ru-RU")}. Показывается в приложении (с учётом реального числа участников чатов).`,
     });
+    return;
+  }
+  if (cmd === "usearch") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    const arg = (msg.text || "").replace(/^\/\S+\s*/, "").trim();
+    if (!arg) {
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Проверка поиска по юзернейму. Пришлите: /usearch @username" });
+      return;
+    }
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Проверяю поиск…" });
+    const report = await diagnoseUserSearch(arg);
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: report });
     return;
   }
   if (cmd === "userbot") {

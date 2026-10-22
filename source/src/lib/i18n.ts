@@ -271,8 +271,7 @@ export function t(locale: Locale, key: Msg, vars?: Record<string, string | numbe
 export const botDict = {
   ru: {
     chooseLang: "Выберите язык / Choose language",
-    start:
-      "<b>Europe Private Blacklist</b>\n\nОткройте приложение, чтобы подать жалобу.\n\nАрбитры проверят материалы: одобрили - пост в канале, отклонили - без публикации.",
+    start: "<b>Europe Private Blacklist</b>\n\nОткройте приложение, чтобы подать жалобу.",
     openApp: "🛡 Открыть приложение",
     channel: "📣 Наш канал",
     ownersBtn: "👥 Владельцам чатов",
@@ -334,8 +333,7 @@ export const botDict = {
   },
   en: {
     chooseLang: "Choose language / Выберите язык",
-    start:
-      "<b>Europe Private Blacklist</b>\n\nOpen the app to file a complaint.\n\nArbiters review the materials: approved - a post in the channel, rejected - no publication.",
+    start: "<b>Europe Private Blacklist</b>\n\nOpen the app to file a complaint.",
     openApp: "🛡 Open app",
     channel: "📣 Our channel",
     ownersBtn: "👥 For chat owners",
