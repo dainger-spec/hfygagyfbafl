@@ -19,6 +19,7 @@ export function EuStarsLogo({
   size = 64,
   title,
   spin = false,
+  fast = false,
   emblem = false,
 }: {
   className?: string;
@@ -26,6 +27,8 @@ export function EuStarsLogo({
   title?: string;
   // Only the ring of stars turns; the emblem in the middle stays still.
   spin?: boolean;
+  // A faster spin, e.g. while a complaint is being sent.
+  fast?: boolean;
   emblem?: boolean;
 }) {
   const stars = Array.from({ length: 12 }, (_, i) => {
@@ -41,7 +44,7 @@ export function EuStarsLogo({
       viewBox="0 0 100 100"
       width={size}
       height={size}
-      className={cn("text-gold", spin && "epb-spin-slow", !emblem && className)}
+      className={cn("text-gold", spin && (fast ? "epb-spin-fast" : "epb-spin-slow"), !emblem && className)}
       role={title && !emblem ? "img" : "presentation"}
       aria-hidden={title && !emblem ? undefined : true}
       aria-label={emblem ? undefined : title}

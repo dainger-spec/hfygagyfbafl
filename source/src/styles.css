@@ -99,6 +99,10 @@
   animation: epb-spin-slow 16s linear infinite;
 }
 
+.epb-spin-fast {
+  animation: epb-spin-slow 2.4s linear infinite;
+}
+
 /* Indeterminate progress bar for the "sending complaint" overlay. */
 .epb-progress {
   position: relative;

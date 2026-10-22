@@ -156,7 +156,7 @@ export function ApplyForm({
     >
       {sending ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-bg/95 px-8 text-center backdrop-blur-sm">
-          <EuStarsLogo size={112} title="Europe Private Blacklist" spin emblem />
+          <EuStarsLogo size={112} title="Europe Private Blacklist" spin fast emblem />
           <div className="space-y-1.5">
             <p className="font-display text-lg font-bold">{t(locale, "sendingTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "sendingHint")}</p>
