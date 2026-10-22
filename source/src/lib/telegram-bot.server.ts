@@ -120,6 +120,8 @@ type Bindings = {
   checkEnabled?: boolean;
   banners?: Banner[];
   manualBlacklist?: ManualBlacklistEntry[];
+  // Baseline total audience shown in the stats line (owner can set it).
+  audienceBase?: number;
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -777,6 +779,37 @@ let sponsorsCache: { at: number; value: SponsorItem[] } | null = null;
 
 function invalidateSponsors() {
   sponsorsCache = null;
+  statsCache = null;
+}
+
+const AUDIENCE_DEFAULT = 20178;
+let statsCache: { at: number; value: { chats: number; audience: number } } | null = null;
+
+// How many chats receive the broadcast and their combined audience. The audience
+// is at least the owner-set baseline (default ~20178), plus any real member count.
+export async function sponsorStats(): Promise<{ chats: number; audience: number }> {
+  if (statsCache && Date.now() - statsCache.at < 10 * 60 * 1000) return statsCache.value;
+  const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
+  let sum = 0;
+  await Promise.all(
+    chats.map(async (c) => {
+      const n = await tgSoft<number>("getChatMemberCount", { chat_id: c.id });
+      if (typeof n === "number" && n > 0) sum += n;
+    }),
+  );
+  const base = typeof bindings.audienceBase === "number" ? bindings.audienceBase : AUDIENCE_DEFAULT;
+  const value = { chats: chats.length, audience: Math.max(base, sum) };
+  statsCache = { at: Date.now(), value };
+  return value;
+}
+
+// Owner sets the baseline audience number shown in the app.
+export function setAudienceBase(n: number): boolean {
+  if (!Number.isFinite(n) || n < 0 || n > 1_000_000_000) return false;
+  bindings.audienceBase = Math.round(n);
+  saveBindings();
+  statsCache = null;
+  return true;
 }
 
 export async function listSponsors(): Promise<SponsorItem[]> {
@@ -6449,6 +6482,19 @@ async function handleTelegramUpdate(update: TgUpdate) {
     await tgSoft("sendMessage", {
       chat_id: msg.chat.id,
       text: cmd === "checkon" ? "Проверка контрагента включена." : "Проверка контрагента выключена и скрыта.",
+    });
+    return;
+  }
+  if (cmd === "audience") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    const n = Number((msg.text || "").replace(/[^\d]/g, ""));
+    if (!setAudienceBase(n)) {
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Укажите число, например: /audience 20178" });
+      return;
+    }
+    await tgSoft("sendMessage", {
+      chat_id: msg.chat.id,
+      text: `Базовая аудитория обновлена: ~${n.toLocaleString("ru-RU")}. Показывается в приложении (с учётом реального числа участников чатов).`,
     });
     return;
   }

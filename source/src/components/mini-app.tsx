@@ -14,7 +14,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -387,6 +387,7 @@ function Home({
       <Banners />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
+        <SponsorStats className="mt-2" />
       </div>
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
@@ -486,6 +487,39 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
 
 type SponsorItem = { id: string; title: string; link: string; avatar: string };
 
+// "Connected chats: N · audience ~X" line. Cached briefly in sessionStorage so
+// it shows instantly on re-open.
+function SponsorStats({ className }: { className?: string }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [stats, setStats] = useState<{ chats: number; audience: number } | null>(() => {
+    try {
+      const raw = sessionStorage.getItem("epb-stats");
+      return raw ? (JSON.parse(raw) as { chats: number; audience: number }) : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    void getSponsorStats()
+      .then((s) => {
+        setStats(s);
+        try {
+          sessionStorage.setItem("epb-stats", JSON.stringify(s));
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch(() => {});
+  }, []);
+  if (!stats || stats.chats <= 0) return null;
+  const fmt = stats.audience.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
+  return (
+    <p className={cn("text-center text-xs text-subtle", className)}>
+      {t(locale, "statsLine", { chats: String(stats.chats), audience: fmt })}
+    </p>
+  );
+}
+
 function SponsorAvatar({ src, title }: { src?: string; title: string }) {
   if (src) return <img src={src} alt="" className="size-9 shrink-0 rounded-full object-cover" loading="lazy" />;
   const letter = (title || "?").replace(/^@/, "").charAt(0).toUpperCase() || "?";
@@ -523,6 +557,7 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
           <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
         </div>
         <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
+        <SponsorStats className="!text-left" />
         {items === null ? (
           <div className="space-y-2">
             {Array.from({ length: 5 }).map((_, i) => (
