@@ -14,7 +14,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getBanners, getFeatures, getMyComplaints, getRecentBlacklist, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -512,10 +512,12 @@ type BlEntry = {
 
 type CheckData = {
   query: { username: string; id: string };
-  epb: { id: string; accounts: string; amount: string; currency: string; date: number; summary: string; story: string }[];
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: { channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
+
+const RECENT_CACHE_KEY = "epb-recent-bl";
 
 const EUROPE_PROMO_URL = "https://t.me/EuropePromo";
 
@@ -528,15 +530,38 @@ function CheckCounterparty() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<CheckData | null>(null);
-  const [recent, setRecent] = useState<BlEntry[]>([]);
+  // Show the cached list instantly, then refresh it in the background.
+  const [recent, setRecent] = useState<BlEntry[]>(() => {
+    try {
+      const raw = sessionStorage.getItem(RECENT_CACHE_KEY);
+      return raw ? (JSON.parse(raw) as BlEntry[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [recentLoading, setRecentLoading] = useState(recent.length === 0);
   const [detail, setDetail] = useState<BlEntry | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     void getRecentBlacklist({ data: { initData: telegramInitData() } })
       .then((r) => {
-        if (r.ok) setRecent(r.items as BlEntry[]);
+        if (cancelled || !r.ok) return;
+        const items = r.items as BlEntry[];
+        setRecent(items);
+        try {
+          sessionStorage.setItem(RECENT_CACHE_KEY, JSON.stringify(items));
+        } catch {
+          /* ignore */
+        }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setRecentLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function run() {
@@ -570,7 +595,7 @@ function CheckCounterparty() {
     setDetail(e);
   };
   const epbEntry = (e: CheckData["epb"][number]): BlEntry => ({
-    kind: "epb", id: e.id, account: e.accounts || e.id, amount: e.amount, currency: e.currency, date: e.date, summary: e.summary, story: e.story,
+    kind: "epb", id: e.id, account: e.accounts || e.id, amount: e.amount, currency: e.currency, date: e.date,
   });
   const manualEntry = (m: CheckData["manual"][number]): BlEntry => ({
     kind: "manual", id: m.id, account: m.account, date: m.date, source: m.source, note: m.note,
@@ -675,12 +700,17 @@ function CheckCounterparty() {
           )
         ) : null}
 
-        {!data && !loading && recent.length ? (
+        {!data && !loading && (recent.length || recentLoading) ? (
           <div className="space-y-2 pt-1">
             <div className="flex items-center gap-2 text-sm font-bold text-muted">
               <ShieldAlert className="size-4" />
               {t(locale, "checkRecent")}
             </div>
+            {recentLoading && !recent.length
+              ? Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="h-[52px] animate-pulse rounded-2xl bg-surface/60" />
+                ))
+              : null}
             {recent.map((e) => (
               <BlacklistRow
                 key={e.id}
@@ -720,7 +750,31 @@ function BlacklistRow({ account, sub, onClick, danger }: { account: string; sub?
 function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const isManual = entry.kind === "manual";
-  const date = fmtBlDate(locale, entry.date);
+  // The list items are light; the EPB situation text is fetched when opened.
+  const [full, setFull] = useState<BlEntry | null>(isManual ? entry : null);
+  const [loadingFull, setLoadingFull] = useState(!isManual);
+
+  useEffect(() => {
+    if (isManual) return;
+    let cancelled = false;
+    void getBlacklistEntry({ data: { id: entry.id, initData: telegramInitData() } })
+      .then((r) => {
+        if (cancelled) return;
+        if (r.ok && r.entry) setFull({ ...entry, ...(r.entry as Partial<BlEntry>) });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingFull(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entry, isManual]);
+
+  const shown = full || entry;
+  const date = fmtBlDate(locale, shown.date);
+  const situation = shown.story || shown.summary;
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
       <div className="mx-auto w-full max-w-md space-y-4">
@@ -736,15 +790,15 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
         </button>
         <div className="flex items-center gap-2 text-danger">
           <ShieldAlert className="size-5 shrink-0" />
-          <h2 className="font-display text-xl font-bold break-words">{entry.account || "—"}</h2>
+          <h2 className="font-display text-xl font-bold break-words">{shown.account || "—"}</h2>
         </div>
 
         {isManual ? (
           <div className="space-y-4">
             <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
-              <p className="text-xs font-semibold text-gold">{entry.source || t(locale, "checkInExternal")}</p>
+              <p className="text-xs font-semibold text-gold">{shown.source || t(locale, "checkInExternal")}</p>
               <p className="mt-2 text-sm leading-relaxed">{t(locale, "checkExternalDesc")}</p>
-              {entry.note ? <p className="mt-2 text-sm leading-relaxed text-muted">{entry.note}</p> : null}
+              {shown.note ? <p className="mt-2 text-sm leading-relaxed text-muted">{shown.note}</p> : null}
             </div>
             <Button
               className="w-full rounded-xl"
@@ -762,16 +816,21 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
               <p className="text-xs text-muted">
                 {t(locale, "checkDamageLabel")}:{" "}
                 <span className="font-semibold text-fg">
-                  {entry.amount} {entry.currency}
+                  {shown.amount} {shown.currency}
                 </span>
                 {date ? ` · ${date}` : ""}
               </p>
             </div>
-            {entry.story || entry.summary ? (
+            {situation ? (
               <div className="space-y-1.5">
                 <p className="text-sm font-bold">{t(locale, "checkSituation")}</p>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted">{entry.story || entry.summary}</p>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted">{situation}</p>
               </div>
+            ) : loadingFull ? (
+              <p className="flex items-center gap-2 py-4 text-sm text-muted">
+                <LoaderCircle className="size-4 animate-spin text-gold" />
+                {t(locale, "checkChecking")}
+              </p>
             ) : null}
             <a
               href={CHANNEL_URL}

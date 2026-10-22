@@ -2347,12 +2347,13 @@ function removeCheckChannelFromIndex(channelId: string) {
 
 export type CheckResult = {
   query: { username: string; id: string };
-  epb: { id: string; accounts: string; amount: string; currency: string; date: number; summary: string; story: string }[];
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: CheckHit[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
 
-// A compact entry for the "recent blacklists" list and the in-app detail page.
+// A compact entry for the "recent blacklists" list. Deliberately light (no
+// story/summary) so the list loads fast; the full text is fetched on tap.
 export type BlacklistEntry = {
   kind: "epb" | "manual";
   id: string;
@@ -2360,8 +2361,6 @@ export type BlacklistEntry = {
   amount?: string;
   currency?: string;
   date: number;
-  summary?: string;
-  story?: string;
   source?: string;
   note?: string;
 };
@@ -2381,8 +2380,6 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
-      summary: rec.summary || rec.story || "",
-      story: rec.story || "",
     });
   }
   for (const e of bindings.manualBlacklist || []) {
@@ -2397,6 +2394,49 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
   }
   out.sort((a, b) => b.date - a.date);
   return out.slice(0, Math.max(1, limit));
+}
+
+// Full detail for one blacklist entry, fetched when a card is opened.
+export type BlacklistDetailResult = {
+  kind: "epb" | "manual";
+  id: string;
+  account: string;
+  amount?: string;
+  currency?: string;
+  date: number;
+  summary?: string;
+  story?: string;
+  source?: string;
+  note?: string;
+} | null;
+
+export function blacklistEntry(id: string): BlacklistDetailResult {
+  if (!checkEnabled() || !id) return null;
+  const rec = pendingPosts[id] || pendingPosts[id.toUpperCase()];
+  if (rec && rec.status === "published" && rec.channelPosted && !rec.removedFromCheck) {
+    return {
+      kind: "epb",
+      id,
+      account: scamLabel(rec),
+      amount: rec.amount || "",
+      currency: rec.currency || "",
+      date: rec.createdAt || 0,
+      summary: rec.summary || "",
+      story: rec.story || rec.summary || "",
+    };
+  }
+  const man = (bindings.manualBlacklist || []).find((e) => e.id === id);
+  if (man) {
+    return {
+      kind: "manual",
+      id,
+      account: man.username ? `@${man.username.replace(/^@/, "")}` : man.telegramId ? `ID ${man.telegramId}` : "",
+      date: man.addedAt || 0,
+      source: man.source || DEFAULT_MANUAL_SOURCE,
+      note: man.note,
+    };
+  }
+  return null;
 }
 
 function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] {
@@ -2447,8 +2487,6 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
-      summary: rec.summary || rec.story || "",
-      story: rec.story || "",
     });
   }
   epb.sort((a, b) => b.date - a.date);
