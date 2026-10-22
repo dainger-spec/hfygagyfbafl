@@ -471,7 +471,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       }}
       aria-label="project sponsors"
       className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
-      style={{ "--epb-marquee-dur": `${Math.max(18, items.length * 5)}s` } as CSSProperties}
+      style={{ "--epb-marquee-dur": `${Math.max(9, items.length * 2.5)}s` } as CSSProperties}
     >
       <div className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
         <Seq />
