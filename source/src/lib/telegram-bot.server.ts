@@ -4487,9 +4487,8 @@ async function startApply(chatId: number, from: TgUser) {
 async function cancelApply(chatId: number, userId: string, notice?: string) {
   clearStepMessage(chatId);
   sessions.delete(userId);
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: notice || btUser(userId, "cancel"),
+  // sendCeMessage so the menu buttons here get the same custom-emoji icons.
+  await sendCeMessage(chatId, notice || btUser(userId, "cancel"), {
     reply_markup: applyKeyboard(langOf(userId)),
   });
 }
