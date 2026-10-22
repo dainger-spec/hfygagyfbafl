@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ApiTelegramBannerRouteImport } from './routes/api/telegram/banner'
 import { Route as ApiTelegramEvidenceRouteImport } from './routes/api/telegram/evidence'
 import { Route as ApiTelegramResolveRouteImport } from './routes/api/telegram/resolve'
+import { Route as ApiTelegramSponsorAvatarRouteImport } from './routes/api/telegram/sponsor-avatar'
 import { Route as ApiTelegramWebhookRouteImport } from './routes/api/telegram/webhook'
 
 const IndexRoute = IndexRouteImport.update({
@@ -35,6 +36,12 @@ const ApiTelegramResolveRoute = ApiTelegramResolveRouteImport.update({
   path: '/api/telegram/resolve',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiTelegramSponsorAvatarRoute =
+  ApiTelegramSponsorAvatarRouteImport.update({
+    id: '/api/telegram/sponsor-avatar',
+    path: '/api/telegram/sponsor-avatar',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiTelegramWebhookRoute = ApiTelegramWebhookRouteImport.update({
   id: '/api/telegram/webhook',
   path: '/api/telegram/webhook',
@@ -46,6 +53,7 @@ export interface FileRoutesByFullPath {
   '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
+  '/api/telegram/sponsor-avatar': typeof ApiTelegramSponsorAvatarRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRoutesByTo {
@@ -53,6 +61,7 @@ export interface FileRoutesByTo {
   '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
+  '/api/telegram/sponsor-avatar': typeof ApiTelegramSponsorAvatarRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRoutesById {
@@ -61,6 +70,7 @@ export interface FileRoutesById {
   '/api/telegram/banner': typeof ApiTelegramBannerRoute
   '/api/telegram/evidence': typeof ApiTelegramEvidenceRoute
   '/api/telegram/resolve': typeof ApiTelegramResolveRoute
+  '/api/telegram/sponsor-avatar': typeof ApiTelegramSponsorAvatarRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRouteTypes {
@@ -70,6 +80,7 @@ export interface FileRouteTypes {
     | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
+    | '/api/telegram/sponsor-avatar'
     | '/api/telegram/webhook'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -77,6 +88,7 @@ export interface FileRouteTypes {
     | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
+    | '/api/telegram/sponsor-avatar'
     | '/api/telegram/webhook'
   id:
     | '__root__'
@@ -84,6 +96,7 @@ export interface FileRouteTypes {
     | '/api/telegram/banner'
     | '/api/telegram/evidence'
     | '/api/telegram/resolve'
+    | '/api/telegram/sponsor-avatar'
     | '/api/telegram/webhook'
   fileRoutesById: FileRoutesById
 }
@@ -92,6 +105,7 @@ export interface RootRouteChildren {
   ApiTelegramBannerRoute: typeof ApiTelegramBannerRoute
   ApiTelegramEvidenceRoute: typeof ApiTelegramEvidenceRoute
   ApiTelegramResolveRoute: typeof ApiTelegramResolveRoute
+  ApiTelegramSponsorAvatarRoute: typeof ApiTelegramSponsorAvatarRoute
   ApiTelegramWebhookRoute: typeof ApiTelegramWebhookRoute
 }
 
@@ -125,6 +139,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiTelegramResolveRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/telegram/sponsor-avatar': {
+      id: '/api/telegram/sponsor-avatar'
+      path: '/api/telegram/sponsor-avatar'
+      fullPath: '/api/telegram/sponsor-avatar'
+      preLoaderRoute: typeof ApiTelegramSponsorAvatarRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/telegram/webhook': {
       id: '/api/telegram/webhook'
       path: '/api/telegram/webhook'
@@ -140,6 +161,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiTelegramBannerRoute: ApiTelegramBannerRoute,
   ApiTelegramEvidenceRoute: ApiTelegramEvidenceRoute,
   ApiTelegramResolveRoute: ApiTelegramResolveRoute,
+  ApiTelegramSponsorAvatarRoute: ApiTelegramSponsorAvatarRoute,
   ApiTelegramWebhookRoute: ApiTelegramWebhookRoute,
 }
 export const routeTree = rootRouteImport

@@ -707,6 +707,41 @@ function saveBannerFile(id: string, bytes: Buffer) {
   writeFileSync(join(BANNER_DIR, id), bytes);
 }
 
+// Sponsor chat avatars are downloaded from Telegram and cached on disk, keyed by
+// a hash of the photo's file_id (a new avatar -> new key -> re-download).
+const SPONSOR_AVATAR_DIR = join(DATA_DIR, "sponsor-avatars");
+
+function sanitizeAvatarKey(k: string): string | null {
+  const safe = String(k || "").replace(/[^a-f0-9]/g, "");
+  return safe.length >= 8 && safe.length <= 64 ? safe : null;
+}
+
+export function sponsorAvatarPath(key: string): string | null {
+  const safe = sanitizeAvatarKey(key);
+  if (!safe) return null;
+  const path = join(SPONSOR_AVATAR_DIR, safe);
+  if (!path.startsWith(SPONSOR_AVATAR_DIR)) return null;
+  return existsSync(path) ? path : null;
+}
+
+// Returns an avatar URL for a chat photo, downloading+caching it once. "" if none.
+async function sponsorAvatarUrl(smallFileId?: string): Promise<string> {
+  if (!smallFileId) return "";
+  const key = createHash("sha256").update(smallFileId).digest("hex").slice(0, 24);
+  const path = join(SPONSOR_AVATAR_DIR, key);
+  if (!existsSync(path)) {
+    const bytes = await downloadTelegramFile(smallFileId);
+    if (!bytes) return "";
+    try {
+      mkdirSync(SPONSOR_AVATAR_DIR, { recursive: true });
+      writeFileSync(path, bytes);
+    } catch {
+      return "";
+    }
+  }
+  return `/api/telegram/sponsor-avatar?a=${key}`;
+}
+
 export function bannerById(id: string): Banner | null {
   const safe = sanitizeBannerId(id);
   if (!safe) return null;
@@ -737,24 +772,23 @@ export function listBanners() {
 // Sponsors = the chats that receive the broadcast. Shown on a page in the app:
 // chat title + a link that an admin set by hand (never auto-pulled). Chats
 // without an admin-set link are shown by name only.
-let sponsorsCache: { at: number; value: { id: string; title: string; link: string }[] } | null = null;
+type SponsorItem = { id: string; title: string; link: string; avatar: string };
+let sponsorsCache: { at: number; value: SponsorItem[] } | null = null;
 
 function invalidateSponsors() {
   sponsorsCache = null;
 }
 
-export async function listSponsors(): Promise<{ id: string; title: string; link: string }[]> {
+export async function listSponsors(): Promise<SponsorItem[]> {
   if (sponsorsCache && Date.now() - sponsorsCache.at < 10 * 60 * 1000) return sponsorsCache.value;
   const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
   const value = await Promise.all(
     chats.map(async (c) => {
-      let title = c.title;
-      // Only a missing title is refreshed from Telegram; the link is never auto-set.
-      if (!title) {
-        const chat = await tgSoft<{ title?: string }>("getChat", { chat_id: c.id });
-        if (chat?.title) title = chat.title;
-      }
-      return { id: String(c.id), title: title || "Чат", link: c.link || "" };
+      // getChat gives the current title and the chat photo; the link is never auto-set.
+      const chat = await tgSoft<{ title?: string; photo?: { small_file_id?: string } }>("getChat", { chat_id: c.id });
+      const title = chat?.title || c.title || "Чат";
+      const avatar = await sponsorAvatarUrl(chat?.photo?.small_file_id);
+      return { id: String(c.id), title, link: c.link || "", avatar };
     }),
   );
   sponsorsCache = { at: Date.now(), value };

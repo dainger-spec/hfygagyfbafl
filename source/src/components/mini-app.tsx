@@ -438,7 +438,7 @@ function Home({
 // Yellow running line at the bottom of the home screen: the broadcast sponsors.
 function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
-  const [items, setItems] = useState<{ id: string; title: string; link: string }[]>([]);
+  const [items, setItems] = useState<SponsorItem[]>([]);
   useEffect(() => {
     void getSponsors()
       .then((s) => setItems(Array.isArray(s) ? s : []))
@@ -484,9 +484,21 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   );
 }
 
+type SponsorItem = { id: string; title: string; link: string; avatar: string };
+
+function SponsorAvatar({ src, title }: { src?: string; title: string }) {
+  if (src) return <img src={src} alt="" className="size-9 shrink-0 rounded-full object-cover" loading="lazy" />;
+  const letter = (title || "?").replace(/^@/, "").charAt(0).toUpperCase() || "?";
+  return (
+    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-xs font-bold text-muted">
+      {letter}
+    </span>
+  );
+}
+
 function SponsorsPage({ onBack }: { onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
-  const [items, setItems] = useState<{ id: string; title: string; link: string }[] | null>(null);
+  const [items, setItems] = useState<SponsorItem[] | null>(null);
   useEffect(() => {
     void getSponsors()
       .then((s) => setItems(Array.isArray(s) ? s : []))
@@ -530,17 +542,19 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
                     haptic("light");
                     openExternal(s.link);
                   }}
-                  className="flex w-full items-center justify-between gap-2 rounded-2xl bg-surface/70 p-3 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                  className="flex w-full items-center gap-3 rounded-2xl bg-surface/70 p-2.5 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
                 >
-                  <span className="truncate font-semibold text-gold">{s.title}</span>
+                  <SponsorAvatar src={s.avatar} title={s.title} />
+                  <span className="min-w-0 flex-1 truncate font-semibold text-gold">{s.title}</span>
                   <ExternalLink className="size-4 shrink-0 text-gold" />
                 </button>
               ) : (
                 <div
                   key={s.id}
-                  className="rounded-2xl bg-surface/70 p-3 font-semibold shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                  className="flex items-center gap-3 rounded-2xl bg-surface/70 p-2.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
                 >
-                  {s.title}
+                  <SponsorAvatar src={s.avatar} title={s.title} />
+                  <span className="min-w-0 flex-1 truncate font-semibold">{s.title}</span>
                 </div>
               ),
             )}
