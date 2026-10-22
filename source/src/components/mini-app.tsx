@@ -977,12 +977,24 @@ function Done({
         {notice || t(locale, "doneText")}
       </p>
       <div className="mt-8 flex w-full max-w-md flex-col gap-3">
+        <Button
+          size="lg"
+          className="w-full"
+          onClick={() => {
+            haptic("light");
+            openExternal(EUROPE_PROMO_URL);
+          }}
+        >
+          <span className="inline-flex items-center gap-2">
+            {t(locale, "addEvidence")} <ExternalLink className="size-4" />
+          </span>
+        </Button>
         {onReview ? (
-          <Button size="lg" className="w-full" onClick={onReview}>
+          <Button size="lg" variant="secondary" className="w-full" onClick={onReview}>
             {t(locale, "history")}
           </Button>
         ) : (
-          <Button size="lg" className="w-full" onClick={() => onPage("history")}>
+          <Button size="lg" variant="secondary" className="w-full" onClick={() => onPage("history")}>
             {t(locale, "history")}
           </Button>
         )}

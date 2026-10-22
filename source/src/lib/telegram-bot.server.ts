@@ -2367,7 +2367,8 @@ export type BlacklistEntry = {
 
 const DEFAULT_MANUAL_SOURCE = "Сторонний источник";
 
-// The most recent blacklist entries (published complaints + manual ones), newest first.
+// The most recent blacklist entries, newest first. Only our own EPB blacklist
+// (published complaints) — third-party / manual entries are not listed here.
 export function recentBlacklist(limit = 24): BlacklistEntry[] {
   if (!checkEnabled()) return [];
   const out: BlacklistEntry[] = [];
@@ -2380,16 +2381,6 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
-    });
-  }
-  for (const e of bindings.manualBlacklist || []) {
-    out.push({
-      kind: "manual",
-      id: e.id,
-      account: e.username ? `@${e.username.replace(/^@/, "")}` : e.telegramId ? `ID ${e.telegramId}` : "",
-      date: e.addedAt || 0,
-      source: e.source || DEFAULT_MANUAL_SOURCE,
-      note: e.note,
     });
   }
   out.sort((a, b) => b.date - a.date);

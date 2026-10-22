@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { EvidencePicker } from "@/components/evidence-picker";
+import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { persistEvidence } from "@/lib/evidence";
 import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount } from "@/lib/telegram";
 import { submitToTelegram } from "@/lib/telegram-bot.functions";
@@ -151,8 +152,18 @@ export function ApplyForm({
   return (
     <form
       onSubmit={onSubmit}
-      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
     >
+      {sending ? (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-bg/95 px-8 text-center backdrop-blur-sm">
+          <EuStarsLogo size={112} title="Europe Private Blacklist" spin emblem />
+          <div className="space-y-1.5">
+            <p className="font-display text-lg font-bold">{t(locale, "sendingTitle")}</p>
+            <p className="text-sm text-muted">{t(locale, "sendingHint")}</p>
+          </div>
+          <div className="epb-progress h-1.5 w-56 max-w-full rounded-full bg-surface" />
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
         <div className="mx-auto flex w-full max-w-md flex-col gap-7">
       <section className="space-y-3">

@@ -99,6 +99,31 @@
   animation: epb-spin-slow 16s linear infinite;
 }
 
+/* Indeterminate progress bar for the "sending complaint" overlay. */
+.epb-progress {
+  position: relative;
+  overflow: hidden;
+}
+.epb-progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, var(--color-gold), transparent);
+  animation: epb-progress 1.15s ease-in-out infinite;
+}
+@keyframes epb-progress {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
 /* Running ticker (marquee) for recent blacklists on the home screen. The track
    holds the content twice; shifting it by -50% loops seamlessly. */
 .epb-marquee-track {
