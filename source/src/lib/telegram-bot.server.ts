@@ -4042,7 +4042,17 @@ async function sendCard(
 
 async function replyStart(chatId: number, userId?: string | number) {
   const locale = langOf(userId ?? chatId);
-  await sendCard(chatId, "welcome", startText(locale), { reply_markup: applyKeyboard(locale) });
+  let text = startText(locale);
+  try {
+    const st = await sponsorStats();
+    if (st.chats > 0) {
+      const audience = st.audience.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
+      text += `\n\n${tb(locale, "statsLine", { chats: String(st.chats), audience })}`;
+    }
+  } catch {
+    /* stats are optional */
+  }
+  await sendCard(chatId, "welcome", text, { reply_markup: applyKeyboard(locale) });
 }
 
 function newSession(from: TgUser): ApplySession {
