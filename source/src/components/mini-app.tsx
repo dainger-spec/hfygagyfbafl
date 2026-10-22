@@ -210,7 +210,7 @@ function AccountLoading({ locale }: { locale: Locale }) {
   );
 }
 
-type BannerItem = { id: string; type: "image" | "video"; link: string; src: string };
+type BannerItem = { id: string; type: "image" | "video"; link: string; src: string; width?: number; height?: number };
 
 // Promo banners at the very top of the app. A horizontal, swipeable strip;
 // videos and GIFs play muted and looped; a tap opens the banner's link.
@@ -246,34 +246,32 @@ function Banners() {
         onScroll={onScroll}
         className="flex snap-x snap-mandatory items-start gap-3 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        {items.map((b) => (
-          <button
-            key={b.id}
-            type="button"
-            onClick={() => open(b.link)}
-            aria-label="banner"
-            className={cn(
-              "relative block w-full shrink-0 snap-center overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
-              b.link ? "cursor-pointer" : "cursor-default",
-            )}
-          >
-            {/* Height follows the media's own aspect ratio (max 80vh so a tall
-                portrait never swallows the whole screen). */}
-            {b.type === "video" ? (
-              <video
-                src={b.src}
-                autoPlay
-                muted
-                loop
-                playsInline
-                preload="metadata"
-                className="block h-auto max-h-[80vh] w-full object-contain"
-              />
-            ) : (
-              <img src={b.src} alt="" className="block h-auto max-h-[80vh] w-full object-contain" loading="lazy" />
-            )}
-          </button>
-        ))}
+        {items.map((b) => {
+          // Reserve the right box from the stored media size, so there is no
+          // gray-rectangle jump before the media loads. Fall back to natural
+          // sizing for old banners saved without dimensions.
+          const ratio = b.width && b.height ? `${b.width} / ${b.height}` : undefined;
+          const mediaClass = ratio ? "block size-full object-cover" : "block h-auto max-h-[80vh] w-full object-contain";
+          return (
+            <button
+              key={b.id}
+              type="button"
+              onClick={() => open(b.link)}
+              aria-label="banner"
+              style={ratio ? { aspectRatio: ratio, maxHeight: "80vh" } : undefined}
+              className={cn(
+                "relative block w-full shrink-0 snap-center overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
+                b.link ? "cursor-pointer" : "cursor-default",
+              )}
+            >
+              {b.type === "video" ? (
+                <video src={b.src} autoPlay muted loop playsInline preload="metadata" className={mediaClass} />
+              ) : (
+                <img src={b.src} alt="" className={mediaClass} loading="lazy" />
+              )}
+            </button>
+          );
+        })}
       </div>
       {items.length > 1 ? (
         <div className="mt-2 flex justify-center gap-1.5">

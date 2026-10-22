@@ -87,6 +87,9 @@ type Banner = {
   mime: string;
   link: string;
   title?: string;
+  // Media pixel size, so the app reserves the right box before the media loads.
+  width?: number;
+  height?: number;
   createdAt: number;
 };
 
@@ -710,6 +713,8 @@ export function listBanners() {
     id: b.id,
     type: b.type,
     link: b.link,
+    width: b.width,
+    height: b.height,
     src: `/api/telegram/banner?id=${encodeURIComponent(b.id)}`,
   }));
 }
@@ -751,10 +756,17 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer | null> {
 
 // Picks banner media out of an incoming message. A Telegram "animation" (GIF)
 // is really an mp4, so it is treated as a looping video.
-function extractBannerMedia(msg: TgMessage): { type: "image" | "video"; fileId: string; mime: string } | null {
-  if (msg.animation?.file_id) return { type: "video", fileId: msg.animation.file_id, mime: msg.animation.mime_type || "video/mp4" };
-  if (msg.video?.file_id) return { type: "video", fileId: msg.video.file_id, mime: msg.video.mime_type || "video/mp4" };
-  if (msg.photo?.length) return { type: "image", fileId: msg.photo.at(-1)!.file_id, mime: "image/jpeg" };
+function extractBannerMedia(
+  msg: TgMessage,
+): { type: "image" | "video"; fileId: string; mime: string; width?: number; height?: number } | null {
+  if (msg.animation?.file_id)
+    return { type: "video", fileId: msg.animation.file_id, mime: msg.animation.mime_type || "video/mp4", width: msg.animation.width, height: msg.animation.height };
+  if (msg.video?.file_id)
+    return { type: "video", fileId: msg.video.file_id, mime: msg.video.mime_type || "video/mp4", width: msg.video.width, height: msg.video.height };
+  if (msg.photo?.length) {
+    const ph = msg.photo.at(-1)!;
+    return { type: "image", fileId: ph.file_id, mime: "image/jpeg", width: ph.width, height: ph.height };
+  }
   const doc = msg.document;
   if (doc?.file_id && doc.mime_type) {
     if (doc.mime_type.startsWith("image/")) return { type: "image", fileId: doc.file_id, mime: doc.mime_type };
@@ -3564,9 +3576,9 @@ type TgMessage = {
   text?: string;
   caption?: string;
   from?: TgUser;
-  photo?: { file_id: string }[];
-  video?: { file_id: string; mime_type?: string; file_size?: number };
-  animation?: { file_id: string; mime_type?: string; file_size?: number };
+  photo?: { file_id: string; width?: number; height?: number }[];
+  video?: { file_id: string; mime_type?: string; file_size?: number; width?: number; height?: number };
+  animation?: { file_id: string; mime_type?: string; file_size?: number; width?: number; height?: number };
   document?: { mime_type?: string; file_id?: string; file_size?: number };
   forward_from?: TgUser;
   forward_origin?: { sender_user?: TgUser };
@@ -3633,7 +3645,7 @@ const channelSetup = new Set<string>();
 const checkChannelSetup = new Set<string>();
 const removeFromCheckSetup = new Set<string>();
 // Two-step "add banner" flow in the admin panel: first the media, then the link.
-const bannerSetup = new Map<string, { phase: "media" | "link"; draft?: { type: "image" | "video"; file: string; mime: string } }>();
+const bannerSetup = new Map<string, { phase: "media" | "link"; draft?: { type: "image" | "video"; file: string; mime: string; width?: number; height?: number } }>();
 
 function gcSessions() {
   const now = Date.now();
@@ -5359,7 +5371,7 @@ async function handleBannerInput(msg: TgMessage): Promise<boolean> {
     }
     const id = newBannerId();
     saveBannerFile(id, bytes);
-    st.draft = { type: media.type, file: id, mime: media.mime };
+    st.draft = { type: media.type, file: id, mime: media.mime, width: media.width, height: media.height };
     st.phase = "link";
     await tgSoft("sendMessage", {
       chat_id: msg.chat.id,
@@ -5392,6 +5404,8 @@ async function handleBannerInput(msg: TgMessage): Promise<boolean> {
     file: draft.file,
     mime: draft.mime,
     link,
+    width: draft.width,
+    height: draft.height,
     createdAt: Date.now(),
   };
   bindings.banners = [...(bindings.banners || []), banner].slice(-MAX_BANNERS);
