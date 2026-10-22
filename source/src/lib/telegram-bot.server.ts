@@ -1689,7 +1689,7 @@ function escapeRe(s: string): string {
 // subject line, not a contact/ad line. Words are a starting lexicon — easy to
 // extend. The owner can always open the exact post via the link we return.
 const SCAM_WORDS_RE =
-  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑)/iu;
+  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|арбитраж|arbitr|жалоб|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑)/iu;
 // A line that is clearly contact/ad context rather than the accused subject.
 const CONTACT_LINE_RE =
   /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|\bгарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|заказ|отзыв|подписку|канал\b)/iu;
@@ -1710,6 +1710,21 @@ function idOnLine(line: string, id: string): boolean {
   return new RegExp("(?<!\\d)" + digits + "(?!\\d)").test(line);
 }
 
+// Arbitration posts (e.g. WWH Info) name both sides on one line:
+//   "Арбитраж пользователя <заявитель> на пользователя <обвиняемый>".
+// Only the accused — the side after "на [пользователя]" / "против" — should be
+// flagged, never the person who filed. Returns that accused segment, or "".
+function arbitrationAccused(line: string): string {
+  // \b is ASCII-only, so anchor the "на"/"против" marker on whitespace/start.
+  const m = line.match(
+    /(?:^|\s)(?:на|против)\s+(?:пользовател\S*\s+|юзер\S*\s+|человек\S*\s+|аккаунт\S*\s+|@)?(.+)$/i,
+  );
+  if (!m) return "";
+  // Drop a trailing filer clause ("… от @reporter", "… заявитель …") so only the
+  // accused side is kept. Multiple accused ("mule1 и mule2") stay together.
+  return m[1].split(/\s+(?:от|заявител\S*|подал\S*)\s+/i)[0] || "";
+}
+
 // Does this post actually accuse `username`/`id` of scamming? Exported for tests.
 export function postMatchesSubject(body: string, username: string, id: string): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
@@ -1719,6 +1734,14 @@ export function postMatchesSubject(body: string, username: string, id: string): 
   // Must read like a scam report, not an ad or a plain contact list.
   if (!SCAM_WORDS_RE.test(body)) return false;
   for (const line of body.split(/\r?\n/)) {
+    // Arbitration lines: match only the accused side, never the filer.
+    if (/арбитраж|arbitr/i.test(line)) {
+      const accused = arbitrationAccused(line);
+      if (!accused) continue;
+      if (!ignoredName && usernameOnLine(accused, uname)) return true;
+      if (idOnLine(accused, id)) return true;
+      continue;
+    }
     const hasId = idOnLine(line, id);
     // The id is authoritative: contacts/ads don't carry the victim's "id: N".
     if (hasId) return true;
