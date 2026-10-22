@@ -270,6 +270,10 @@ type PendingPost = {
   // The channel and message ids of that post, to verify it still exists.
   channelChatId?: string;
   channelMsgIds?: number[];
+  // Where the broadcast delivered this post, so it can be deleted everywhere later.
+  relayDeliveries?: { chatId: string; messageIds: number[] }[];
+  // The arbiter deleted this post from the channel and all relay chats.
+  deletedEverywhere?: boolean;
   // The arbiter removed this complaint from the counterparty check.
   removedFromCheck?: boolean;
   // Post body edited by an arbiter (Telegram HTML); replaces the summary in the post.
@@ -3029,6 +3033,24 @@ async function channelAllowsForwarding(chatId: string): Promise<boolean> {
   return !chat?.has_protected_content;
 }
 
+// Remembers which message ids a post got in a relay chat, so the admin panel can
+// later delete it everywhere it was sent. Keyed by the complaint (the job key).
+function recordRelayDelivery(key: string, chatId: string | number, messageIds: number[]) {
+  const ids = messageIds.filter((n) => Number.isFinite(n));
+  if (!key || !ids.length) return;
+  const rec = pendingPosts[key];
+  if (!rec) return;
+  const list = (rec.relayDeliveries ||= []);
+  const k = chatIdKey(chatId);
+  const existing = list.find((d) => chatIdKey(d.chatId) === k);
+  if (existing) {
+    for (const id of ids) if (!existing.messageIds.includes(id)) existing.messageIds.push(id);
+  } else {
+    list.push({ chatId: String(chatId), messageIds: [...ids] });
+  }
+  savePending();
+}
+
 // Sends to every approved chat. Failures never remove a chat from the list:
 // a chat that lost rights starts receiving posts again as soon as rights are back.
 async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
@@ -3077,6 +3099,11 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
           viaForward = true;
           forwardedOk += 1;
           emptyInARow = 0;
+          recordRelayDelivery(
+            job.key,
+            chat.id,
+            result.map((m) => (m as { message_id?: number })?.message_id).filter((n): n is number => typeof n === "number"),
+          );
         } else if (fwdErr instanceof TgError && /protected|CHAT_FORWARDS_RESTRICTED|message to forward not found|message can't be forwarded/i.test(fwdErr.message)) {
           // The channel post itself can't be forwarded (protected or deleted): copies for everyone.
           forward = false;
@@ -3103,14 +3130,16 @@ async function runBroadcast(job: BroadcastJob): Promise<BroadcastReport> {
       }
       if (!viaForward) {
         try {
-          await sendPostToChat(chat.id, job.html, job.files);
+          const ids = await sendPostToChat(chat.id, job.html, job.files);
+          recordRelayDelivery(job.key, chat.id, ids);
           if (forward) (report.copies ||= []).push(label);
         } catch (err) {
           // Media forbidden in this chat and nothing sent yet: at least the text goes out.
           // Only when Telegram itself refused (an answer, not a lost connection).
           const refusedCleanly = err instanceof PartialSendError && err.answered && !err.sentIds.length;
           if (!job.files.length || !refusedCleanly || !isMediaForbidden(err)) throw err;
-          await sendPostToChat(chat.id, job.html, []);
+          const ids = await sendPostToChat(chat.id, job.html, []);
+          recordRelayDelivery(job.key, chat.id, ids);
           (report.textOnly ||= []).push(label);
         }
       }
@@ -3172,6 +3201,63 @@ async function finishBroadcast(job: BroadcastJob) {
     disable_web_page_preview: true,
     reply_to_message_id: job.reportTo.messageId,
   });
+}
+
+// Deletes a batch of the bot's own messages from one chat (<= 100 ids per call).
+// Returns how many went and how many Telegram refused (too old, no rights).
+async function deleteChatMessages(chatId: string | number, messageIds: number[]): Promise<{ ok: number; fail: number }> {
+  let ok = 0;
+  let fail = 0;
+  const ids = [...new Set(messageIds.filter((n) => Number.isFinite(n)))];
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const bulk = await tgSoft("deleteMessages", { chat_id: chatId, message_ids: batch });
+    if (bulk) {
+      ok += batch.length;
+    } else {
+      // The bulk call failed (one id too old, mixed rights): try one by one.
+      for (const id of batch) {
+        const one = await tgSoft("deleteMessage", { chat_id: chatId, message_id: id });
+        if (one) ok += 1;
+        else fail += 1;
+      }
+    }
+    await sleep(40);
+  }
+  return { ok, fail };
+}
+
+// Deletes a published complaint from the channel and from every relay chat it
+// reached, then marks it removed so it leaves the channel view and the search.
+async function deletePublishedEverywhere(
+  key: string,
+): Promise<{ channel: { ok: number; fail: number }; chats: { ok: number; fail: number }; chatCount: number }> {
+  const channel = { ok: 0, fail: 0 };
+  const chats = { ok: 0, fail: 0 };
+  let chatCount = 0;
+  const rec = pendingPosts[key];
+  if (!rec) return { channel, chats, chatCount };
+  if (rec.channelChatId && rec.channelMsgIds?.length) {
+    const r = await deleteChatMessages(rec.channelChatId, rec.channelMsgIds);
+    channel.ok += r.ok;
+    channel.fail += r.fail;
+  }
+  for (const d of rec.relayDeliveries || []) {
+    if (!d.messageIds.length) continue;
+    chatCount += 1;
+    const r = await deleteChatMessages(d.chatId, d.messageIds);
+    chats.ok += r.ok;
+    chats.fail += r.fail;
+  }
+  // Keep the record (status stays "published" so it can never be re-posted), but
+  // mark it gone: out of the channel, out of the counterparty search.
+  rec.deletedEverywhere = true;
+  rec.channelPosted = false;
+  rec.removedFromCheck = true;
+  rec.relayDeliveries = [];
+  rec.channelMsgIds = [];
+  savePending();
+  return { channel, chats, chatCount };
 }
 
 // Jobs run one after another: two publishes in a row must not double the rate.
@@ -4982,6 +5068,57 @@ function pendingComplaints() {
     .sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
 }
 
+// Published complaints that are still live in the channel (not already deleted).
+function publishedComplaints() {
+  return Object.entries(pendingPosts)
+    .filter(([, rec]) => rec.status === "published" && rec.channelPosted && !rec.deletedEverywhere)
+    .sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+}
+
+function adminDeleteList(page: number): AdminView {
+  const list = publishedComplaints();
+  const pages = Math.max(1, Math.ceil(list.length / ADMIN_PAGE));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const keyboard: AdminView["keyboard"] = list.slice(p * ADMIN_PAGE, (p + 1) * ADMIN_PAGE).map(([key, rec]) => {
+    const chats = (rec.relayDeliveries || []).filter((d) => d.messageIds.length).length;
+    return [{ text: `${cut(scamLabel(rec), 22)} · ${chats} чат. · ${ago(rec.createdAt)}`, callback_data: `adm:dlc:${key}` }];
+  });
+  const nav: AdminView["keyboard"][number] = [];
+  if (p > 0) nav.push({ text: "◀", callback_data: `adm:dl:${p - 1}` });
+  if (pages > 1) nav.push({ text: `${p + 1} / ${pages}`, callback_data: `adm:dl:${p}` });
+  if (p < pages - 1) nav.push({ text: "▶", callback_data: `adm:dl:${p + 1}` });
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
+  return {
+    text: list.length
+      ? `<b>Удалить блеклист</b>: опубликовано ${list.length}\nВыберите запись — бот спросит подтверждение и удалит пост из канала и из всех чатов рассылки.`
+      : "<b>Удалить блеклист</b>: опубликованных записей нет.",
+    keyboard,
+  };
+}
+
+async function adminDeleteConfirm(key: string): Promise<AdminView> {
+  const rec = pendingPosts[key];
+  const back = { text: "⬅ К списку", callback_data: "adm:dl:0" };
+  if (!rec || rec.status !== "published") return { text: "Эта запись уже не опубликована.", keyboard: [[back]] };
+  const chatCount = (rec.relayDeliveries || []).filter((d) => d.messageIds.length).length;
+  const channelCount = rec.channelMsgIds?.length || 0;
+  return {
+    text: [
+      "<b>Удалить блеклист везде?</b>",
+      `Аккаунт: ${escapeHtml(scamLabel(rec))}`,
+      `Ущерб: ${escapeHtml(rec.amount || "—")} ${escapeHtml(rec.currency || "")}`,
+      "",
+      `Будет удалено: пост в канале (${channelCount} сообщ.) и сообщения в ${chatCount} чатах рассылки.`,
+      "Отменить удаление нельзя. Сообщения старше 48 часов Telegram может не дать удалить в некоторых чатах.",
+    ].join("\n"),
+    keyboard: [
+      [{ text: "🗑 Да, удалить везде", callback_data: `adm:dlgo:${key}` }],
+      [back],
+    ],
+  };
+}
+
 function adminHome(): AdminView {
   const relays = bindings.relayChats || [];
   const all = Object.values(pendingPosts);
@@ -5004,6 +5141,7 @@ function adminHome(): AdminView {
     text: lines.join("\n"),
     keyboard: [
       [{ text: `📝 Заявки без решения (${count("pending")})`, callback_data: "adm:ap:0" }],
+      [{ text: `🗑 Удалить блеклист (${count("published")})`, callback_data: "adm:dl:0" }],
       [
         { text: "📋 Чаты рассылки", callback_data: "adm:rl:a:0" },
         { text: "⏳ Ждут решения", callback_data: "adm:rl:pd:0" },
@@ -5495,6 +5633,41 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     removeCheckChannelFromIndex(target);
     await answer("Канал убран");
     await renderAdmin(cb, adminCheck());
+    return;
+  }
+  if (action === "dl") {
+    await answer();
+    await renderAdmin(cb, adminDeleteList(Number(rest[0] || 0)));
+    return;
+  }
+  if (action === "dlc") {
+    await answer();
+    await renderAdmin(cb, await adminDeleteConfirm(rest.join(":")));
+    return;
+  }
+  if (action === "dlgo") {
+    const delKey = rest.join(":");
+    if (!pendingPosts[delKey] || pendingPosts[delKey]!.status !== "published") {
+      await answer("Запись уже удалена", true);
+      await renderAdmin(cb, adminDeleteList(0));
+      return;
+    }
+    await answer("Удаляю во всех чатах…");
+    const res = await deletePublishedEverywhere(delKey);
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: [
+        "Блеклист удалён.",
+        `Канал: удалено ${res.channel.ok}${res.channel.fail ? `, не удалось ${res.channel.fail}` : ""}.`,
+        `Чаты рассылки (${res.chatCount}): удалено ${res.chats.ok}${res.chats.fail ? `, не удалось ${res.chats.fail}` : ""}.`,
+        res.channel.fail || res.chats.fail
+          ? "Часть сообщений не удалилась — вероятно, они старше 48 часов или у бота нет прав на удаление в чате."
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    await renderAdmin(cb, adminDeleteList(0));
     return;
   }
   if (action === "bn") {
