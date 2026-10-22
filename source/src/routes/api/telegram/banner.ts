@@ -20,6 +20,9 @@ export const Route = createFileRoute("/api/telegram/banner")({
         const headersBase: Record<string, string> = {
           "content-type": banner.mime || "application/octet-stream",
           "x-content-type-options": "nosniff",
+          // Defence in depth: even if some scriptable type were served, the
+          // sandboxed, script-less context stops it executing on our origin.
+          "content-security-policy": "default-src 'none'; sandbox",
           "cache-control": "public, max-age=86400",
           "accept-ranges": "bytes",
         };

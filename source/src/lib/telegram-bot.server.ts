@@ -769,7 +769,9 @@ function extractBannerMedia(
   }
   const doc = msg.document;
   if (doc?.file_id && doc.mime_type) {
-    if (doc.mime_type.startsWith("image/")) return { type: "image", fileId: doc.file_id, mime: doc.mime_type };
+    // SVG is an image but can carry scripts; never accept it as banner media.
+    if (doc.mime_type.startsWith("image/") && doc.mime_type !== "image/svg+xml")
+      return { type: "image", fileId: doc.file_id, mime: doc.mime_type };
     if (doc.mime_type.startsWith("video/")) return { type: "video", fileId: doc.file_id, mime: doc.mime_type };
   }
   return null;
