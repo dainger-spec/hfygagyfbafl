@@ -501,6 +501,7 @@ type CheckData = {
   query: { username: string; id: string };
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: { channelTitle: string; link: string; date: number; snippet: string }[];
+  manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
 
 function CheckCounterparty() {
@@ -523,8 +524,9 @@ function CheckCounterparty() {
     try {
       const res = await checkCounterparty({ data: { input, initData: telegramInitData() } });
       if (res.ok) {
-        setData(res.result as CheckData);
-        haptic(res.result.epb.length || res.result.channels.length ? "heavy" : "soft");
+        const r = res.result as CheckData;
+        setData(r);
+        haptic(r.epb.length || r.channels.length || (r.manual?.length ?? 0) ? "heavy" : "soft");
       } else {
         setError(t(locale, "checkFail"));
       }
@@ -535,7 +537,7 @@ function CheckCounterparty() {
     }
   }
 
-  const found = data && (data.epb.length > 0 || data.channels.length > 0);
+  const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0);
   const fmtDate = (ms: number) =>
     ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
 
@@ -618,6 +620,25 @@ function CheckCounterparty() {
                       {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
                       {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
                     </a>
+                  ))}
+                </div>
+              ) : null}
+              {data.manual?.length ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
+                    <ShieldAlert className="size-4" />
+                    {t(locale, "checkInExternal")}
+                  </div>
+                  {data.manual.map((m) => (
+                    <div
+                      key={m.id}
+                      className="rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                    >
+                      <p className="font-semibold">{m.account}</p>
+                      <p className="mt-0.5 text-xs text-gold">{m.source}</p>
+                      {m.note ? <p className="mt-1 text-xs leading-relaxed text-muted">{m.note}</p> : null}
+                      {fmtDate(m.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(m.date)}</p> : null}
+                    </div>
                   ))}
                 </div>
               ) : null}

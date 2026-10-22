@@ -93,6 +93,17 @@ type Banner = {
   createdAt: number;
 };
 
+// A user added to the counterparty-check blacklist by hand (not via a complaint),
+// e.g. from a third-party source. Shown in search under its own "source" label.
+type ManualBlacklistEntry = {
+  id: string;
+  username?: string;
+  telegramId?: string;
+  source: string;
+  note?: string;
+  addedAt: number;
+};
+
 type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
@@ -105,6 +116,7 @@ type Bindings = {
   blacklistCleanupStamp?: string;
   checkEnabled?: boolean;
   banners?: Banner[];
+  manualBlacklist?: ManualBlacklistEntry[];
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -2337,11 +2349,31 @@ export type CheckResult = {
   query: { username: string; id: string };
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: CheckHit[];
+  manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
+
+const DEFAULT_MANUAL_SOURCE = "Сторонний источник";
+
+function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] {
+  const out: CheckResult["manual"] = [];
+  for (const e of bindings.manualBlacklist || []) {
+    const eu = (e.username || "").replace(/^@/, "").toLowerCase();
+    if ((uname && eu === uname) || (id && e.telegramId === id)) {
+      out.push({
+        id: e.id,
+        account: e.username ? `@${e.username.replace(/^@/, "")}` : e.telegramId ? `ID ${e.telegramId}` : "",
+        source: e.source || DEFAULT_MANUAL_SOURCE,
+        note: e.note,
+        date: e.addedAt || 0,
+      });
+    }
+  }
+  return out.sort((a, b) => b.date - a.date);
+}
 
 // Search the EPB blacklist (published complaints) and the configured channels.
 export async function checkCounterparty(input: string): Promise<CheckResult> {
-  if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [] };
+  if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
   const parsed = parseTelegramInput(input);
   const uname = parsed.username.replace(/^@/, "").toLowerCase();
   const id = parsed.id;
@@ -2401,7 +2433,7 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
     for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
   }
   hits.sort((a, b) => b.date - a.date);
-  return { query: { username: uname, id }, epb, channels: hits.slice(0, 30) };
+  return { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual: matchManualBlacklist(uname, id) };
 }
 
 export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
@@ -3649,6 +3681,7 @@ const sessions = new Map<string, ApplySession>();
 const channelSetup = new Set<string>();
 const checkChannelSetup = new Set<string>();
 const removeFromCheckSetup = new Set<string>();
+const addBlacklistSetup = new Set<string>();
 // Two-step "add banner" flow in the admin panel: first the media, then the link.
 const bannerSetup = new Map<string, { phase: "media" | "link"; draft?: { type: "image" | "video"; file: string; mime: string; width?: number; height?: number } }>();
 
@@ -5168,6 +5201,7 @@ function adminHome(): AdminView {
       [{ text: `🖼 Баннеры (${(bindings.banners || []).length})`, callback_data: "adm:bn" }],
       ...(checkEnabled()
         ? [
+            [{ text: "➕ Добавить юзера в блеклист", callback_data: "adm:bladd" }],
             [{ text: "🧹 Убрать юзера из блеклиста", callback_data: "adm:ccrm" }],
             [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
           ]
@@ -5461,11 +5495,60 @@ async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string)
         removed += 1;
       }
     }
+    // Also drop manually added (third-party) entries for this account.
+    const manual = bindings.manualBlacklist || [];
+    const keptManual = manual.filter((e) => {
+      const eu = (e.username || "").replace(/^@/, "").toLowerCase();
+      return !((uname && eu === uname) || (id && e.telegramId === id));
+    });
+    if (keptManual.length !== manual.length) {
+      removed += manual.length - keptManual.length;
+      bindings.manualBlacklist = keptManual;
+      saveBindings();
+    }
   }
   if (removed) savePending();
   await tgSoft("sendMessage", {
     chat_id: arbiterChatId,
     text: removed ? `Убрано из блеклиста: ${removed}. В проверке контрагента больше не показывается.` : "Ничего подходящего не нашёл.",
+  });
+}
+
+// Manually add a user to the counterparty-check blacklist (source: third party).
+// Input: "@username [комментарий]" or "ID [комментарий]".
+async function applyAddToBlacklist(arbiterChatId: number | string, raw: string) {
+  addBlacklistSetup.delete(String(arbiterChatId));
+  const text = raw.trim();
+  const firstTok = text.split(/\s+/)[0] || "";
+  const note = text.slice(firstTok.length).trim();
+  const parsed = parseTelegramInput(firstTok);
+  const username = parsed.username.replace(/^@/, "");
+  const id = parsed.id;
+  if (!username && !id) {
+    await tgSoft("sendMessage", { chat_id: arbiterChatId, text: "Не понял. Пришлите @username или ID, можно с комментарием через пробел." });
+    return;
+  }
+  const entry: ManualBlacklistEntry = {
+    id: randomUUID(),
+    username: username || undefined,
+    telegramId: id || undefined,
+    source: DEFAULT_MANUAL_SOURCE,
+    note: note || undefined,
+    addedAt: Date.now(),
+  };
+  bindings.manualBlacklist = [...(bindings.manualBlacklist || []), entry].slice(-5000);
+  saveBindings();
+  await tgSoft("sendMessage", {
+    chat_id: arbiterChatId,
+    text: [
+      "Добавлено в блеклист (проверка контрагента).",
+      `Аккаунт: ${escapeHtml(username ? `@${username}` : `ID ${id}`)}`,
+      `Источник: ${escapeHtml(DEFAULT_MANUAL_SOURCE)}`,
+      note ? `Комментарий: ${escapeHtml(note)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    parse_mode: "HTML",
   });
 }
 
@@ -5638,6 +5721,15 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await tgSoft("sendMessage", {
       chat_id: chatId,
       text: "Пришлите номер жалобы (EPB-…) либо @username / ID аккаунта, который нужно убрать из блеклиста (поиска). Жалоба останется в истории, но перестанет находиться в проверке контрагента.",
+    });
+    return;
+  }
+  if (action === "bladd") {
+    addBlacklistSetup.add(String(chatId));
+    await answer("Пришлите @username или ID");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите @username или ID аккаунта, которого нужно добавить в блеклист (проверку контрагента). Можно с комментарием через пробел, например:\n@scammer кинул на сделке, инфа из чужого блеклиста\n\nИсточник отметится как «Сторонний источник».",
     });
     return;
   }
@@ -6223,6 +6315,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && removeFromCheckSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyRemoveFromCheck(msg.chat.id, msg.text);
+    return;
+  }
+  if (isOfficialArbiterChat(msg.chat.id) && addBlacklistSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyAddToBlacklist(msg.chat.id, msg.text);
     return;
   }
   if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
