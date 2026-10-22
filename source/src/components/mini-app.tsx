@@ -103,7 +103,7 @@ export function MiniApp({
         paddingTop: "var(--tg-safe-top, 0px)",
       }}
     >
-      {showApp && page !== "home" && page !== "sponsors" ? (
+      {showApp && !["home", "sponsors", "check", "apply"].includes(page) ? (
         <button
           type="button"
           className="absolute left-2 z-10 flex size-11 items-center justify-center rounded-xl text-fg hover:bg-surface"
@@ -115,7 +115,7 @@ export function MiniApp({
         </button>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && page !== "home" && page !== "sponsors" && "pt-10")}>
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply"].includes(page) && "pt-10")}>
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
@@ -123,6 +123,7 @@ export function MiniApp({
         ) : null}
         {showApp && page === "apply" ? (
           <ApplyForm
+            onBack={() => onPage("home")}
             onSubmitted={(msg) => {
               setNotice(msg ?? "");
               onPage("done");
@@ -130,7 +131,7 @@ export function MiniApp({
           />
         ) : null}
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
-        {showApp && page === "check" && checkOn ? <CheckCounterparty /> : null}
+        {showApp && page === "check" && checkOn ? <CheckCounterparty onBack={() => onPage("home")} /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "sponsors" ? <SponsorsPage onBack={() => onPage("home")} /> : null}
         {showApp && page === "done" ? (
@@ -647,7 +648,7 @@ const EUROPE_PROMO_URL = "https://t.me/EuropePromo";
 const fmtBlDate = (locale: Locale, ms: number) =>
   ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
 
-function CheckCounterparty() {
+function CheckCounterparty({ onBack }: { onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const [value, setValue] = useState("");
   const [loading, setLoading] = useState(false);
@@ -733,7 +734,20 @@ function CheckCounterparty() {
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
       <div className="mx-auto w-full max-w-md space-y-4">
         <div className="space-y-1">
-          <h2 className="font-display text-xl font-bold">{t(locale, "checkTitle")}</h2>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                haptic("light");
+                onBack();
+              }}
+              aria-label={t(locale, "back")}
+              className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded-xl text-fg hover:bg-surface"
+            >
+              <ChevronLeft className="size-5" />
+            </button>
+            <h2 className="font-display text-xl font-bold">{t(locale, "checkTitle")}</h2>
+          </div>
           <p className="text-sm text-muted">{t(locale, "checkHint")}</p>
         </div>
         <div className="flex gap-2">

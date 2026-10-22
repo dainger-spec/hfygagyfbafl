@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { LoaderCircle, Plus, X } from "lucide-react";
+import { ChevronLeft, LoaderCircle, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { EvidencePicker } from "@/components/evidence-picker";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { persistEvidence } from "@/lib/evidence";
-import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount } from "@/lib/telegram";
+import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount, haptic } from "@/lib/telegram";
 import { submitToTelegram } from "@/lib/telegram-bot.functions";
 import { useBlacklistStore } from "@/lib/store";
 import { t } from "@/lib/i18n";
@@ -33,8 +33,10 @@ function emptyAcc(): AccRow {
 
 export function ApplyForm({
   onSubmitted,
+  onBack,
 }: {
   onSubmitted: (notice?: string) => void;
+  onBack: () => void;
 }) {
   const identity = useBlacklistStore((s) => s.identity);
   const locale = useBlacklistStore((s) => s.locale);
@@ -166,6 +168,20 @@ export function ApplyForm({
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
         <div className="mx-auto flex w-full max-w-md flex-col gap-7">
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onBack();
+          }}
+          aria-label={t(locale, "back")}
+          className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded-xl text-fg hover:bg-surface"
+        >
+          <ChevronLeft className="size-5" />
+        </button>
+        <h2 className="font-display text-xl font-bold">{t(locale, "fileComplaint")}</h2>
+      </div>
       <section className="space-y-3">
         <header className="space-y-1">
           <h2 className="font-display text-lg font-bold">{t(locale, "accTitle")}</h2>
