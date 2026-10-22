@@ -1693,11 +1693,18 @@ const SCAM_WORDS_RE =
 // A line that is clearly contact/ad context rather than the accused subject.
 const CONTACT_LINE_RE =
   /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|\bгарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|заказ|отзыв|подписку|канал\b)/iu;
-// A line that marks the accused subject.
+// A line that marks the accused subject. Kept to strong report/label markers so
+// an ad line like "продам аккаунты @seller" is NOT treated as an accusation;
+// handle labels ("тг:", "ник:", "юзер:", "username") are included.
 const SUBJECT_LINE_RE =
-  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|🚫|❌|🤡|⚠|🔴|🛑|id\s*[:#]|айди|ник[:\s]|юзер|username|акк\b|аккаунт|тег\b)/iu;
-// Known arbiter / service handles that are never the accused party.
-const IGNORE_USERNAMES = new Set(["europepromo", BOT_USERNAME.toLowerCase()]);
+  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|🚫|❌|🤡|⚠|🔴|🛑|id\s*[:#]|айди|ник[:\s]|тг[:\s]|телеграм|телега|юзернейм|юзер[:\s]|username)/iu;
+// Known arbiter / service / off-limits handles that are never the accused party
+// and never shown in search results.
+const IGNORE_USERNAMES = new Set(["europepromo", "ctoroot", "sbepbank", BOT_USERNAME.toLowerCase()]);
+
+function isIgnoredHandle(uname: string): boolean {
+  return IGNORE_USERNAMES.has((uname || "").replace(/^@/, "").toLowerCase());
+}
 
 function usernameOnLine(line: string, uname: string): boolean {
   if (!uname) return false;
@@ -1729,10 +1736,11 @@ function arbitrationAccused(line: string): string {
 export function postMatchesSubject(body: string, username: string, id: string): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
   const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
-  // Nothing to match on (handle is an arbiter/service handle and no id given).
+  // Nothing to match on (handle is an off-limits/service handle and no id given).
   if (ignoredName && !id) return false;
-  // Must read like a scam report, not an ad or a plain contact list.
-  if (!SCAM_WORDS_RE.test(body)) return false;
+  // A scam/alert keyword anywhere makes the whole post a report; otherwise a
+  // single occurrence still counts if it sits on a clear subject line.
+  const hasScamWord = SCAM_WORDS_RE.test(body);
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer.
     if (/арбитраж|arbitr/i.test(line)) {
@@ -1743,14 +1751,15 @@ export function postMatchesSubject(body: string, username: string, id: string): 
       continue;
     }
     const hasId = idOnLine(line, id);
-    // The id is authoritative: contacts/ads don't carry the victim's "id: N".
-    if (hasId) return true;
-    if (ignoredName) continue;
-    if (!usernameOnLine(line, uname)) continue;
-    // A username on a pure contact/ad line (dispute footer, "по рекламе") is
-    // not an accusation; a username on any other line is.
-    if (CONTACT_LINE_RE.test(line) && !SUBJECT_LINE_RE.test(line)) continue;
-    return true;
+    const hasU = !ignoredName && usernameOnLine(line, uname);
+    if (!hasId && !hasU) continue;
+    const subjectLine = SUBJECT_LINE_RE.test(line);
+    // A pure contact/ad line (dispute footer, "по рекламе", "менеджер") is not
+    // an accusation.
+    if (CONTACT_LINE_RE.test(line) && !subjectLine) continue;
+    // Count it when the post reads like a report, or this very line marks a
+    // subject (❌, "id:", "тг:", "ник:", a scam word, …).
+    if (hasScamWord || subjectLine) return true;
   }
   return false;
 }
@@ -2849,7 +2858,9 @@ function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] 
 export async function checkCounterparty(input: string): Promise<CheckResult> {
   if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
   const parsed = parseTelegramInput(input);
-  const uname = parsed.username.replace(/^@/, "").toLowerCase();
+  // Off-limits service handles (@ctoroot, @sbepbank, the arbiter, the bot) are
+  // never searched or shown; an id in the same input is still honoured.
+  const uname = isIgnoredHandle(parsed.username) ? "" : parsed.username.replace(/^@/, "").toLowerCase();
   const id = parsed.id;
   const matched: { key: string; rec: PendingPost }[] = [];
   for (const [key, rec] of Object.entries(pendingPosts)) {
