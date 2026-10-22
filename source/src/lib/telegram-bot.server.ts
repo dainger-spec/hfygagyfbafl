@@ -1550,6 +1550,25 @@ type UserClientSearch = UserClient & {
   getMessages: (entity: unknown, opts: { search?: string; limit?: number; ids?: number[] }) => Promise<{ id?: number; message?: string; date?: number }[]>;
 };
 
+// Telegram's full-text search splits on underscores/punctuation, so a username
+// like "black_art_services" as one token matches nothing. We search the
+// word-tokenized form ("black art services" — posts containing all the words)
+// and then keep only messages that actually contain the username/id.
+function searchQueryFor(raw: string): string {
+  const tokenized = raw.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return tokenized || raw;
+}
+
+function bodyMatchesNeedle(body: string, needle: string): boolean {
+  const b = body.toLowerCase();
+  const n = needle.toLowerCase().replace(/^@/, "");
+  if (!n) return false;
+  if (b.includes(n)) return true;
+  // Also match when the post spells the username with spaces instead of _.
+  const words = n.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return words.length > 1 && words.every((w) => b.includes(w));
+}
+
 async function userSearchChannel(channel: CheckChannel, query: string, needle: string): Promise<CheckHit[]> {
   if (Date.now() < userBlockedUntil) return [];
   try {
@@ -1558,14 +1577,14 @@ async function userSearchChannel(channel: CheckChannel, query: string, needle: s
     const peer = await userInputPeer(client, ref);
     // High-level search: gramjs builds messages.Search with the right types.
     const msgs = (await withTimeout(
-      (client as unknown as UserClientSearch).getMessages(peer, { search: query, limit: 20 }),
+      (client as unknown as UserClientSearch).getMessages(peer, { search: searchQueryFor(query), limit: 40 }),
       15_000,
       "search timeout",
     )) as { id?: number; message?: string; date?: number }[];
     const out: CheckHit[] = [];
     for (const m of msgs || []) {
       const body = m.message || "";
-      if (!m.id || !body) continue;
+      if (!m.id || !body || !bodyMatchesNeedle(body, needle)) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
@@ -1610,13 +1629,13 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
       const { client } = await userbot();
       const peer = await userInputPeer(client, ref);
       const msgs = (await withTimeout(
-        (client as unknown as UserClientSearch).getMessages(peer, { search: q, limit: 20 }),
+        (client as unknown as UserClientSearch).getMessages(peer, { search: searchQueryFor(q), limit: 40 }),
         15_000,
         "search timeout",
-      )) as { id?: number }[];
-      const n = (msgs || []).filter((m) => m.id).length;
-      total += n;
-      lines.push(`• ${ch.title || ch.username || ch.id}: найдено ${n}`);
+      )) as { id?: number; message?: string }[];
+      const matched = (msgs || []).filter((m) => m.id && bodyMatchesNeedle(m.message || "", q));
+      total += matched.length;
+      lines.push(`• ${ch.title || ch.username || ch.id}: просмотрено ${(msgs || []).length}, совпало ${matched.length}`);
     } catch (err) {
       lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
     }
