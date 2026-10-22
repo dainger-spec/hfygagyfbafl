@@ -7,7 +7,7 @@ import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonR
 import { scammerAccounts } from "@/lib/types";
 import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
-import { applyCustomEmoji, hasCustomEmoji, stripCustomEmoji } from "@/lib/telegram-emoji";
+import { applyCustomEmoji, decorateButtons, hasCustomEmoji, markupHasIconableButton, stripCustomEmoji } from "@/lib/telegram-emoji";
 
 function botToken() {
   return process.env.TELEGRAM_BOT_TOKEN || "";
@@ -1008,19 +1008,26 @@ function isCustomEmojiError(err: unknown): boolean {
   return err instanceof TgError && /emoji/i.test(err.message || "");
 }
 
+function isNotModified(err: unknown): boolean {
+  return err instanceof TgError && /not modified/i.test(err.message || "");
+}
+
 // Sends a private-chat text message, upgrading known plain emoji to Premium
-// custom emoji. If Telegram rejects the custom emoji (e.g. premium lapsed), it
-// resends once as plain text so the message is never lost. Behaves like tgSoft.
+// custom emoji (in the text and as button icons). If Telegram rejects the custom
+// emoji (e.g. premium lapsed), it resends once plain so the message is never
+// lost. Behaves like tgSoft.
 async function sendCeMessage(
   chatId: string | number,
   text: string,
   extra: Record<string, unknown> = {},
 ): Promise<{ message_id: number } | null> {
   if (customEmojiEnabled() && isPrivateChat(chatId)) {
-    const rich = applyCustomEmoji(text);
-    if (hasCustomEmoji(rich)) {
+    const richText = applyCustomEmoji(text);
+    const markup = extra.reply_markup;
+    if (hasCustomEmoji(richText) || markupHasIconableButton(markup)) {
+      const richExtra = markup ? { ...extra, reply_markup: decorateButtons(markup, true) } : extra;
       try {
-        return await tg("sendMessage", { chat_id: chatId, text: rich, parse_mode: "HTML", ...extra });
+        return await tg("sendMessage", { chat_id: chatId, text: richText, parse_mode: "HTML", ...richExtra });
       } catch (err) {
         if (!isCustomEmojiError(err)) return null;
         // fall through to plain send
@@ -1028,6 +1035,52 @@ async function sendCeMessage(
     }
   }
   return tgSoft("sendMessage", { chat_id: chatId, text, ...extra });
+}
+
+// Rewrites an existing menu message in place (caption for the photo card, text
+// otherwise) instead of sending a new one, so navigating the menu never clutters
+// the chat. Falls back to plain emoji on rejection, and to a fresh message only
+// if the old one can't be edited at all.
+async function editCard(
+  cb: NonNullable<TgUpdate["callback_query"]>,
+  caption: string,
+  reply_markup: unknown,
+): Promise<void> {
+  const chatId = cb.message?.chat.id;
+  const messageId = cb.message?.message_id;
+  if (chatId == null || messageId == null) return;
+  const isMedia = Boolean(cb.message?.photo || cb.message?.caption);
+  const method = isMedia ? "editMessageCaption" : "editMessageText";
+  const field = isMedia ? "caption" : "text";
+  const build = (txt: string, markup: unknown) => ({
+    chat_id: chatId,
+    message_id: messageId,
+    [field]: txt,
+    parse_mode: "HTML",
+    reply_markup: markup,
+    ...(isMedia ? {} : { disable_web_page_preview: true }),
+  });
+  const useCe = customEmojiEnabled() && isPrivateChat(chatId);
+  const richText = useCe ? applyCustomEmoji(caption) : caption;
+  if (useCe && (hasCustomEmoji(richText) || markupHasIconableButton(reply_markup))) {
+    try {
+      await tg(method, build(richText, decorateButtons(reply_markup, true)));
+      return;
+    } catch (err) {
+      if (isNotModified(err)) return;
+      if (!isCustomEmojiError(err)) {
+        // not an emoji problem — fall through and try a plain edit
+      }
+    }
+  }
+  try {
+    await tg(method, build(caption, reply_markup));
+    return;
+  } catch (err) {
+    if (isNotModified(err)) return;
+  }
+  // The old message could not be edited (too old / deleted) — send a fresh one.
+  await sendCeMessage(chatId, caption, { reply_markup });
 }
 
 function escapeHtml(value: string): string {
@@ -1593,6 +1646,28 @@ type UserClientSearch = UserClient & {
   getMessages: (entity: unknown, opts: { search?: string; limit?: number; ids?: number[] }) => Promise<{ id?: number; message?: string; date?: number }[]>;
 };
 
+// A public channel resolves by @username; a private one by its numeric id.
+// getInputEntity wants the id as a number (a "-100…" string is mis-parsed as a
+// username), so convert it; the dialog-list cache supplies the access hash.
+function channelRef(channel: CheckChannel): string | number {
+  if (channel.username) return `@${channel.username.replace(/^@/, "")}`;
+  const n = Number(channel.id);
+  return Number.isSafeInteger(n) ? n : channel.id;
+}
+
+// Server search first; if it returns nothing (tokenization quirks, etc.), scan
+// the latest messages and filter locally so a recent post is still found.
+async function searchMessages(
+  client: UserClient,
+  peer: unknown,
+  query: string,
+): Promise<{ id?: number; message?: string; date?: number }[]> {
+  const get = (client as unknown as UserClientSearch).getMessages;
+  const found = (await withTimeout(get(peer, { search: searchQueryFor(query), limit: 40 }), 15_000, "search timeout")) || [];
+  if (found.length > 0) return found;
+  return (await withTimeout(get(peer, { limit: 200 }), 20_000, "scan timeout")) || [];
+}
+
 // Telegram's full-text search splits on underscores/punctuation, so a username
 // like "black_art_services" as one token matches nothing. We search the
 // word-tokenized form ("black art services" — posts containing all the words)
@@ -1616,14 +1691,8 @@ async function userSearchChannel(channel: CheckChannel, query: string, needle: s
   if (Date.now() < userBlockedUntil) return [];
   try {
     const { client } = await userbot();
-    const ref: string | number = channel.username ? `@${channel.username.replace(/^@/, "")}` : channel.id;
-    const peer = await userInputPeer(client, ref);
-    // High-level search: gramjs builds messages.Search with the right types.
-    const msgs = (await withTimeout(
-      (client as unknown as UserClientSearch).getMessages(peer, { search: searchQueryFor(query), limit: 40 }),
-      15_000,
-      "search timeout",
-    )) as { id?: number; message?: string; date?: number }[];
+    const peer = await userInputPeer(client, channelRef(channel));
+    const msgs = await searchMessages(client, peer, query);
     const out: CheckHit[] = [];
     for (const m of msgs || []) {
       const body = m.message || "";
@@ -1664,19 +1733,24 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
   if (!channels.length) return "Не выбрано ни одного канала для поиска. Выберите: /userbot → каналы.";
   const st = await userbotStatus();
   if (!st.ok) return `Аккаунт не отвечает: ${st.error || "ошибка"}`;
-  const lines: string[] = [`Аккаунт: ${st.name || "ок"}. Каналов: ${channels.length}. Ищу «${q}»…`];
+  // Also resolve the username to a numeric id and match on that — blacklist
+  // posts almost always carry "id: <number>", which search never mis-tokenizes.
+  let resolvedId = id;
+  if (uname && !resolvedId) {
+    const r = await resolveUsernameMtproto(uname, "");
+    if (r && r !== "busy" && r.id) resolvedId = r.id;
+  }
+  const needles = [uname, resolvedId].filter(Boolean) as string[];
+  const lines: string[] = [
+    `Аккаунт: ${st.name || "ок"}. Каналов: ${channels.length}. Ищу «${q}»${resolvedId && resolvedId !== q ? ` (id ${resolvedId})` : ""}…`,
+  ];
   let total = 0;
   for (const ch of channels) {
-    const ref = ch.username ? `@${ch.username.replace(/^@/, "")}` : ch.id;
     try {
       const { client } = await userbot();
-      const peer = await userInputPeer(client, ref);
-      const msgs = (await withTimeout(
-        (client as unknown as UserClientSearch).getMessages(peer, { search: searchQueryFor(q), limit: 40 }),
-        15_000,
-        "search timeout",
-      )) as { id?: number; message?: string }[];
-      const matched = (msgs || []).filter((m) => m.id && bodyMatchesNeedle(m.message || "", q));
+      const peer = await userInputPeer(client, channelRef(ch));
+      const msgs = await searchMessages(client, peer, q);
+      const matched = (msgs || []).filter((m) => m.id && needles.some((n) => bodyMatchesNeedle(m.message || "", n)));
       total += matched.length;
       lines.push(`• ${ch.title || ch.username || ch.id}: просмотрено ${(msgs || []).length}, совпало ${matched.length}`);
     } catch (err) {
@@ -2744,7 +2818,14 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
     // Live full-history search in every configured channel (old posts included).
     const queries: { q: string; needle: string }[] = [];
     if (uname) queries.push({ q: uname, needle: uname });
-    if (id) queries.push({ q: id, needle: id });
+    let effectiveId = id;
+    if (uname && !effectiveId) {
+      // Resolve the username to its id so we can also match on the numeric id,
+      // which blacklist posts carry and search never mis-tokenizes.
+      const r = await resolveUsernameMtproto(uname, "");
+      if (r && r !== "busy" && r.id) effectiveId = r.id;
+    }
+    if (effectiveId) queries.push({ q: effectiveId, needle: effectiveId });
     for (const channel of channels) {
       for (const { q, needle } of queries) {
         push(await userSearchChannel(channel, q, needle));
@@ -3997,6 +4078,9 @@ type ApplySession = {
   currency: Currency;
   evidence: CopiedMedia[];
   touched?: number;
+  // The current wizard prompt's message id, so the next step can replace it
+  // (delete + resend) instead of stacking a new message each time.
+  stepMsgId?: number;
 };
 
 const sessions = new Map<string, ApplySession>();
@@ -4057,21 +4141,23 @@ function ownersKeyboard(locale: Locale) {
   return {
     inline_keyboard: [
       [{ text: tb(locale, "channel"), url: CHANNEL_URL }],
-      [{ text: tb(locale, "back"), callback_data: "home" }],
+      [{ text: `⬅️ ${tb(locale, "back")}`, callback_data: "home" }],
     ],
   };
 }
 
 function langKeyboard(withBack = false) {
-  const rows: { text: string; callback_data: string }[][] = [
+  const rows: Record<string, unknown>[][] = [
     [
       { text: "Русский", callback_data: "lang:ru" },
       { text: "English", callback_data: "lang:en" },
     ],
   ];
-  if (withBack) rows.push([{ text: "Назад / Back", callback_data: "home" }]);
+  if (withBack) rows.push([{ text: "⬅️ Назад / Back", callback_data: "home" }]);
   return { inline_keyboard: rows };
 }
+
+const LANG_PROMPT = "Выберите язык / Choose language";
 
 async function askLanguage(chatId: number | string, withBack = false) {
   await tgSoft("sendMessage", {
@@ -4124,18 +4210,24 @@ async function sendCard(
   caption: string,
   extra: Record<string, unknown> = {},
 ) {
-  // Premium custom emoji in private-chat captions, with a plain-caption retry
-  // if Telegram rejects them, so the card is never lost.
+  // Premium custom emoji in private-chat captions and button icons, with a plain
+  // retry if Telegram rejects them, so the card is never lost.
   const useCe = customEmojiEnabled() && isPrivateChat(chatId);
   const rich = useCe ? applyCustomEmoji(caption) : caption;
-  const cap = hasCustomEmoji(rich) ? rich : caption;
-  const plain = caption;
-  const trySend = async (method: string, build: (c: string) => Record<string, unknown>) => {
+  const plainMarkup = extra.reply_markup;
+  const richMarkup = useCe ? decorateButtons(plainMarkup, true) : plainMarkup;
+  const needsRich = useCe && (hasCustomEmoji(rich) || markupHasIconableButton(plainMarkup));
+  const cap = needsRich ? rich : caption;
+  const rest = (markup: unknown) => {
+    const { reply_markup: _omit, ...other } = extra;
+    return markup === undefined ? other : { ...other, reply_markup: markup };
+  };
+  const trySend = async (method: string, build: (c: string, markup: unknown) => Record<string, unknown>) => {
     try {
-      return await tg(method, build(cap));
+      return await tg(method, build(cap, needsRich ? richMarkup : plainMarkup));
     } catch (err) {
-      if (cap !== plain && isCustomEmojiError(err)) {
-        return await tgSoft(method, build(plain));
+      if (needsRich && isCustomEmojiError(err)) {
+        return await tgSoft(method, build(caption, plainMarkup));
       }
       return null;
     }
@@ -4143,12 +4235,12 @@ async function sendCard(
 
   const cached = bindings.cards?.[kind];
   if (cached) {
-    const sent = await trySend("sendPhoto", (c) => ({
+    const sent = await trySend("sendPhoto", (c, markup) => ({
       chat_id: chatId,
       photo: cached,
       caption: c,
       parse_mode: "HTML",
-      ...extra,
+      ...rest(markup),
     }));
     if (sent) return;
     if (bindings.cards) delete bindings.cards[kind];
@@ -4156,21 +4248,21 @@ async function sendCard(
   }
   const bytes = cardBytes(kind);
   if (bytes?.length) {
-    const sendForm = (c: string) => {
+    const sendForm = (c: string, markup: unknown) => {
       const form = new FormData();
       form.set("chat_id", String(chatId));
       form.set("caption", c);
       form.set("parse_mode", "HTML");
-      if (extra.reply_markup) form.set("reply_markup", JSON.stringify(extra.reply_markup));
+      if (markup) form.set("reply_markup", JSON.stringify(markup));
       form.set("photo", new File([new Uint8Array(bytes)], `${kind}.jpg`, { type: "image/jpeg" }));
       return tgForm<{ photo?: { file_id: string }[] }>("sendPhoto", form);
     };
     try {
       let sent: { photo?: { file_id: string }[] };
       try {
-        sent = await sendForm(cap);
+        sent = await sendForm(cap, needsRich ? richMarkup : plainMarkup);
       } catch (err) {
-        if (cap !== plain && isCustomEmojiError(err)) sent = await sendForm(plain);
+        if (needsRich && isCustomEmojiError(err)) sent = await sendForm(caption, plainMarkup);
         else throw err;
       }
       const fileId = sent.photo?.at(-1)?.file_id;
@@ -4183,17 +4275,18 @@ async function sendCard(
       /* fall through to text */
     }
   }
-  await trySend("sendMessage", (c) => ({
+  await trySend("sendMessage", (c, markup) => ({
     chat_id: chatId,
     text: c,
     parse_mode: "HTML",
     disable_web_page_preview: true,
-    ...extra,
+    ...rest(markup),
   }));
 }
 
-async function replyStart(chatId: number, userId?: string | number) {
-  const locale = langOf(userId ?? chatId);
+// The /start caption: the welcome text plus the live connected-chats/audience
+// line. Shared by the first send and by in-place "back to menu" edits.
+async function startCaption(locale: Locale): Promise<string> {
   let text = startText(locale);
   try {
     const st = await sponsorStats();
@@ -4204,7 +4297,12 @@ async function replyStart(chatId: number, userId?: string | number) {
   } catch {
     /* stats are optional */
   }
-  await sendCard(chatId, "welcome", text, { reply_markup: applyKeyboard(locale) });
+  return text;
+}
+
+async function replyStart(chatId: number, userId?: string | number) {
+  const locale = langOf(userId ?? chatId);
+  await sendCard(chatId, "welcome", await startCaption(locale), { reply_markup: applyKeyboard(locale) });
 }
 
 function newSession(from: TgUser): ApplySession {
@@ -4244,6 +4342,33 @@ function formatSessionAccounts(session: ApplySession, userId: string | number) {
     .join("\n");
 }
 
+// Sends the next wizard prompt, deleting the previous one so the complaint flow
+// keeps a single live message instead of a growing stack. Falls back to a plain
+// send if there is no session to track against.
+async function sendStep(
+  chatId: number,
+  text: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ message_id: number } | null> {
+  const session = sessions.get(String(chatId));
+  if (session?.stepMsgId) {
+    void tgSoft("deleteMessage", { chat_id: chatId, message_id: session.stepMsgId });
+    session.stepMsgId = undefined;
+  }
+  const sent = await sendCeMessage(chatId, text, extra);
+  if (session && sent?.message_id) session.stepMsgId = sent.message_id;
+  return sent;
+}
+
+// Clears the tracked wizard prompt (used when the flow ends or is cancelled).
+function clearStepMessage(chatId: string | number, deleteIt = true) {
+  const session = sessions.get(String(chatId));
+  if (session?.stepMsgId) {
+    if (deleteIt) void tgSoft("deleteMessage", { chat_id: chatId, message_id: session.stepMsgId });
+    session.stepMsgId = undefined;
+  }
+}
+
 async function askScammer(chatId: number, session?: ApplySession) {
   const listed = session ? formatSessionAccounts(session, chatId) : "";
   const rows: { text: string; callback_data: string }[][] = [];
@@ -4254,7 +4379,7 @@ async function askScammer(chatId: number, session?: ApplySession) {
     ]);
   }
   rows.push(applyCancelRow(chatId));
-  await sendCeMessage(
+  await sendStep(
     chatId,
     session?.accounts.length
       ? btUser(chatId, "accountsListed", { list: listed })
@@ -4277,25 +4402,25 @@ async function askVictim(chatId: number, session: ApplySession) {
 }
 
 async function askSummary(chatId: number) {
-  await sendCeMessage(chatId, btUser(chatId, "stepSummary"), {
+  await sendStep(chatId, btUser(chatId, "stepSummary"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askStory(chatId: number) {
-  await sendCeMessage(chatId, btUser(chatId, "stepStory"), {
+  await sendStep(chatId, btUser(chatId, "stepStory"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askAmount(chatId: number) {
-  await sendCeMessage(chatId, btUser(chatId, "stepAmount"), {
+  await sendStep(chatId, btUser(chatId, "stepAmount"), {
     reply_markup: { inline_keyboard: [applyCancelRow(chatId)] },
   });
 }
 
 async function askCurrency(chatId: number, amount: string) {
-  await sendCeMessage(chatId, btUser(chatId, "pickCurrency", { amount: formatAmount(amount) }), {
+  await sendStep(chatId, btUser(chatId, "pickCurrency", { amount: formatAmount(amount) }), {
     reply_markup: {
       inline_keyboard: [
         [
@@ -4309,7 +4434,7 @@ async function askCurrency(chatId: number, amount: string) {
 }
 
 async function askEvidence(chatId: number) {
-  await sendCeMessage(chatId, btUser(chatId, "stepEvidence"), {
+  await sendStep(chatId, btUser(chatId, "stepEvidence"), {
     reply_markup: {
       inline_keyboard: [
         [
@@ -4327,9 +4452,9 @@ async function askConfirm(chatId: number, session: ApplySession) {
   const files = session.evidence.length
     ? btUser(chatId, "filesCount", { n: session.evidence.length })
     : btUser(chatId, "noFiles");
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: btUser(chatId, "confirm", {
+  await sendStep(
+    chatId,
+    btUser(chatId, "confirm", {
       accounts: formatSessionAccounts(session, chatId),
       victim,
       id: session.victimId,
@@ -4339,15 +4464,17 @@ async function askConfirm(chatId: number, session: ApplySession) {
       summary: session.summary,
       story: session.story,
     }),
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: btUser(chatId, "sendReview"), callback_data: "apply:send" },
-          { text: btUser(chatId, "cancelBtn"), callback_data: "apply:cancel" },
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: btUser(chatId, "sendReview"), callback_data: "apply:send" },
+            { text: btUser(chatId, "cancelBtn"), callback_data: "apply:cancel" },
+          ],
         ],
-      ],
+      },
     },
-  });
+  );
 }
 
 async function startApply(chatId: number, from: TgUser) {
@@ -4358,6 +4485,7 @@ async function startApply(chatId: number, from: TgUser) {
 }
 
 async function cancelApply(chatId: number, userId: string, notice?: string) {
+  clearStepMessage(chatId);
   sessions.delete(userId);
   await tgSoft("sendMessage", {
     chat_id: chatId,
@@ -4430,6 +4558,7 @@ async function submitSession(chatId: number, userId: string, session: ApplySessi
     });
     return;
   }
+  clearStepMessage(chatId);
   sessions.delete(userId);
   await tgSoft("sendMessage", {
     chat_id: chatId,
@@ -6441,30 +6570,33 @@ async function handleTelegramUpdate(update: TgUpdate) {
     if (cb.data === "owners") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
       const locale = langOf(cb.from?.id);
-      await tgSoft("sendMessage", {
-        chat_id: cb.message.chat.id,
-        text: ownersText(locale),
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-        reply_markup: ownersKeyboard(locale),
-      });
+      await editCard(cb, ownersText(locale), ownersKeyboard(locale));
       return;
     }
     if (cb.data === "home") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
-      await replyStart(cb.message.chat.id, cb.from?.id);
+      const locale = langOf(cb.from?.id);
+      await editCard(cb, await startCaption(locale), applyKeyboard(locale));
       return;
     }
     if (cb.data === "lang") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
-      await askLanguage(cb.message.chat.id, true);
+      await editCard(cb, LANG_PROMPT, langKeyboard(true));
       return;
     }
     if (cb.data === "lang:ru" || cb.data === "lang:en") {
       const locale: Locale = cb.data.endsWith("en") ? "en" : "ru";
       if (cb.from?.id) setLang(cb.from.id, locale);
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: tb(locale, "langSaved") });
-      await replyStart(cb.message.chat.id, cb.from?.id);
+      const fromCard = Boolean(cb.message.photo || cb.message.caption);
+      if (fromCard) {
+        // Language picked from inside the menu card — morph it back to the menu.
+        await editCard(cb, await startCaption(locale), applyKeyboard(locale));
+      } else {
+        // Picked from the first-run text prompt — drop it and show the photo card.
+        void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
+        await replyStart(cb.message.chat.id, cb.from?.id);
+      }
       return;
     }
     if (cb.data.startsWith("ub:")) {
