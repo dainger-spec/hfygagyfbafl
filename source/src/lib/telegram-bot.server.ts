@@ -1722,14 +1722,15 @@ function idOnLine(line: string, id: string): boolean {
 // Only the accused — the side after "на [пользователя]" / "против" — should be
 // flagged, never the person who filed. Returns that accused segment, or "".
 function arbitrationAccused(line: string): string {
-  // \b is ASCII-only, so anchor the "на"/"против" marker on whitespace/start.
+  // Marker for the accused side: RU "на"/"против", EN "on"/"against".
+  // \b is ASCII-only, so anchor the marker on whitespace/start.
   const m = line.match(
-    /(?:^|\s)(?:на|против)\s+(?:пользовател\S*\s+|юзер\S*\s+|человек\S*\s+|аккаунт\S*\s+|@)?(.+)$/i,
+    /(?:^|\s)(?:на|против|on|against)\s+(?:пользовател\S*\s+|юзер\S*\s+|человек\S*\s+|аккаунт\S*\s+|user\s+|@)?(.+)$/i,
   );
   if (!m) return "";
-  // Drop a trailing filer clause ("… от @reporter", "… заявитель …") so only the
-  // accused side is kept. Multiple accused ("mule1 и mule2") stay together.
-  return m[1].split(/\s+(?:от|заявител\S*|подал\S*)\s+/i)[0] || "";
+  // Drop a trailing filer clause ("… от @reporter", "… from @x", "… заявитель …")
+  // so only the accused side is kept. Multiple accused ("mule1 и mule2") stay.
+  return m[1].split(/\s+(?:от|from|by|заявител\S*|подал\S*|reporter)\s+/i)[0] || "";
 }
 
 // Does this post actually accuse `username`/`id` of scamming? Exported for tests.
