@@ -103,7 +103,7 @@ export function MiniApp({
         paddingTop: "var(--tg-safe-top, 0px)",
       }}
     >
-      {showApp && page !== "home" ? (
+      {showApp && page !== "home" && page !== "sponsors" ? (
         <button
           type="button"
           className="absolute left-2 z-10 flex size-11 items-center justify-center rounded-xl text-fg hover:bg-surface"
@@ -115,7 +115,7 @@ export function MiniApp({
         </button>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && page !== "home" && "pt-10")}>
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && page !== "home" && page !== "sponsors" && "pt-10")}>
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
@@ -132,7 +132,7 @@ export function MiniApp({
         {showApp && page === "history" ? <History telegramId={identity.telegramId} /> : null}
         {showApp && page === "check" && checkOn ? <CheckCounterparty /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
-        {showApp && page === "sponsors" ? <SponsorsPage /> : null}
+        {showApp && page === "sponsors" ? <SponsorsPage onBack={() => onPage("home")} /> : null}
         {showApp && page === "done" ? (
           <Done
             onPage={onPage}
@@ -483,7 +483,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   );
 }
 
-function SponsorsPage() {
+function SponsorsPage({ onBack }: { onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const [items, setItems] = useState<{ id: string; title: string; link: string }[] | null>(null);
   useEffect(() => {
@@ -495,7 +495,20 @@ function SponsorsPage() {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
       <div className="mx-auto w-full max-w-md space-y-4">
-        <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              haptic("light");
+              onBack();
+            }}
+            aria-label={t(locale, "back")}
+            className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded-xl text-fg hover:bg-surface"
+          >
+            <ChevronLeft className="size-5" />
+          </button>
+          <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
+        </div>
         <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
         {items === null ? (
           <div className="space-y-2">
