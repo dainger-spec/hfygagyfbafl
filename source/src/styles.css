@@ -99,6 +99,24 @@
   animation: epb-spin-slow 16s linear infinite;
 }
 
+/* Running ticker (marquee) for recent blacklists on the home screen. The track
+   holds the content twice; shifting it by -50% loops seamlessly. */
+.epb-marquee-track {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  will-change: transform;
+  animation: epb-marquee var(--epb-marquee-dur, 26s) linear infinite;
+}
+@keyframes epb-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
 /* App-open splash: the emblem opens large on a dark field, then the whole
    overlay zooms in a touch, blurs and fades to reveal the app underneath.
    The overlay is opaque from the very first frame (no fade-in), so the app

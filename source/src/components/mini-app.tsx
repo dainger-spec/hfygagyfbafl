@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
@@ -356,6 +356,59 @@ function Banners() {
   );
 }
 
+type TickerItem = { id: string; account: string; amount?: string; currency?: string; source?: string };
+
+// Yellow running line on the home screen: up to 7 recent blacklists.
+function BlacklistTicker({ onOpen }: { onOpen?: () => void }) {
+  const [items, setItems] = useState<TickerItem[]>([]);
+  useEffect(() => {
+    void getRecentBlacklist({ data: { initData: telegramInitData() } })
+      .then((r) => {
+        if (r.ok) setItems((r.items as TickerItem[]).slice(0, 7));
+      })
+      .catch(() => {});
+  }, []);
+  if (!items.length) return null;
+
+  const label = (e: TickerItem) => {
+    const amt = `${e.amount || ""} ${e.currency || ""}`.trim();
+    return `${e.account}${amt ? ` — ${amt}` : e.source ? ` — ${e.source}` : ""}`;
+  };
+  const Seq = () => (
+    <>
+      {items.map((e) => (
+        <span key={e.id} className="inline-flex items-center">
+          <span>{label(e)}</span>
+          <span className="mx-3 text-gold/40">/</span>
+        </span>
+      ))}
+    </>
+  );
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (onOpen) {
+          haptic("light");
+          onOpen();
+        }
+      }}
+      aria-label="recent blacklists"
+      className="group relative mt-3 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      style={{ "--epb-marquee-dur": `${Math.max(18, items.length * 5)}s` } as CSSProperties}
+    >
+      <div className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
+        <Seq />
+        <Seq />
+      </div>
+      {/* Soft fade at both edges. */}
+      <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
+      <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
+    </button>
+  );
+}
+
 function Home({
   identity,
   onComplaint,
@@ -380,6 +433,9 @@ function Home({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <Banners />
+      <div className="mx-auto w-full max-w-md">
+        <BlacklistTicker onOpen={checkOn ? onCheck : undefined} />
+      </div>
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
