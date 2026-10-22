@@ -40,9 +40,11 @@ export function parseTelegramInput(input: string): { username: string; id: strin
   const fromUrl = normalizeUsername(trimmed);
   if (/^\d{5,15}$/.test(fromUrl)) return { username: "", id: fromUrl };
 
-  const urlName = trimmed.match(/(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})/i);
-  const atName = trimmed.match(/@([A-Za-z][A-Za-z0-9_]{3,31})/);
-  const bare = trimmed.match(/^@?([A-Za-z][A-Za-z0-9_]{3,31})$/);
+  // Forum/arbitration handles can be short nicknames (e.g. "dvw"), not real
+  // Telegram usernames, so allow 3+ chars here.
+  const urlName = trimmed.match(/(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{2,31})/i);
+  const atName = trimmed.match(/@([A-Za-z][A-Za-z0-9_]{2,31})/);
+  const bare = trimmed.match(/^@?([A-Za-z][A-Za-z0-9_]{2,31})$/);
   const username = (urlName?.[1] || atName?.[1] || bare?.[1] || "").replace(/^@/, "");
 
   const labeled = trimmed.match(/\bid[:\s]*(\d{5,15})\b/i);
