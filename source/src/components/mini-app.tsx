@@ -47,6 +47,8 @@ export function MiniApp({
   const openOwners = useCallback(() => onPage("owners"), [onPage]);
   const openCheck = useCallback(() => onPage("check"), [onPage]);
   const [checkOn, setCheckOn] = useState(false);
+  const [introDone, setIntroDone] = useState(false);
+  const onIntroDone = useCallback(() => setIntroDone(true), []);
   useEffect(() => {
     void getFeatures()
       .then((f) => setCheckOn(Boolean(f?.check)))
@@ -138,6 +140,8 @@ export function MiniApp({
           />
         ) : null}
       </div>
+
+      {!introDone ? <IntroSplash ready={ready} onDone={onIntroDone} /> : null}
     </div>
   );
 }
@@ -196,6 +200,71 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
           English
         </Button>
       </div>
+    </div>
+  );
+}
+
+// Opening splash: the medallion fills the screen, then the overlay zooms and
+// fades to reveal the app. Shown once per app open, over the loading app.
+function IntroSplash({ ready, onDone }: { ready: boolean; onDone: () => void }) {
+  const [leaving, setLeaving] = useState(false);
+  const [size, setSize] = useState(280);
+  const startedAt = useRef(Date.now());
+
+  useEffect(() => {
+    try {
+      setSize(Math.round(Math.min(window.innerWidth * 0.68, 320)));
+    } catch {
+      /* keep default */
+    }
+    // Never let the splash stick if the account never resolves.
+    const hard = setTimeout(() => setLeaving(true), 2800);
+    return () => clearTimeout(hard);
+  }, []);
+
+  // Hold a minimum time so it never just flashes, then start the exit.
+  useEffect(() => {
+    if (!ready) return;
+    const wait = Math.max(0, 1100 - (Date.now() - startedAt.current));
+    const t = setTimeout(() => setLeaving(true), wait);
+    return () => clearTimeout(t);
+  }, [ready]);
+
+  useEffect(() => {
+    if (!leaving) return;
+    try {
+      haptic("soft");
+    } catch {
+      /* ignore */
+    }
+    const t = setTimeout(onDone, 480);
+    return () => clearTimeout(t);
+  }, [leaving, onDone]);
+
+  return (
+    <div
+      className={cn("epb-intro-overlay", leaving && "epb-intro-overlay--leaving")}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 60,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--color-bg)",
+        paddingTop: "var(--tg-safe-top, 0px)",
+      }}
+      aria-hidden
+    >
+      <div className="epb-intro-emblem relative flex items-center justify-center">
+        <span className="epb-intro-glow" />
+        <EuStarsLogo size={size} spin emblem />
+      </div>
+      <h1 className="epb-intro-title mt-8 text-center font-display text-2xl font-extrabold tracking-tight">
+        Europe Private
+        <span className="block text-gold">Blacklist</span>
+      </h1>
     </div>
   );
 }
