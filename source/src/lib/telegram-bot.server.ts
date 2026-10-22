@@ -2347,12 +2347,57 @@ function removeCheckChannelFromIndex(channelId: string) {
 
 export type CheckResult = {
   query: { username: string; id: string };
-  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number; summary: string; story: string }[];
   channels: CheckHit[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
 
+// A compact entry for the "recent blacklists" list and the in-app detail page.
+export type BlacklistEntry = {
+  kind: "epb" | "manual";
+  id: string;
+  account: string;
+  amount?: string;
+  currency?: string;
+  date: number;
+  summary?: string;
+  story?: string;
+  source?: string;
+  note?: string;
+};
+
 const DEFAULT_MANUAL_SOURCE = "Сторонний источник";
+
+// The most recent blacklist entries (published complaints + manual ones), newest first.
+export function recentBlacklist(limit = 24): BlacklistEntry[] {
+  if (!checkEnabled()) return [];
+  const out: BlacklistEntry[] = [];
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    if (rec.status !== "published" || !rec.channelPosted || rec.removedFromCheck) continue;
+    out.push({
+      kind: "epb",
+      id: key,
+      account: scamLabel(rec),
+      amount: rec.amount || "",
+      currency: rec.currency || "",
+      date: rec.createdAt || 0,
+      summary: rec.summary || rec.story || "",
+      story: rec.story || "",
+    });
+  }
+  for (const e of bindings.manualBlacklist || []) {
+    out.push({
+      kind: "manual",
+      id: e.id,
+      account: e.username ? `@${e.username.replace(/^@/, "")}` : e.telegramId ? `ID ${e.telegramId}` : "",
+      date: e.addedAt || 0,
+      source: e.source || DEFAULT_MANUAL_SOURCE,
+      note: e.note,
+    });
+  }
+  out.sort((a, b) => b.date - a.date);
+  return out.slice(0, Math.max(1, limit));
+}
 
 function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] {
   const out: CheckResult["manual"] = [];
@@ -2402,6 +2447,8 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
+      summary: rec.summary || rec.story || "",
+      story: rec.story || "",
     });
   }
   epb.sort((a, b) => b.date - a.date);

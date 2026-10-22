@@ -14,7 +14,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getBanners, getFeatures, getMyComplaints, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getBanners, getFeatures, getMyComplaints, getRecentBlacklist, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -497,12 +497,30 @@ function History({ telegramId }: { telegramId: string }) {
   );
 }
 
+type BlEntry = {
+  kind: "epb" | "manual";
+  id: string;
+  account: string;
+  amount?: string;
+  currency?: string;
+  date: number;
+  summary?: string;
+  story?: string;
+  source?: string;
+  note?: string;
+};
+
 type CheckData = {
   query: { username: string; id: string };
-  epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
+  epb: { id: string; accounts: string; amount: string; currency: string; date: number; summary: string; story: string }[];
   channels: { channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
 };
+
+const EUROPE_PROMO_URL = "https://t.me/EuropePromo";
+
+const fmtBlDate = (locale: Locale, ms: number) =>
+  ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
 
 function CheckCounterparty() {
   const locale = useBlacklistStore((s) => s.locale);
@@ -510,6 +528,16 @@ function CheckCounterparty() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<CheckData | null>(null);
+  const [recent, setRecent] = useState<BlEntry[]>([]);
+  const [detail, setDetail] = useState<BlEntry | null>(null);
+
+  useEffect(() => {
+    void getRecentBlacklist({ data: { initData: telegramInitData() } })
+      .then((r) => {
+        if (r.ok) setRecent(r.items as BlEntry[]);
+      })
+      .catch(() => {});
+  }, []);
 
   async function run() {
     const input = value.trim();
@@ -537,9 +565,21 @@ function CheckCounterparty() {
     }
   }
 
+  const open = (e: BlEntry) => {
+    haptic("light");
+    setDetail(e);
+  };
+  const epbEntry = (e: CheckData["epb"][number]): BlEntry => ({
+    kind: "epb", id: e.id, account: e.accounts || e.id, amount: e.amount, currency: e.currency, date: e.date, summary: e.summary, story: e.story,
+  });
+  const manualEntry = (m: CheckData["manual"][number]): BlEntry => ({
+    kind: "manual", id: m.id, account: m.account, date: m.date, source: m.source, note: m.note,
+  });
+
+  if (detail) return <BlacklistDetail entry={detail} onBack={() => setDetail(null)} />;
+
   const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0);
-  const fmtDate = (ms: number) =>
-    ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
+  const fmtDate = (ms: number) => fmtBlDate(locale, ms);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
@@ -584,16 +624,18 @@ function CheckCounterparty() {
                     {t(locale, "checkInEpb")}
                   </div>
                   {data.epb.map((e) => (
-                    <div
-                      key={e.id}
-                      className="rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
-                    >
-                      <p className="font-semibold">{e.accounts || e.id}</p>
-                      <p className="mt-0.5 text-xs text-muted">
-                        {t(locale, "checkEpbItem", { id: e.id, amount: e.amount, currency: e.currency })}
-                        {fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : ""}
-                      </p>
-                    </div>
+                    <BlacklistRow key={e.id} account={e.accounts || e.id} sub={`${t(locale, "checkEpbItem", { id: e.id, amount: e.amount, currency: e.currency })}${fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : ""}`} onClick={() => open(epbEntry(e))} />
+                  ))}
+                </div>
+              ) : null}
+              {data.manual?.length ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
+                    <ShieldAlert className="size-4" />
+                    {t(locale, "checkInExternal")}
+                  </div>
+                  {data.manual.map((m) => (
+                    <BlacklistRow key={m.id} account={m.account} sub={m.source} onClick={() => open(manualEntry(m))} />
                   ))}
                 </div>
               ) : null}
@@ -623,25 +665,6 @@ function CheckCounterparty() {
                   ))}
                 </div>
               ) : null}
-              {data.manual?.length ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
-                    <ShieldAlert className="size-4" />
-                    {t(locale, "checkInExternal")}
-                  </div>
-                  {data.manual.map((m) => (
-                    <div
-                      key={m.id}
-                      className="rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
-                    >
-                      <p className="font-semibold">{m.account}</p>
-                      <p className="mt-0.5 text-xs text-gold">{m.source}</p>
-                      {m.note ? <p className="mt-1 text-xs leading-relaxed text-muted">{m.note}</p> : null}
-                      {fmtDate(m.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(m.date)}</p> : null}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ) : (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
@@ -651,6 +674,115 @@ function CheckCounterparty() {
             </div>
           )
         ) : null}
+
+        {!data && !loading && recent.length ? (
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center gap-2 text-sm font-bold text-muted">
+              <ShieldAlert className="size-4" />
+              {t(locale, "checkRecent")}
+            </div>
+            {recent.map((e) => (
+              <BlacklistRow
+                key={e.id}
+                account={e.account || "—"}
+                sub={
+                  e.kind === "manual"
+                    ? e.source || t(locale, "checkInExternal")
+                    : `${e.amount || ""} ${e.currency || ""}`.trim() + (fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : "")
+                }
+                danger={e.kind === "epb"}
+                onClick={() => open(e)}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function BlacklistRow({ account, sub, onClick, danger }: { account: string; sub?: string; onClick: () => void; danger?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center justify-between gap-2 rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+    >
+      <span className="min-w-0">
+        <span className={cn("block truncate font-semibold", danger && "text-danger")}>{account}</span>
+        {sub ? <span className="mt-0.5 block truncate text-xs text-muted">{sub}</span> : null}
+      </span>
+      <ChevronLeft className="size-4 shrink-0 rotate-180 text-subtle" />
+    </button>
+  );
+}
+
+function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const isManual = entry.kind === "manual";
+  const date = fmtBlDate(locale, entry.date);
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onBack();
+          }}
+          className="flex items-center gap-1 text-sm font-medium text-muted hover:text-fg"
+        >
+          <ChevronLeft className="size-4" /> {t(locale, "back")}
+        </button>
+        <div className="flex items-center gap-2 text-danger">
+          <ShieldAlert className="size-5 shrink-0" />
+          <h2 className="font-display text-xl font-bold break-words">{entry.account || "—"}</h2>
+        </div>
+
+        {isManual ? (
+          <div className="space-y-4">
+            <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+              <p className="text-xs font-semibold text-gold">{entry.source || t(locale, "checkInExternal")}</p>
+              <p className="mt-2 text-sm leading-relaxed">{t(locale, "checkExternalDesc")}</p>
+              {entry.note ? <p className="mt-2 text-sm leading-relaxed text-muted">{entry.note}</p> : null}
+            </div>
+            <Button
+              className="w-full rounded-xl"
+              onClick={() => {
+                haptic("light");
+                openExternal(EUROPE_PROMO_URL);
+              }}
+            >
+              {t(locale, "checkDispute")}
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+              <p className="text-xs text-muted">
+                {t(locale, "checkDamageLabel")}:{" "}
+                <span className="font-semibold text-fg">
+                  {entry.amount} {entry.currency}
+                </span>
+                {date ? ` · ${date}` : ""}
+              </p>
+            </div>
+            {entry.story || entry.summary ? (
+              <div className="space-y-1.5">
+                <p className="text-sm font-bold">{t(locale, "checkSituation")}</p>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted">{entry.story || entry.summary}</p>
+              </div>
+            ) : null}
+            <a
+              href={CHANNEL_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm font-medium text-gold underline underline-offset-4"
+            >
+              {t(locale, "subscribe")} <ExternalLink className="size-3" />
+            </a>
+          </div>
+        )}
       </div>
     </div>
   );
