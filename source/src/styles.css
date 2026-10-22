@@ -100,18 +100,9 @@
 }
 
 /* App-open splash: the emblem opens large on a dark field, then the whole
-   overlay zooms in a touch, blurs and fades to reveal the app underneath. */
-.epb-intro-overlay {
-  animation: epb-intro-overlay-in 240ms ease both;
-}
-@keyframes epb-intro-overlay-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
+   overlay zooms in a touch, blurs and fades to reveal the app underneath.
+   The overlay is opaque from the very first frame (no fade-in), so the app
+   underneath never flashes before the animation starts. */
 .epb-intro-overlay--leaving {
   animation: epb-intro-overlay-out 480ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }

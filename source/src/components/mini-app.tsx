@@ -261,7 +261,7 @@ function IntroSplash({ ready, onDone }: { ready: boolean; onDone: () => void }) 
         <span className="epb-intro-glow" />
         <EuStarsLogo size={size} spin emblem />
       </div>
-      <h1 className="epb-intro-title mt-8 text-center font-display text-2xl font-extrabold tracking-tight">
+      <h1 className="epb-intro-title mt-9 text-center font-display text-4xl font-extrabold leading-tight tracking-tight">
         Europe Private
         <span className="block text-gold">Blacklist</span>
       </h1>
