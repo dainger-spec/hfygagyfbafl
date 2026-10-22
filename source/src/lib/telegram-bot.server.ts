@@ -1679,17 +1679,64 @@ function searchQueryFor(raw: string): string {
   return tokenized || raw;
 }
 
-function bodyMatchesNeedle(body: string, needle: string): boolean {
-  const b = body.toLowerCase();
-  const n = needle.toLowerCase().replace(/^@/, "");
-  if (!n) return false;
-  if (b.includes(n)) return true;
-  // Also match when the post spells the username with spaces instead of _.
-  const words = n.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  return words.length > 1 && words.every((w) => b.includes(w));
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function userSearchChannel(channel: CheckChannel, query: string, needle: string): Promise<CheckHit[]> {
+// A username/id appears in many posts that are NOT a report about it: ads, a
+// reporter's handle, or the "dispute with the arbiter" footer. We keep a post
+// only when it (a) reads like a scam report and (b) carries the username/id on a
+// subject line, not a contact/ad line. Words are a starting lexicon — easy to
+// extend. The owner can always open the exact post via the link we return.
+const SCAM_WORDS_RE =
+  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑)/iu;
+// A line that is clearly contact/ad context rather than the accused subject.
+const CONTACT_LINE_RE =
+  /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|\bгарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|заказ|отзыв|подписку|канал\b)/iu;
+// A line that marks the accused subject.
+const SUBJECT_LINE_RE =
+  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|🚫|❌|🤡|⚠|🔴|🛑|id\s*[:#]|айди|ник[:\s]|юзер|username|акк\b|аккаунт|тег\b)/iu;
+// Known arbiter / service handles that are never the accused party.
+const IGNORE_USERNAMES = new Set(["europepromo", BOT_USERNAME.toLowerCase()]);
+
+function usernameOnLine(line: string, uname: string): boolean {
+  if (!uname) return false;
+  return new RegExp("@?(?<!\\w)" + escapeRe(uname) + "(?!\\w)", "iu").test(line);
+}
+
+function idOnLine(line: string, id: string): boolean {
+  const digits = (id || "").replace(/\D/g, "");
+  if (digits.length < 5) return false;
+  return new RegExp("(?<!\\d)" + digits + "(?!\\d)").test(line);
+}
+
+// Does this post actually accuse `username`/`id` of scamming? Exported for tests.
+export function postMatchesSubject(body: string, username: string, id: string): boolean {
+  const uname = (username || "").replace(/^@/, "").toLowerCase();
+  const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
+  // Nothing to match on (handle is an arbiter/service handle and no id given).
+  if (ignoredName && !id) return false;
+  // Must read like a scam report, not an ad or a plain contact list.
+  if (!SCAM_WORDS_RE.test(body)) return false;
+  for (const line of body.split(/\r?\n/)) {
+    const hasId = idOnLine(line, id);
+    // The id is authoritative: contacts/ads don't carry the victim's "id: N".
+    if (hasId) return true;
+    if (ignoredName) continue;
+    if (!usernameOnLine(line, uname)) continue;
+    // A username on a pure contact/ad line (dispute footer, "по рекламе") is
+    // not an accusation; a username on any other line is.
+    if (CONTACT_LINE_RE.test(line) && !SUBJECT_LINE_RE.test(line)) continue;
+    return true;
+  }
+  return false;
+}
+
+async function userSearchChannel(
+  channel: CheckChannel,
+  query: string,
+  subject: { username: string; id: string },
+): Promise<CheckHit[]> {
   if (Date.now() < userBlockedUntil) return [];
   try {
     const { client } = await userbot();
@@ -1698,14 +1745,14 @@ async function userSearchChannel(channel: CheckChannel, query: string, needle: s
     const out: CheckHit[] = [];
     for (const m of msgs || []) {
       const body = m.message || "";
-      if (!m.id || !body || !bodyMatchesNeedle(body, needle)) continue;
+      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
         messageId: m.id,
         link: messageLink(channel, m.id),
         date: (m.date || 0) * 1000,
-        snippet: snippetAround(body, needle),
+        snippet: snippetAround(body, subject.username || subject.id),
       });
     }
     return out;
@@ -1742,7 +1789,9 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
     const r = await resolveUsernameMtproto(uname, "");
     if (r && r !== "busy" && r.id) resolvedId = r.id;
   }
-  const needles = [uname, resolvedId].filter(Boolean) as string[];
+  const idDigits = (resolvedId || "").replace(/\D/g, "");
+  const mentions = (body: string) =>
+    (uname && body.toLowerCase().includes(uname)) || (idDigits.length >= 5 && body.includes(idDigits));
   const lines: string[] = [
     `Аккаунт: ${st.name || "ок"}. Каналов: ${channels.length}. Ищу «${q}»${resolvedId && resolvedId !== q ? ` (id ${resolvedId})` : ""}…`,
   ];
@@ -1752,14 +1801,18 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
       const { client } = await userbot();
       const peer = await userInputPeer(client, channelRef(ch));
       const msgs = await searchMessages(client, peer, q);
-      const matched = (msgs || []).filter((m) => m.id && needles.some((n) => bodyMatchesNeedle(m.message || "", n)));
-      total += matched.length;
-      lines.push(`• ${ch.title || ch.username || ch.id}: просмотрено ${(msgs || []).length}, совпало ${matched.length}`);
+      const mentioned = (msgs || []).filter((m) => m.id && mentions(m.message || ""));
+      const relevant = (msgs || []).filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
+      total += relevant.length;
+      // "упомянут" = handle/id appears at all; "в тему" = actually accused (kept).
+      lines.push(
+        `• ${ch.title || ch.username || ch.id}: просмотрено ${(msgs || []).length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
+      );
     } catch (err) {
       lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
     }
   }
-  lines.push(`Итого совпадений: ${total}.`);
+  lines.push(`Итого по делу: ${total}.`);
   return lines.join("\n");
 }
 
@@ -2818,8 +2871,6 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
   const channels = checkChannels();
   if (hasUserbot() && channels.length) {
     // Live full-history search in every configured channel (old posts included).
-    const queries: { q: string; needle: string }[] = [];
-    if (uname) queries.push({ q: uname, needle: uname });
     let effectiveId = id;
     if (uname && !effectiveId) {
       // Resolve the username to its id so we can also match on the numeric id,
@@ -2827,10 +2878,13 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
       const r = await resolveUsernameMtproto(uname, "");
       if (r && r !== "busy" && r.id) effectiveId = r.id;
     }
-    if (effectiveId) queries.push({ q: effectiveId, needle: effectiveId });
+    // Search terms find candidate posts; postMatchesSubject then decides whether
+    // the post actually accuses this username/id (vs mentions it as a contact/ad).
+    const subject = { username: uname, id: effectiveId };
+    const searchTerms = [uname, effectiveId].filter(Boolean) as string[];
     for (const channel of channels) {
-      for (const { q, needle } of queries) {
-        push(await userSearchChannel(channel, q, needle));
+      for (const term of searchTerms) {
+        push(await userSearchChannel(channel, term, subject));
       }
     }
   } else {
