@@ -384,8 +384,10 @@ const SPONSORS_CACHE_KEY = "epb-sponsors";
 // sponsors page. Transparent PNGs in /public/partners.
 // `r` is width/height, so every logo gets its final size before it loads and
 // the scrolling track never changes width mid-animation (which made it jump).
-const PARTNER_LOGOS: { src: string; alt: string; r: number }[] = [
-  { src: "/partners/wwh.png", alt: "WWH Club", r: 740 / 128 },
+// r = width/height of the logo file; s = optional height scale (the wide WWH
+// wordmark reads bigger than the round logos, so it's drawn a bit shorter).
+const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number }[] = [
+  { src: "/partners/wwh.png", alt: "WWH Club", r: 740 / 128, s: 0.62 },
   { src: "/partners/animal-planet.png", alt: "Animal Planet Blacklist", r: 1 },
   { src: "/partners/kidalam.png", alt: "KidaLam NeT", r: 1 },
   { src: "/partners/z-black.png", alt: "Z-BLACK", r: 122 / 128 },
@@ -397,22 +399,26 @@ const PARTNER_LOGOS: { src: string; alt: string; r: number }[] = [
 function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
   return (
     <>
-      {PARTNER_LOGOS.map((l) => (
-        <span key={l.src} className="inline-flex shrink-0 items-center">
-          <img
-            src={l.src}
-            alt={l.alt}
-            draggable={false}
-            width={Math.round(size * l.r)}
-            height={size}
-            loading="eager"
-            decoding="async"
-            style={{ width: Math.round(size * l.r), height: size }}
-            className="max-w-none shrink-0 select-none"
-          />
-          {gap ? <span className="w-6 shrink-0" /> : <span className="mx-3 text-gold/40">·</span>}
-        </span>
-      ))}
+      {PARTNER_LOGOS.map((l) => {
+        const h = Math.round(size * (l.s ?? 1));
+        const w = Math.round(h * l.r);
+        return (
+          <span key={l.src} className="inline-flex shrink-0 items-center" style={{ height: size }}>
+            <img
+              src={l.src}
+              alt={l.alt}
+              draggable={false}
+              width={w}
+              height={h}
+              loading="eager"
+              decoding="async"
+              style={{ width: w, height: h }}
+              className="max-w-none shrink-0 select-none"
+            />
+            {gap ? <span className="w-5 shrink-0" /> : <span className="mx-3 text-gold/40">·</span>}
+          </span>
+        );
+      })}
     </>
   );
 }
@@ -421,12 +427,12 @@ function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
 function PartnerMarquee() {
   return (
     <div
-      className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
-      style={{ "--epb-marquee-dur": "22s" } as CSSProperties}
+      className="relative overflow-hidden rounded-xl bg-surface/60 py-1.5 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      style={{ "--epb-marquee-dur": "9s" } as CSSProperties}
     >
       <div className="epb-marquee-track">
-        <PartnerLogos size={48} gap />
-        <PartnerLogos size={48} gap />
+        <PartnerLogos size={30} gap />
+        <PartnerLogos size={30} gap />
       </div>
       <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
       <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />

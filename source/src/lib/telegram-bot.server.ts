@@ -6,6 +6,7 @@ import { CHANNEL_NAME, CHANNEL_URL, KNOWN_TELEGRAM_IDS, parseDamageAmount, parse
 import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonRef } from "@/lib/types";
 import { scammerAccounts } from "@/lib/types";
 import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
+import { WELCOME_MP4_BASE64 } from "@/lib/welcome-anim";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
 import { normalizeCaptchaAnswer, randomCaptchaWord, renderCaptcha } from "@/lib/captcha.server";
 import { applyCustomEmoji, decorateButtons, hasCustomEmoji, markupHasIconableButton, stripCustomEmoji } from "@/lib/telegram-emoji";
@@ -125,7 +126,7 @@ type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
   miniAppUrl?: string;
-  cards?: Partial<Record<"welcome" | "submitted" | "published", string>>;
+  cards?: Partial<Record<"welcome" | "welcomeAnim" | "submitted" | "published", string>>;
   cardStamp?: string;
   relayChats?: RelayChat[];
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
@@ -4726,6 +4727,61 @@ async function sendCard(
       return null;
     }
   };
+
+  // The /start card is an animation (medallion + circling stars); the still
+  // picture below stays as the fallback if Telegram refuses it.
+  if (kind === "welcome") {
+    const cachedAnim = bindings.cards?.welcomeAnim;
+    if (cachedAnim) {
+      const sent = await trySend("sendAnimation", (c, markup) => ({
+        chat_id: chatId,
+        animation: cachedAnim,
+        caption: c,
+        parse_mode: "HTML",
+        ...rest(markup),
+      }));
+      if (sent) return;
+      if (bindings.cards) delete bindings.cards.welcomeAnim;
+      saveBindings();
+    }
+    let mp4: Buffer | null = null;
+    try {
+      mp4 = Buffer.from(WELCOME_MP4_BASE64, "base64");
+    } catch {
+      mp4 = null;
+    }
+    if (mp4?.length) {
+      const sendAnim = (c: string, markup: unknown) => {
+        const form = new FormData();
+        form.set("chat_id", String(chatId));
+        form.set("caption", c);
+        form.set("parse_mode", "HTML");
+        form.set("width", "960");
+        form.set("height", "540");
+        form.set("duration", "15");
+        if (markup) form.set("reply_markup", JSON.stringify(markup));
+        form.set("animation", new File([new Uint8Array(mp4!)], "welcome.mp4", { type: "video/mp4" }));
+        return tgForm<{ animation?: { file_id: string }; document?: { file_id: string } }>("sendAnimation", form);
+      };
+      try {
+        let sent: { animation?: { file_id: string }; document?: { file_id: string } };
+        try {
+          sent = await sendAnim(cap, needsRich ? richMarkup : plainMarkup);
+        } catch (err) {
+          if (needsRich && isCustomEmojiError(err)) sent = await sendAnim(caption, plainMarkup);
+          else throw err;
+        }
+        const fileId = sent.animation?.file_id || sent.document?.file_id;
+        if (fileId) {
+          bindings.cards = { ...bindings.cards, welcomeAnim: fileId };
+          saveBindings();
+        }
+        return;
+      } catch {
+        /* fall back to the still card */
+      }
+    }
+  }
 
   const cached = bindings.cards?.[kind];
   if (cached) {
