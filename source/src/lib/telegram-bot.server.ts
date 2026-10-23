@@ -6437,7 +6437,25 @@ async function sendCard(
 // The /start caption. Shared by the first send and by in-place "back to menu"
 // edits. (The connected-chats/audience line was removed on request.)
 async function startCaption(locale: Locale): Promise<string> {
-  return startText(locale);
+  const text = startText(locale);
+  const n = blacklistBaseCached();
+  if (!n) return text;
+  return `${text}\n\n${tb(locale, "baseLine", { n: n.toLocaleString(locale === "en" ? "en-US" : "ru-RU") })}`;
+}
+
+// The base size for the /start card, counted at most once a minute (every user
+// sees the menu, the count only needs to be roughly current).
+let baseCountCache = { at: 0, n: 0 };
+function blacklistBaseCached(): number {
+  if (!checkEnabled()) return 0;
+  if (Date.now() - baseCountCache.at > 60_000) {
+    try {
+      baseCountCache = { at: Date.now(), n: blacklistBase().accounts };
+    } catch {
+      baseCountCache = { at: Date.now(), n: baseCountCache.n };
+    }
+  }
+  return baseCountCache.n;
 }
 
 async function replyStart(chatId: number, userId?: string | number) {
