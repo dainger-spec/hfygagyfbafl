@@ -1657,17 +1657,21 @@ function channelRef(channel: CheckChannel): string | number {
 
 // Server search first; if it returns nothing (tokenization quirks, etc.), scan
 // the latest messages and filter locally so a recent post is still found.
-async function searchMessages(
-  client: UserClient,
-  peer: unknown,
-  query: string,
-): Promise<{ id?: number; message?: string; date?: number }[]> {
-  // Must be called as a method on the client — gramjs getMessages uses `this`
-  // internally (this.iterMessages), so a detached reference would throw.
+type TgMsgLite = { id?: number; message?: string; date?: number };
+
+// Telegram's server full-text search misses many posts (handles with digits,
+// odd tokenization, indexing lag). Must be called as a method on the client —
+// gramjs getMessages uses `this` internally (this.iterMessages).
+async function serverSearch(client: UserClient, peer: unknown, query: string): Promise<TgMsgLite[]> {
   const c = client as unknown as UserClientSearch;
-  const found = (await withTimeout(c.getMessages(peer, { search: searchQueryFor(query), limit: 40 }), 15_000, "search timeout")) || [];
-  if (found.length > 0) return found;
-  return (await withTimeout(c.getMessages(peer, { limit: 200 }), 20_000, "scan timeout")) || [];
+  return ((await withTimeout(c.getMessages(peer, { search: searchQueryFor(query), limit: 60 }), 15_000, "search timeout")) || []) as TgMsgLite[];
+}
+
+// Fallback when server search doesn't surface the post: read the channel's
+// recent history and filter locally.
+async function scanRecent(client: UserClient, peer: unknown, limit = 500): Promise<TgMsgLite[]> {
+  const c = client as unknown as UserClientSearch;
+  return ((await withTimeout(c.getMessages(peer, { limit }), 30_000, "scan timeout")) || []) as TgMsgLite[];
 }
 
 // Telegram's full-text search splits on underscores/punctuation, so a username
@@ -1788,20 +1792,26 @@ async function userSearchChannel(
   try {
     const { client } = await userbot();
     const peer = await userInputPeer(client, channelRef(channel));
-    const msgs = await searchMessages(client, peer, query);
-    const out: CheckHit[] = [];
-    for (const m of msgs || []) {
-      const body = m.message || "";
-      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
-      out.push({
-        channelId: channel.id,
-        channelTitle: channel.title || "канал",
-        messageId: m.id,
-        link: messageLink(channel, m.id),
-        date: (m.date || 0) * 1000,
-        snippet: snippetAround(body, subject.username || subject.id),
-      });
-    }
+    const toHits = (msgs: TgMsgLite[]): CheckHit[] => {
+      const out: CheckHit[] = [];
+      for (const m of msgs || []) {
+        const body = m.message || "";
+        if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
+        out.push({
+          channelId: channel.id,
+          channelTitle: channel.title || "канал",
+          messageId: m.id,
+          link: messageLink(channel, m.id),
+          date: (m.date || 0) * 1000,
+          snippet: snippetAround(body, subject.username || subject.id),
+        });
+      }
+      return out;
+    };
+    // Server search first; if it surfaced no actual accusation, scan the recent
+    // history (Telegram's FTS misses many posts).
+    let out = toHits(await serverSearch(client, peer, query));
+    if (!out.length) out = toHits(await scanRecent(client, peer));
     return out;
   } catch (err) {
     const wait = floodSeconds(err);
@@ -1847,13 +1857,21 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
     try {
       const { client } = await userbot();
       const peer = await userInputPeer(client, channelRef(ch));
-      const msgs = await searchMessages(client, peer, q);
+      const relevantOf = (msgs: TgMsgLite[]) => (msgs || []).filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
+      // Server search, then recent-history scan if it surfaced no accusation.
+      let msgs = await serverSearch(client, peer, q);
+      let relevant = relevantOf(msgs);
+      let how = "поиск";
+      if (!relevant.length) {
+        msgs = await scanRecent(client, peer);
+        relevant = relevantOf(msgs);
+        how = "скан";
+      }
       const mentioned = (msgs || []).filter((m) => m.id && mentions(m.message || ""));
-      const relevant = (msgs || []).filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
       total += relevant.length;
       // "упомянут" = handle/id appears at all; "в тему" = actually accused (kept).
       lines.push(
-        `• ${ch.title || ch.username || ch.id}: просмотрено ${(msgs || []).length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
+        `• ${ch.title || ch.username || ch.id}: ${how} ${(msgs || []).length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
       );
     } catch (err) {
       lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
