@@ -7,6 +7,7 @@ import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonR
 import { scammerAccounts } from "@/lib/types";
 import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
+import { normalizeCaptchaAnswer, randomCaptchaWord, renderCaptcha } from "@/lib/captcha.server";
 import { applyCustomEmoji, decorateButtons, hasCustomEmoji, markupHasIconableButton, stripCustomEmoji } from "@/lib/telegram-emoji";
 
 function botToken() {
@@ -232,7 +233,19 @@ function loadBindings(): Bindings {
   return loaded;
 }
 
+// Cached check results must not outlive a data change (channels, manual
+// entries, published complaints). The cache is declared further down, so during
+// module start-up this is a harmless no-op.
+function invalidateCheckCache() {
+  try {
+    checkCache.clear();
+  } catch {
+    /* not initialised yet */
+  }
+}
+
 function saveBindings() {
+  invalidateCheckCache();
   // Never overwrite a file we could not read: it may still hold the relay list.
   if (bindingsLoadFailed) return;
   try {
@@ -384,6 +397,7 @@ function saveIdCache() {
 }
 
 function savePending() {
+  invalidateCheckCache();
   try {
     const entries = Object.entries(pendingPosts);
     if (entries.length > 1200) {
@@ -1714,16 +1728,38 @@ type TgMsgLite = { id?: number; message?: string; date?: number };
 // Telegram's server full-text search misses many posts (handles with digits,
 // odd tokenization, indexing lag). Must be called as a method on the client —
 // gramjs getMessages uses `this` internally (this.iterMessages).
+// All userbot reads go through one queue with a small gap between calls, so a
+// burst of checks can't flood the account (Telegram answers floods with
+// FLOOD_WAIT and, if abused, restricts the account).
+let userbotQueue: Promise<unknown> = Promise.resolve();
+let userbotQueued = 0;
+const USERBOT_GAP_MS = 350;
+function paced<T>(fn: () => Promise<T>): Promise<T> {
+  if (userbotQueued > 60) return Promise.reject(new Error("userbot busy"));
+  userbotQueued += 1;
+  const run = userbotQueue.then(async () => {
+    try {
+      return await fn();
+    } finally {
+      await new Promise((r) => setTimeout(r, USERBOT_GAP_MS));
+    }
+  });
+  userbotQueue = run.catch(() => {}).finally(() => {
+    userbotQueued -= 1;
+  });
+  return run;
+}
+
 async function serverSearch(client: UserClient, peer: unknown, query: string): Promise<TgMsgLite[]> {
   const c = client as unknown as UserClientSearch;
-  return ((await withTimeout(c.getMessages(peer, { search: searchQueryFor(query), limit: 60 }), 15_000, "search timeout")) || []) as TgMsgLite[];
+  return ((await paced(() => withTimeout(c.getMessages(peer, { search: searchQueryFor(query), limit: 60 }), 15_000, "search timeout"))) || []) as TgMsgLite[];
 }
 
 // Fallback when server search doesn't surface the post: read the channel's
 // recent history and filter locally.
 async function scanRecent(client: UserClient, peer: unknown, limit = 800): Promise<TgMsgLite[]> {
   const c = client as unknown as UserClientSearch;
-  return ((await withTimeout(c.getMessages(peer, { limit }), 45_000, "scan timeout")) || []) as TgMsgLite[];
+  return ((await paced(() => withTimeout(c.getMessages(peer, { limit }), 45_000, "scan timeout"))) || []) as TgMsgLite[];
 }
 
 // The recent-history scan is independent of the search term, so cache it briefly
@@ -2806,6 +2842,7 @@ function addCheckHit(token: string, hit: CheckHit) {
 
 // A post arrived in a configured check channel: index its handles and ids.
 function indexCheckPost(channel: CheckChannel, messageId: number, text: string, date: number) {
+  invalidateCheckCache();
   const body = (text || "").slice(0, 4096);
   if (!body.trim()) return;
   const { usernames, ids } = tokensFromText(body);
@@ -3009,8 +3046,28 @@ function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] 
 }
 
 // Search the EPB blacklist (published complaints) and the configured channels.
+// Recent results per query, so repeated checks of the same handle (by many
+// people, or someone hammering it) don't hit the userbot again.
+const checkCache = new Map<string, { at: number; res: CheckResult }>();
+const CHECK_CACHE_TTL = 5 * 60_000;
+
 export async function checkCounterparty(input: string): Promise<CheckResult> {
   if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
+  const cacheKey = (() => {
+    const p = parseTelegramInput(input);
+    return `${p.username.replace(/^@/, "").toLowerCase()}|${p.id}`;
+  })();
+  const hit = checkCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < CHECK_CACHE_TTL && cacheKey !== "|") return hit.res;
+  const res = await checkCounterpartyUncached(input);
+  if (cacheKey !== "|") {
+    checkCache.set(cacheKey, { at: Date.now(), res });
+    if (checkCache.size > 2000) checkCache.delete(checkCache.keys().next().value!);
+  }
+  return res;
+}
+
+async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   const parsed = parseTelegramInput(input);
   // Off-limits service handles (@ctoroot, @sbepbank, the arbiter, the bot) are
   // never searched or shown; an id in the same input is still honoured.
@@ -3090,9 +3147,72 @@ export function allowCheck(initData: string): { ok: true; userId: string } | { o
   if (!checkEnabled()) return { ok: false, error: "disabled" };
   const user = verifyTelegramInitData(initData);
   if (!user) return { ok: false, error: "telegram auth required" };
-  if (tooMany(`check:${user.id}`, 40, 60_000)) return { ok: false, error: "too many" };
-  if (tooMany("check:global", 1500, 60_000)) return { ok: false, error: "busy" };
+  if (tooMany(`check:${user.id}`, 30, 60_000)) return { ok: false, error: "too many" };
+  if (tooMany("check:global", 600, 60_000)) return { ok: false, error: "busy" };
   return { ok: true, userId: user.id };
+}
+
+// ---- Captcha for frequent counterparty checks (app and bot share it). ----
+// After CAPTCHA_AFTER checks within CAPTCHA_WINDOW a user must solve an image
+// captcha (a distorted Russian word); solving grants CAPTCHA_CREDIT checks.
+const CAPTCHA_AFTER = 5;
+const CAPTCHA_WINDOW = 3 * 60_000;
+const CAPTCHA_CREDIT = 15;
+const checkTimes = new Map<string, number[]>();
+const captchaCredit = new Map<string, number>();
+const captchaPending = new Map<string, { word: string; exp: number; tries: number }>();
+
+// Returns true when this user must solve a captcha before the next check;
+// otherwise records the check.
+export function captchaRequired(userId: string): boolean {
+  const uid = String(userId);
+  if (isOwner(uid)) return false;
+  const credit = captchaCredit.get(uid) || 0;
+  if (credit > 0) {
+    captchaCredit.set(uid, credit - 1);
+    return false;
+  }
+  const now = Date.now();
+  const times = (checkTimes.get(uid) || []).filter((t) => now - t < CAPTCHA_WINDOW);
+  if (times.length >= CAPTCHA_AFTER) {
+    checkTimes.set(uid, times);
+    return true;
+  }
+  times.push(now);
+  checkTimes.set(uid, times);
+  if (checkTimes.size > 20_000) checkTimes.clear();
+  return false;
+}
+
+// A fresh captcha image for this user (null when they request too many images).
+export function newCaptchaImage(userId: string): Buffer | null {
+  const uid = String(userId);
+  if (tooMany(`capimg:${uid}`, 12, 10 * 60_000)) return null;
+  const word = randomCaptchaWord();
+  captchaPending.set(uid, { word, exp: Date.now() + 5 * 60_000, tries: 0 });
+  if (captchaPending.size > 20_000) captchaPending.clear();
+  return renderCaptcha(word);
+}
+
+export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "expired" {
+  const uid = String(userId);
+  const p = captchaPending.get(uid);
+  if (!p || Date.now() > p.exp) {
+    captchaPending.delete(uid);
+    return "expired";
+  }
+  if (normalizeCaptchaAnswer(answer) === normalizeCaptchaAnswer(p.word)) {
+    captchaPending.delete(uid);
+    checkTimes.delete(uid);
+    captchaCredit.set(uid, CAPTCHA_CREDIT);
+    return "ok";
+  }
+  p.tries += 1;
+  if (p.tries >= 3) {
+    captchaPending.delete(uid);
+    return "expired";
+  }
+  return "wrong";
 }
 
 function packCaption(full: string, _fallback = "") {
@@ -4433,7 +4553,40 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
   return lines.join("\n").slice(0, 3900);
 }
 
-async function runBotCheck(chatId: number | string, input: string) {
+// Bot users waiting to answer a captcha: chat -> the check they asked for.
+const botCaptchaWait = new Map<string, string>();
+
+async function sendBotCaptcha(chatId: number | string, intro: string): Promise<boolean> {
+  const png = newCaptchaImage(String(chatId));
+  if (!png) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Слишком много попыток. Попробуйте через 10 минут." });
+    return false;
+  }
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  form.set("caption", intro);
+  form.set("reply_markup", JSON.stringify({ inline_keyboard: [[{ text: "🔄 Другая картинка", callback_data: "bcap:new" }], [{ text: "✖ Отмена", callback_data: "bcap:x" }]] }));
+  form.set("photo", new File([new Uint8Array(png)], "captcha.png", { type: "image/png" }));
+  try {
+    await tgForm("sendPhoto", form);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runBotCheck(chatId: number | string, input: string, skipGate = false) {
+  if (!skipGate) {
+    if (tooMany(`check:${chatId}`, 30, 60_000)) {
+      await tgSoft("sendMessage", { chat_id: chatId, text: "Слишком много проверок. Подождите минуту." });
+      return;
+    }
+    if (captchaRequired(String(chatId))) {
+      botCaptchaWait.set(String(chatId), input);
+      await sendBotCaptcha(chatId, "🤖 Много проверок подряд. Напишите слово с картинки, чтобы продолжить.");
+      return;
+    }
+  }
   const locale = langOf(chatId);
   await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
   let res: CheckResult;
@@ -7019,6 +7172,17 @@ async function handleTelegramUpdate(update: TgUpdate) {
       await editCard(cb, await startCaption(locale), applyKeyboard(locale));
       return;
     }
+    if (cb.data === "bcap:x") {
+      void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      botCaptchaWait.delete(String(cb.message.chat.id));
+      void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
+      return;
+    }
+    if (cb.data === "bcap:new") {
+      void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      if (botCaptchaWait.has(String(cb.message.chat.id))) await sendBotCaptcha(cb.message.chat.id, "🔄 Новое слово:");
+      return;
+    }
     if (cb.data === "bsponsors") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
       const locale = langOf(cb.from?.id);
@@ -7367,6 +7531,22 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (msg.chat.type !== "private") return;
   if (isOwner(msg.from?.id) && !cmd && ownerLoginActive(msg.chat.id) && msg.text) {
     if (await handleOwnerLogin(msg.chat.id, msg.text)) return;
+  }
+  // Answer to the captcha shown before a bot check.
+  if (botCaptchaWait.has(String(msg.chat.id)) && msg.text && !cmd) {
+    const cid = String(msg.chat.id);
+    const r = solveCaptcha(cid, msg.text);
+    if (r === "ok") {
+      const q = botCaptchaWait.get(cid) || "";
+      botCaptchaWait.delete(cid);
+      captchaRequired(cid); // consume one credit for this check
+      await runBotCheck(msg.chat.id, q, true);
+    } else if (r === "wrong") {
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "❌ Неверно. Попробуйте ещё раз." });
+    } else {
+      await sendBotCaptcha(msg.chat.id, "⌛ Картинка устарела. Новое слово:");
+    }
+    return;
   }
   // A user who tapped "Проверить контрагента": their next text is the query.
   if (checkWait.has(String(msg.chat.id)) && msg.text && !cmd) {

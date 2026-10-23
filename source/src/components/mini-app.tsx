@@ -14,7 +14,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getAccess, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getAccess, getCaptcha, solveCaptcha, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -785,6 +785,50 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     };
   }, []);
 
+  const [captcha, setCaptcha] = useState<string | null>(null);
+  const [capAnswer, setCapAnswer] = useState("");
+  const [capMsg, setCapMsg] = useState("");
+  const [capBusy, setCapBusy] = useState(false);
+
+  async function loadCaptcha(msg = "") {
+    setCapAnswer("");
+    setCapMsg(msg);
+    try {
+      const r = await getCaptcha({ data: { initData: telegramInitData() } });
+      if (r.ok) setCaptcha(r.image);
+      else {
+        setCaptcha(null);
+        setError(t(locale, "capTooMany"));
+      }
+    } catch {
+      setError(t(locale, "checkFail"));
+    }
+  }
+
+  async function submitCaptcha() {
+    if (!capAnswer.trim() || capBusy) return;
+    setCapBusy(true);
+    try {
+      const r = await solveCaptcha({ data: { initData: telegramInitData(), answer: capAnswer } });
+      if (r.result === "ok") {
+        haptic("soft");
+        setCaptcha(null);
+        setCapMsg("");
+        await run();
+      } else if (r.result === "wrong") {
+        haptic("heavy");
+        setCapAnswer("");
+        setCapMsg(t(locale, "capWrong"));
+      } else {
+        await loadCaptcha(t(locale, "capExpired"));
+      }
+    } catch {
+      setCapMsg(t(locale, "checkFail"));
+    } finally {
+      setCapBusy(false);
+    }
+  }
+
   async function run() {
     const input = value.trim();
     if (!input) {
@@ -801,8 +845,10 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         const r = res.result as CheckData;
         setData(r);
         haptic(r.epb.length || r.channels.length || (r.manual?.length ?? 0) ? "heavy" : "soft");
+      } else if (res.error === "captcha") {
+        await loadCaptcha();
       } else {
-        setError(t(locale, "checkFail"));
+        setError(t(locale, res.error === "too many" ? "capTooMany" : "checkFail"));
       }
     } catch {
       setError(t(locale, "checkFail"));
@@ -867,6 +913,33 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           </Button>
         </div>
         {error ? <p className="text-sm text-danger">{error}</p> : null}
+        {captcha ? (
+          <div className="space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+            <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
+            <p className="text-sm text-muted">{t(locale, "capHint")}</p>
+            <img src={captcha} alt="" draggable={false} className="w-full select-none rounded-xl" />
+            <Input
+              value={capAnswer}
+              onChange={(e) => setCapAnswer(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitCaptcha();
+              }}
+              placeholder={t(locale, "capPlaceholder")}
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            {capMsg ? <p className="text-sm text-danger">{capMsg}</p> : null}
+            <div className="flex gap-2">
+              <Button className="flex-1 rounded-xl" onClick={() => void submitCaptcha()} disabled={capBusy || !capAnswer.trim()}>
+                {t(locale, "capSubmit")}
+              </Button>
+              <Button variant="secondary" className="rounded-xl" onClick={() => void loadCaptcha()} disabled={capBusy}>
+                {t(locale, "capNew")}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {loading ? (
           <p className="flex items-center gap-2 py-10 text-sm text-muted">
             <LoaderCircle className="size-4 animate-spin text-gold" />
