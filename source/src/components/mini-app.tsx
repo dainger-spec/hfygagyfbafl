@@ -1392,7 +1392,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm font-bold text-gold">
                     <ShieldAlert className="size-4" />
-                    {/* Only WWH (forum) hits → "Найдено на форуме"; any chat hit → "Найдено в чатах". */}
+                    {/* Only WWH (forum) hits → "Найдено на форуме"; any blacklist channel hit → "Найдено в блеклистах". */}
                     {t(locale, data.channels.every((c) => isWWH(c.channelTitle)) ? "checkOnForum" : "checkInChats")}
                   </div>
                   {data.channels.map((c, i) => {
