@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync, appendFileSync, renameSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, statfsSync, unlinkSync, appendFileSync, renameSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { CHANNEL_NAME, CHANNEL_URL, KNOWN_TELEGRAM_IDS, parseDamageAmount, parseTelegramInput } from "@/lib/telegram";
 import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonRef } from "@/lib/types";
@@ -146,6 +147,7 @@ type Bindings = {
   // Users banned from the bot and the mini app (by Telegram id and/or username).
   bannedUsers?: BannedUser[];
   webhookStamp?: string;
+  offsiteBackupAt?: number;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
 
@@ -708,6 +710,49 @@ function pruneEvidenceDir() {
   }
 }
 
+// Upload volume budgets (bytes per hour) and a free-disk floor, so uploads can
+// never fill the disk (a full disk would stop the bot from saving its data).
+const UPLOAD_BYTES_USER = 1.5 * 1024 * 1024 * 1024;
+const UPLOAD_BYTES_GLOBAL = 6 * 1024 * 1024 * 1024;
+const MIN_FREE_DISK = 1.5 * 1024 * 1024 * 1024;
+const uploadBytes = new Map<string, { at: number; n: number }[]>();
+
+function overByteBudget(key: string, bytes: number, max: number): boolean {
+  const now = Date.now();
+  const list = (uploadBytes.get(key) || []).filter((e) => now - e.at < 60 * 60 * 1000);
+  const used = list.reduce((sum, e) => sum + e.n, 0);
+  if (used + bytes > max) {
+    uploadBytes.set(key, list);
+    return true;
+  }
+  list.push({ at: now, n: bytes });
+  uploadBytes.set(key, list);
+  if (uploadBytes.size > 20_000) uploadBytes.clear();
+  return false;
+}
+
+let freeDiskAt = 0;
+let freeDiskLow = false;
+function diskTooFull(): boolean {
+  if (Date.now() - freeDiskAt < 10_000) return freeDiskLow;
+  freeDiskAt = Date.now();
+  try {
+    const st = statfsSync(DATA_DIR);
+    freeDiskLow = Number(st.bavail) * Number(st.bsize) < MIN_FREE_DISK;
+    if (freeDiskLow) pruneEvidenceDir();
+  } catch {
+    freeDiskLow = false;
+  }
+  return freeDiskLow;
+}
+
+function uploadBudgetError(userId: string, bytes: number): string | null {
+  if (diskTooFull()) return "server busy";
+  if (overByteBudget(`ub:${userId}`, bytes, UPLOAD_BYTES_USER)) return "too many uploads";
+  if (overByteBudget("ub:global", bytes, UPLOAD_BYTES_GLOBAL)) return "server busy";
+  return null;
+}
+
 export function allowEvidenceUpload(initData: string, bytes = 1): { ok: true; userId: string } | { ok: false; error: string } {
   if (bytes < 0) return { ok: false, error: "file required" };
   if (bytes > MAX_EVIDENCE_CHUNK) return { ok: false, error: "chunk too large" };
@@ -716,6 +761,8 @@ export function allowEvidenceUpload(initData: string, bytes = 1): { ok: true; us
   if (tooMany(`up:${user.id}`, 40, 60 * 60 * 1000)) return { ok: false, error: "too many uploads" };
   if (tooMany(`upchunk:${user.id}`, 600, 60 * 1000)) return { ok: false, error: "upload too fast" };
   if (tooMany("up:global", 2000, 60 * 60 * 1000)) return { ok: false, error: "server busy" };
+  const budget = uploadBudgetError(user.id, bytes);
+  if (budget) return { ok: false, error: budget };
   return { ok: true, userId: user.id };
 }
 
@@ -729,6 +776,8 @@ export function allowEvidenceChunk(initData: string, bytes: number): { ok: true;
   if (!user) return { ok: false, error: "telegram auth required" };
   if (tooMany(`upchunk:${user.id}`, 600, 60 * 1000)) return { ok: false, error: "upload too fast" };
   if (tooMany("upchunk:global", 2000, 60 * 1000)) return { ok: false, error: "server busy" };
+  const budget = uploadBudgetError(user.id, bytes);
+  if (budget) return { ok: false, error: budget };
   return { ok: true, userId: user.id };
 }
 
@@ -857,8 +906,17 @@ let statsCache: { at: number; value: { chats: number; audience: number } } | nul
 
 // How many chats receive the broadcast and their combined audience. The audience
 // is at least the owner-set baseline (default ~20178), plus any real member count.
+// One refresh at a time: when the cache expires under load, every caller waits
+// for the same refresh instead of each firing its own round of Telegram calls
+// (which would get the bot rate-limited by Telegram).
+let statsRefresh: Promise<{ chats: number; audience: number }> | null = null;
 export async function sponsorStats(): Promise<{ chats: number; audience: number }> {
   if (statsCache && Date.now() - statsCache.at < 10 * 60 * 1000) return statsCache.value;
+  if (!statsRefresh) statsRefresh = refreshSponsorStats().finally(() => (statsRefresh = null));
+  return statsRefresh;
+}
+
+async function refreshSponsorStats(): Promise<{ chats: number; audience: number }> {
   const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
   let sum = 0;
   await Promise.all(
@@ -882,8 +940,14 @@ export function setAudienceBase(n: number): boolean {
   return true;
 }
 
+let sponsorsRefresh: Promise<SponsorItem[]> | null = null;
 export async function listSponsors(): Promise<SponsorItem[]> {
   if (sponsorsCache && Date.now() - sponsorsCache.at < 10 * 60 * 1000) return sponsorsCache.value;
+  if (!sponsorsRefresh) sponsorsRefresh = refreshSponsors().finally(() => (sponsorsRefresh = null));
+  return sponsorsRefresh;
+}
+
+async function refreshSponsors(): Promise<SponsorItem[]> {
   const chats = (bindings.relayChats || []).filter((c) => c.status === "on" && isGroupOrChannel(c));
   const value = await Promise.all(
     chats.map(async (c) => {
@@ -7422,9 +7486,20 @@ async function handleTelegramUpdate(update: TgUpdate) {
   const evidenceBurst =
     liveSession?.step === "evidence" &&
     Boolean(incoming?.photo?.length || incoming?.video || incoming?.document);
-  if (tooMany("upd:global", 600, 60_000)) return;
-  if (floodId && !evidenceBurst && tooMany(`flood:${floodId}`, 80, 60_000)) {
+  // Arbiters, the owner and people in the middle of a complaint always get
+  // through. Everyone else: a per-user limit first; then only the first 15
+  // updates a minute of each user count against the shared budget, and anything
+  // above that comes out of a small separate pool for noisy users. A handful of
+  // flooding accounts therefore can't use up the budget that ordinary people need.
+  const fromArbiters =
+    isOfficialArbiterChat(update.message?.chat.id) || isOfficialArbiterChat(update.callback_query?.message?.chat.id);
+  const privileged = fromArbiters || isOwner(floodId) || Boolean(liveSession);
+  if (!fromArbiters && floodId && !evidenceBurst && tooMany(`flood:${floodId}`, 80, 60_000)) {
     return;
+  }
+  if (!privileged) {
+    const light = !floodId || !tooMany(`fair:${floodId}`, 15, 60_000);
+    if (light ? tooMany("upd:global", 600, 60_000) : tooMany("upd:noisy", 150, 60_000)) return;
   }
   if (liveSession) liveSession.touched = Date.now();
   gcSessions();
@@ -7716,6 +7791,17 @@ async function handleTelegramUpdate(update: TgUpdate) {
     });
     return;
   }
+  if (cmd === "backup") {
+    if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
+    const r = await sendOffsiteBackup(true);
+    if (r !== "sent") {
+      await tgSoft("sendMessage", {
+        chat_id: msg.chat.id,
+        text: r === "too big" ? "Копия больше 45 МБ — Telegram её не примет." : "Не удалось отправить копию, попробуйте позже.",
+      });
+    }
+    return;
+  }
   if (cmd === "usearch") {
     if (msg.chat.type !== "private" || !isOwner(msg.from?.id)) return;
     const arg = (msg.text || "").replace(/^\/\S+\s*/, "").trim();
@@ -7904,6 +7990,68 @@ export async function configureFromOrigin(_origin: string) {
 
 export async function deleteWebhook() {
   await tgSoft("deleteWebhook", { drop_pending_updates: false });
+}
+
+// ---- Off-site backup: once a day the data files go to the owner in Telegram ----
+// The local copies in data/backups die with the server; this one survives the
+// hosting going away. Userbot sessions (account keys) and the big media folders
+// are never included. Restore with scripts/restore-backup.mjs.
+function offsiteFiles(): string[] {
+  return [
+    BINDINGS_PATH,
+    RELAY_PATH,
+    PENDING_PATH,
+    ID_CACHE_PATH,
+    LOCALES_PATH,
+    CHECK_INDEX_PATH,
+    USERS_PATH,
+    BROADCAST_PATH,
+    DM_JOBS_PATH,
+    join(DATA_DIR, "telegram-ids.json"),
+  ];
+}
+
+let offsiteFailures = 0;
+export async function sendOffsiteBackup(force = false): Promise<"sent" | "not due" | "too big" | "failed"> {
+  if (!botToken()) return "failed";
+  if (!force && Date.now() - (bindings.offsiteBackupAt || 0) < 23 * 60 * 60 * 1000) return "not due";
+  const files: Record<string, string> = {};
+  for (const path of offsiteFiles()) {
+    try {
+      if (existsSync(path)) files[basename(path)] = readFileSync(path, "utf8");
+    } catch {
+      /* skip unreadable */
+    }
+  }
+  const day = new Date().toISOString().slice(0, 10);
+  const gz = gzipSync(Buffer.from(JSON.stringify({ kind: "epb-backup", version: 1, createdAt: new Date().toISOString(), files })));
+  if (gz.length > 45 * 1024 * 1024) return "too big";
+  const form = new FormData();
+  form.set("chat_id", OWNER_ID);
+  form.set("disable_notification", "true");
+  form.set(
+    "caption",
+    `🗄 Резервная копия данных EPB за ${day} (файлов: ${Object.keys(files).length}).\n` +
+      "Если сервер пропадёт: остановите бота, положите этот файл на новый сервер и выполните\n" +
+      "node scripts/restore-backup.mjs <файл>",
+  );
+  form.set("document", new File([new Uint8Array(gz)], `epb-backup-${day}.json.gz`, { type: "application/gzip" }));
+  try {
+    await tgForm("sendDocument", form);
+    offsiteFailures = 0;
+    bindings.offsiteBackupAt = Date.now();
+    saveBindings();
+    return "sent";
+  } catch (err) {
+    offsiteFailures += 1;
+    if (offsiteFailures === 1) console.error("[epb] off-site backup:", err instanceof Error ? err.message : err);
+    return "failed";
+  }
+}
+
+if (botToken() && process.env.NODE_ENV !== "test" && (process.env.PUBLIC_URL || process.env.NODE_ENV === "production")) {
+  setTimeout(() => void sendOffsiteBackup(), 90_000);
+  setInterval(() => void sendOffsiteBackup(), 60 * 60 * 1000).unref?.();
 }
 
 // Check the webhook right after start, not only when the first update arrives:
