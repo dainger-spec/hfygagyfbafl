@@ -15,7 +15,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -406,31 +406,9 @@ function Home({
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
   const canUse = Boolean(identity.telegramId);
   const [noBanners, setNoBanners] = useState(false);
-  const latest = useLatestParsed(checkOn && canUse);
-  // The home screen keeps its full height minus a strip where the latest list
-  // peeks out; scrolling snaps between the two (home ↔ list over the whole screen).
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [viewH, setViewH] = useState(0);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const measure = () => setViewH(el.clientHeight);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const withList = latest.length > 0 && viewH > 0;
 
   return (
-    <div
-      ref={scrollRef}
-      className={cn(
-        "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]",
-        withList && "snap-y snap-mandatory",
-      )}
-    >
-      <div className={cn("flex shrink-0 flex-col", withList && "snap-start")} style={withList ? { minHeight: viewH - LATEST_PEEK } : { flexGrow: 1 }}>
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <Banners onLoaded={(count) => setNoBanners(count === 0)} />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
@@ -471,14 +449,11 @@ function Home({
       >
         {t(locale, "ownersLink")}
       </button>
-      </div>
-      {withList ? <LatestSheet items={latest} height={viewH} /> : null}
     </div>
   );
 }
 
 type LatestItem = { id: string; account: string; source: string; date: number; amount?: string };
-const LATEST_PEEK = 96; // px of the list visible under the home screen
 const LATEST_CACHE_KEY = "epb-latest";
 
 function useLatestParsed(enabled: boolean): LatestItem[] {
@@ -523,43 +498,30 @@ function agoText(locale: Locale, ms: number): string {
   return new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "numeric", month: "short", year: "numeric" });
 }
 
-// "Latest blacklists": a sheet under the home screen. Its top peeks out; a swipe
-// up snaps it over the whole screen, scrolling back to its top snaps home again.
-function LatestSheet({ items, height }: { items: LatestItem[]; height: number }) {
+// One row of "latest blacklists" on the check page; a tap searches the account.
+function LatestRow({ item: e, index, onClick }: { item: LatestItem; index: number; onClick: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   return (
-    <section className="epb-latest-sheet -mx-4 shrink-0 snap-start rounded-t-[28px]" style={{ minHeight: height }}>
-      <div className="epb-latest-head sticky top-0 z-10 rounded-t-[28px] px-5 pt-2.5 pb-3">
-        <div className="mx-auto h-1 w-10 rounded-full bg-fg/20" />
-        <div className="mt-3 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-[15px] font-bold">
-            <ShieldAlert className="size-4 text-gold" />
-            {t(locale, "latestTitle")}
-          </div>
-          <span className="rounded-full bg-gold/10 px-2 py-0.5 text-xs font-bold text-gold">{items.length}</span>
-        </div>
-      </div>
-      <ul className="space-y-2 px-4 pb-8">
-        {items.map((e, i) => (
-          <li
-            key={e.id}
-            className="epb-latest-row flex items-center gap-3 rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]"
-            style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}
-          >
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-danger/10 text-sm font-extrabold text-danger uppercase">
-              {(e.account.replace(/^@|^ID\s*/i, "")[0] || "?").toString()}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-semibold">{e.account}</span>
-              <span className="mt-0.5 block truncate text-xs text-muted">
-                {e.source} · {agoText(locale, e.date)}
-              </span>
-            </span>
-            {e.amount ? <span className="shrink-0 rounded-full bg-danger/10 px-2 py-0.5 text-xs font-bold text-danger">{e.amount}</span> : null}
-          </li>
-        ))}
-      </ul>
-    </section>
+    <button
+      type="button"
+      onClick={() => {
+        haptic("light");
+        onClick();
+      }}
+      className="epb-latest-row flex w-full items-center gap-3 rounded-2xl bg-surface/70 p-3 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.06)] hover:bg-surface"
+      style={{ animationDelay: `${Math.min(index, 12) * 35}ms` }}
+    >
+      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-danger/10 text-sm font-extrabold text-danger uppercase">
+        {e.account.replace(/^@|^ID\s*/i, "")[0] || "?"}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-semibold">{e.account}</span>
+        <span className="mt-0.5 block truncate text-xs text-muted">
+          {e.source} · {agoText(locale, e.date)}
+        </span>
+      </span>
+      {e.amount ? <span className="shrink-0 rounded-full bg-danger/10 px-2 py-0.5 text-xs font-bold text-danger">{e.amount}</span> : null}
+    </button>
   );
 }
 
@@ -1172,7 +1134,6 @@ function SourceScan({
   );
 }
 
-const RECENT_CACHE_KEY = "epb-recent-bl";
 
 const EUROPE_PROMO_URL = "https://t.me/EuropePromo";
 
@@ -1198,39 +1159,11 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<CheckData | null>(null);
-  // Show the cached list instantly, then refresh it in the background.
-  const [recent, setRecent] = useState<BlEntry[]>(() => {
-    try {
-      const raw = sessionStorage.getItem(RECENT_CACHE_KEY);
-      return raw ? (JSON.parse(raw) as BlEntry[]) : [];
-    } catch {
-      return [];
-    }
-  });
-  const [recentLoading, setRecentLoading] = useState(recent.length === 0);
+  // The newest blacklist posts from the connected channels (cached instantly,
+  // refreshed in the background). A tap searches that account.
+  const latest = useLatestParsed(true);
   const [detail, setDetail] = useState<BlEntry | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getRecentBlacklist({ data: { initData: telegramInitData() } })
-      .then((r) => {
-        if (cancelled || !r.ok) return;
-        const items = r.items as BlEntry[];
-        setRecent(items);
-        try {
-          sessionStorage.setItem(RECENT_CACHE_KEY, JSON.stringify(items));
-        } catch {
-          /* ignore */
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setRecentLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [autoRun, setAutoRun] = useState(false);
 
   // Warm the cache so the frog loader shows instantly on the first search.
   useEffect(() => {
@@ -1373,6 +1306,12 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     haptic("light");
     setDetail(e);
   };
+  useEffect(() => {
+    if (!autoRun) return;
+    setAutoRun(false);
+    void run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRun]);
   const epbEntry = (e: CheckData["epb"][number]): BlEntry => ({
     kind: "epb", id: e.id, account: e.accounts || e.id, amount: e.amount, currency: e.currency, date: e.date,
   });
@@ -1549,30 +1488,24 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           )}</div>
         ) : null}
 
-        {!data && !loading && (recent.length || recentLoading) ? (
+        {!data && !loading && latest.length ? (
           <div className="space-y-2 pt-1">
-            <div className="flex items-center gap-2 text-sm font-bold text-muted">
-              <ShieldAlert className="size-4" />
-              {t(locale, "checkRecent")}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-bold text-muted">
+                <ShieldAlert className="size-4" />
+                {t(locale, "latestTitle")}
+              </div>
+              <span className="rounded-full bg-gold/10 px-2 py-0.5 text-xs font-bold text-gold">{latest.length}</span>
             </div>
-            {recentLoading && !recent.length
-              ? Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className="h-[52px] animate-pulse rounded-2xl bg-surface/60" />
-                ))
-              : null}
-            {recent.map((e) => (
-              <BlacklistRow
+            {latest.map((e, i) => (
+              <LatestRow
                 key={e.id}
-                account={e.account || "—"}
-                sub={
-                  e.kind === "manual"
-                    ? e.source || t(locale, "checkInExternal")
-                    : e.kind === "find"
-                      ? e.source || t(locale, "checkFoundSub")
-                      : `${e.amount || ""} ${e.currency || ""}`.trim() + (fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : "")
-                }
-                danger={e.kind === "epb" || e.kind === "find"}
-                onClick={() => open(e)}
+                item={e}
+                index={i}
+                onClick={() => {
+                  setValue(e.account.split(",")[0]!.replace(/^ID\s*/i, "").trim());
+                  setAutoRun(true);
+                }}
               />
             ))}
           </div>

@@ -115,7 +115,10 @@ export const checkCounterparty = createServerFn({ method: "POST" })
     if (!gate.ok) return { ok: false as const, error: gate.error };
     // Frequent checks need a solved captcha first (see getCaptcha/solveCaptcha).
     if (bot.captchaRequired(gate.userId)) return { ok: false as const, error: "captcha" };
-    return { ok: true as const, result: await bot.checkCounterparty(data.input) };
+    const result = await bot.checkCounterparty(data.input);
+    const who = bot.verifyTelegramInitData(data.initData);
+    bot.logSearch({ id: gate.userId, username: who?.username, first_name: who?.firstName }, data.input, result, "app");
+    return { ok: true as const, result };
   });
 
 export const getCheckSources = createServerFn({ method: "POST" })

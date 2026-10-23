@@ -146,6 +146,8 @@ type Bindings = {
   // Recently found counterparty checks, shared across all users (newest first,
   // capped). Shown in the app's "recent blacklists" list.
   recentFinds?: RecentFind[];
+  // The last counterparty searches (app and bot), newest first, for /admin.
+  searchLog?: SearchLogEntry[];
   // Users banned from the bot and the mini app (by Telegram id and/or username).
   bannedUsers?: BannedUser[];
   webhookStamp?: string;
@@ -667,7 +669,7 @@ export function isBannedUser(id?: string | number, username?: string): boolean {
 
 // Signed mini-app user; banned users are treated as not signed in, which closes
 // every app endpoint (complaints, checks, history) for them.
-export function verifyTelegramInitData(initData: string): { id: string; username?: string } | null {
+export function verifyTelegramInitData(initData: string): { id: string; username?: string; firstName?: string } | null {
   const u = verifyInitDataRaw(initData);
   if (!u || isBannedUser(u.id, u.username)) return null;
   return u;
@@ -680,7 +682,7 @@ export function appAccess(initData: string): { ok: boolean; banned: boolean } {
   return { ok: true, banned: isBannedUser(u.id, u.username) };
 }
 
-function verifyInitDataRaw(initData: string): { id: string; username?: string } | null {
+function verifyInitDataRaw(initData: string): { id: string; username?: string; firstName?: string } | null {
   if (!botToken() || !initData) return null;
   try {
     const params = new URLSearchParams(initData);
@@ -698,9 +700,9 @@ function verifyInitDataRaw(initData: string): { id: string; username?: string } 
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     const authDate = Number(params.get("auth_date") || 0);
     if (!authDate || Math.abs(Date.now() / 1000 - authDate) > 86_400) return null;
-    const user = JSON.parse(params.get("user") || "{}") as { id?: number; username?: string };
+    const user = JSON.parse(params.get("user") || "{}") as { id?: number; username?: string; first_name?: string };
     if (!user?.id) return null;
-    return { id: String(user.id), username: user.username };
+    return { id: String(user.id), username: user.username, firstName: typeof user.first_name === "string" ? user.first_name : undefined };
   } catch {
     return null;
   }
@@ -6070,7 +6072,7 @@ async function sendBotCaptcha(chatId: number | string, intro: string, purpose?: 
   }
 }
 
-async function runBotCheck(chatId: number | string, input: string, skipGate = false) {
+async function runBotCheck(chatId: number | string, input: string, skipGate = false, from?: TgUser) {
   if (!skipGate) {
     if (tooMany(`check:${chatId}`, 30, 60_000)) {
       await sendCeMessage(chatId, langOf(chatId) === "en" ? "⏳ Too many checks. Please wait a minute." : "⏳ Слишком много проверок. Подождите минуту.");
@@ -6095,6 +6097,7 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
     await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
     res = await search;
   }
+  logSearch(from || { id: chatId }, input, res, "bot");
   await sendCeMessage(chatId, formatBotCheck(locale, input, res), {
     reply_markup: checkResultKeyboard(locale),
     disable_web_page_preview: true,
@@ -6709,10 +6712,10 @@ async function cancelApply(chatId: number, userId: string, notice?: string) {
   }
   clearStepMessage(chatId);
   sessions.delete(userId);
-  // sendCeMessage so the menu buttons here get the same custom-emoji icons.
-  await sendCeMessage(chatId, notice || btUser(userId, "cancel"), {
-    reply_markup: applyKeyboard(langOf(userId)),
-  });
+  // Back to the menu card (with its animation), the notice on top of the caption.
+  const locale = langOf(userId);
+  const caption = `${escapeHtml(notice || btUser(userId, "cancel"))}\n\n${await startCaption(locale)}`;
+  await sendCard(chatId, "welcome", caption, { reply_markup: applyKeyboard(locale) });
 }
 
 async function copyEvidenceToArbiters(items: ApplySession["evidence"]) {
@@ -7801,6 +7804,48 @@ async function handleDmCallback(cb: NonNullable<TgUpdate["callback_query"]>, act
 // ---------- Admin panel (arbiter chat only, everything on buttons) ----------
 
 type AdminView = { text: string; keyboard: { text: string; callback_data: string }[][] };
+
+// ---- Search history for /admin: who searched whom, when, and the outcome. ----
+type SearchLogEntry = { at: number; userId: string; username?: string; name?: string; query: string; found: boolean; via: "app" | "bot" };
+const SEARCH_LOG_MAX = 10;
+
+export function logSearch(who: { id: string | number; username?: string; first_name?: string }, query: string, res: CheckResult, via: "app" | "bot") {
+  const found = Boolean(res.epb.length || res.manual.length || res.channels.length);
+  const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : query.trim();
+  const entry: SearchLogEntry = {
+    at: Date.now(),
+    userId: String(who.id),
+    ...(who.username ? { username: who.username.slice(0, 64) } : {}),
+    ...(who.first_name ? { name: who.first_name.slice(0, 64) } : {}),
+    query: q.slice(0, 80),
+    found,
+    via,
+  };
+  bindings.searchLog = [entry, ...(bindings.searchLog || [])].slice(0, SEARCH_LOG_MAX);
+  saveBindings();
+}
+
+function adminSearchLog(): AdminView {
+  const list = bindings.searchLog || [];
+  const lines = [`<b>🔍 История поиска</b> (последние ${SEARCH_LOG_MAX})`, ""];
+  if (!list.length) lines.push("Пока никто ничего не искал.");
+  list.forEach((e, i) => {
+    const who = e.username ? `@${escapeHtml(e.username)}` : escapeHtml(e.name || "без ника");
+    const when = new Date(e.at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
+    lines.push(
+      `${i + 1}. ${when} МСК (${ago(e.at)}) · ${e.via === "bot" ? "бот" : "приложение"}`,
+      `   Кто: ${who} · <code>${escapeHtml(e.userId)}</code>`,
+      `   Искал: <code>${escapeHtml(e.query)}</code> — ${e.found ? "⛔ найдено" : "✅ чисто"}`,
+    );
+  });
+  return {
+    text: lines.join("\n").slice(0, 4000),
+    keyboard: [
+      [{ text: "🔄 Обновить", callback_data: "adm:sl" }],
+      [{ text: "⬅ В меню", callback_data: "adm:home" }],
+    ],
+  };
+}
 type RelayFilter = "a" | "on" | "pd" | "off";
 const ADMIN_PAGE = 8;
 
@@ -7929,7 +7974,7 @@ function adminHome(): AdminView {
         { text: "🚫 Забанить", callback_data: "adm:ban" },
         { text: `⛔️ Баны (${(bindings.bannedUsers || []).length})`, callback_data: "adm:bans:0" },
       ],
-      [{ text: `🧹 Недавние проверки (${(bindings.recentFinds || []).length})`, callback_data: "adm:rf:0" }],
+      [{ text: `🔍 История поиска (${(bindings.searchLog || []).length})`, callback_data: "adm:sl" }],
       ...(checkEnabled()
         ? [
             [{ text: "➕ Добавить юзера в блеклист", callback_data: "adm:bladd" }],
@@ -8561,6 +8606,11 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await renderAdmin(cb, adminBans(0));
     return;
   }
+  if (action === "sl") {
+    await answer();
+    await renderAdmin(cb, adminSearchLog());
+    return;
+  }
   if (action === "rf") {
     await answer();
     await renderAdmin(cb, adminRecentFinds(Number(rest[0] || 0)));
@@ -8908,6 +8958,14 @@ async function handleTelegramUpdate(update: TgUpdate) {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
       checkWait.delete(String(cb.message.chat.id));
       const locale = langOf(cb.from?.id);
+      // A plain text message (a check result, a notice) can't become the menu card
+      // with its animation: replace it with a fresh card instead of editing it.
+      const m = cb.message as { photo?: unknown; caption?: string; animation?: unknown };
+      if (!m.photo && !m.animation && !m.caption && cb.message.chat.type === "private") {
+        void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
+        await replyStart(cb.message.chat.id, cb.from?.id);
+        return;
+      }
       await editCard(cb, await startCaption(locale), applyKeyboard(locale));
       return;
     }
@@ -9310,7 +9368,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
         return;
       }
       captchaRequired(cid); // consume one credit for this check
-      await runBotCheck(msg.chat.id, q, true);
+      await runBotCheck(msg.chat.id, q, true, msg.from);
     } else if (r === "wrong") {
       await sendCeMessage(msg.chat.id, botCapText(cid, "wrong"));
     } else {
@@ -9321,7 +9379,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
   // A user who tapped "Проверить контрагента": their next text is the query.
   if (checkWait.has(String(msg.chat.id)) && msg.text && !cmd) {
     checkWait.delete(String(msg.chat.id));
-    await runBotCheck(msg.chat.id, msg.text);
+    await runBotCheck(msg.chat.id, msg.text, false, msg.from);
     return;
   }
   const session = sessions.get(userId);
