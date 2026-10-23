@@ -359,13 +359,32 @@ function Home({
   );
 }
 
+const SPONSORS_CACHE_KEY = "epb-sponsors";
+
 // Yellow running line at the bottom of the home screen: the broadcast sponsors.
+// Seeded from a sessionStorage cache so it shows instantly on open (the server
+// fetch resolves the chat titles/avatars, which takes a couple of seconds).
 function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
-  const [items, setItems] = useState<SponsorItem[]>([]);
+  const [items, setItems] = useState<SponsorItem[]>(() => {
+    try {
+      const raw = sessionStorage.getItem(SPONSORS_CACHE_KEY);
+      return raw ? (JSON.parse(raw) as SponsorItem[]) : [];
+    } catch {
+      return [];
+    }
+  });
   useEffect(() => {
     void getSponsors()
-      .then((s) => setItems(Array.isArray(s) ? s : []))
+      .then((s) => {
+        const list = Array.isArray(s) ? s : [];
+        setItems(list);
+        try {
+          sessionStorage.setItem(SPONSORS_CACHE_KEY, JSON.stringify(list));
+        } catch {
+          /* ignore */
+        }
+      })
       .catch(() => {});
   }, []);
   if (!items.length) return null;
@@ -593,7 +612,7 @@ function History({ telegramId }: { telegramId: string }) {
 }
 
 type BlEntry = {
-  kind: "epb" | "manual";
+  kind: "epb" | "manual" | "find";
   id: string;
   account: string;
   amount?: string;
@@ -850,9 +869,11 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                 sub={
                   e.kind === "manual"
                     ? e.source || t(locale, "checkInExternal")
-                    : `${e.amount || ""} ${e.currency || ""}`.trim() + (fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : "")
+                    : e.kind === "find"
+                      ? e.source || t(locale, "checkFoundSub")
+                      : `${e.amount || ""} ${e.currency || ""}`.trim() + (fmtDate(e.date) ? ` · ${fmtDate(e.date)}` : "")
                 }
-                danger={e.kind === "epb"}
+                danger={e.kind === "epb" || e.kind === "find"}
                 onClick={() => open(e)}
               />
             ))}
@@ -882,12 +903,14 @@ function BlacklistRow({ account, sub, onClick, danger }: { account: string; sub?
 function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const isManual = entry.kind === "manual";
+  const isFind = entry.kind === "find";
+  const isSimple = isManual || isFind; // no story to fetch
   // The list items are light; the EPB situation text is fetched when opened.
-  const [full, setFull] = useState<BlEntry | null>(isManual ? entry : null);
-  const [loadingFull, setLoadingFull] = useState(!isManual);
+  const [full, setFull] = useState<BlEntry | null>(isSimple ? entry : null);
+  const [loadingFull, setLoadingFull] = useState(!isSimple);
 
   useEffect(() => {
-    if (isManual) return;
+    if (isSimple) return;
     let cancelled = false;
     void getBlacklistEntry({ data: { id: entry.id, initData: telegramInitData() } })
       .then((r) => {
@@ -901,7 +924,7 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
     return () => {
       cancelled = true;
     };
-  }, [entry, isManual]);
+  }, [entry, isSimple]);
 
   const shown = full || entry;
   const date = fmtBlDate(locale, shown.date);
@@ -925,11 +948,11 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
           <h2 className="font-display text-xl font-bold break-words">{shown.account || "—"}</h2>
         </div>
 
-        {isManual ? (
+        {isSimple ? (
           <div className="space-y-4">
             <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
               <p className="text-xs font-semibold text-gold">{shown.source || t(locale, "checkInExternal")}</p>
-              <p className="mt-2 text-sm leading-relaxed">{t(locale, "checkExternalDesc")}</p>
+              <p className="mt-2 text-sm leading-relaxed">{t(locale, isFind ? "checkFoundDesc" : "checkExternalDesc")}</p>
               {shown.note ? <p className="mt-2 text-sm leading-relaxed text-muted">{shown.note}</p> : null}
             </div>
             <Button

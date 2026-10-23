@@ -108,6 +108,16 @@ type ManualBlacklistEntry = {
   addedAt: number;
 };
 
+// A counterparty check that found something, kept in a shared recent list.
+type RecentFind = {
+  id: string;
+  username?: string;
+  telegramId?: string;
+  label: string;
+  sources: string[];
+  at: number;
+};
+
 type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
@@ -125,6 +135,9 @@ type Bindings = {
   audienceBase?: number;
   // Premium custom emoji in private-chat messages (default on).
   customEmoji?: boolean;
+  // Recently found counterparty checks, shared across all users (newest first,
+  // capped). Shown in the app's "recent blacklists" list.
+  recentFinds?: RecentFind[];
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -2799,7 +2812,7 @@ export type CheckResult = {
 // A compact entry for the "recent blacklists" list. Deliberately light (no
 // story/summary) so the list loads fast; the full text is fetched on tap.
 export type BlacklistEntry = {
-  kind: "epb" | "manual";
+  kind: "epb" | "manual" | "find";
   id: string;
   account: string;
   amount?: string;
@@ -2810,6 +2823,35 @@ export type BlacklistEntry = {
 };
 
 const DEFAULT_MANUAL_SOURCE = "Сторонний источник";
+const RECENT_FINDS_MAX = 25;
+
+// Record a successful counterparty check into the shared recent list. De-duped
+// by username/id (an existing entry is refreshed and moved to the front), capped.
+function recordFind(uname: string, id: string, display: string, result: CheckResult) {
+  if (!result.epb.length && !result.manual.length && !result.channels.length) return;
+  if (!uname && !id) return;
+  const sources: string[] = [];
+  if (result.epb.length) sources.push("Блеклист EPB");
+  for (const m of result.manual) if (m.source && !sources.includes(m.source)) sources.push(m.source);
+  if (result.channels.length) {
+    const allWwh = result.channels.every((c) => /wwh/i.test(c.channelTitle || ""));
+    sources.push(allWwh ? "Форум WWH" : "Чаты и форумы");
+  }
+  const list = [...(bindings.recentFinds || [])];
+  const same = (f: RecentFind) =>
+    (uname && (f.username || "").toLowerCase() === uname) || (id && f.telegramId === id);
+  const prev = list.find(same);
+  const entry: RecentFind = {
+    id: prev?.id || `find-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    username: uname || undefined,
+    telegramId: id || undefined,
+    label: display || (uname ? `@${uname}` : `ID ${id}`),
+    sources,
+    at: Date.now(),
+  };
+  bindings.recentFinds = [entry, ...list.filter((f) => !same(f))].slice(0, RECENT_FINDS_MAX);
+  saveBindings();
+}
 
 // The most recent blacklist entries, newest first: our EPB blacklist plus the
 // manually added (third-party) ones. The home ticker filters to EPB only; the
@@ -2838,13 +2880,16 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
       note: e.note,
     });
   }
+  for (const f of bindings.recentFinds || []) {
+    out.push({ kind: "find", id: f.id, account: f.label, date: f.at, source: (f.sources || []).join(" · ") });
+  }
   out.sort((a, b) => b.date - a.date);
   return out.slice(0, Math.max(1, limit));
 }
 
 // Full detail for one blacklist entry, fetched when a card is opened.
 export type BlacklistDetailResult = {
-  kind: "epb" | "manual";
+  kind: "epb" | "manual" | "find";
   id: string;
   account: string;
   amount?: string;
@@ -2880,6 +2925,17 @@ export function blacklistEntry(id: string): BlacklistDetailResult {
       date: man.addedAt || 0,
       source: man.source || DEFAULT_MANUAL_SOURCE,
       note: man.note,
+    };
+  }
+  const find = (bindings.recentFinds || []).find((f) => f.id === id);
+  if (find) {
+    return {
+      kind: "find",
+      id,
+      account: find.label,
+      date: find.at,
+      source: (find.sources || []).join(" · "),
+      note: "Найден по запросу проверки контрагента.",
     };
   }
   return null;
@@ -2974,7 +3030,10 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
     for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
   }
   hits.sort((a, b) => b.date - a.date);
-  return { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual: matchManualBlacklist(uname, id) };
+  const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual: matchManualBlacklist(uname, id) };
+  const display = uname ? `@${parsed.username.replace(/^@/, "")}` : id ? `ID ${id}` : "";
+  recordFind(uname, id, display, result);
+  return result;
 }
 
 export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
@@ -4254,12 +4313,89 @@ function applyKeyboard(locale: Locale) {
     rows.push([{ text: tb(locale, "openApp"), web_app: { url } }]);
   }
   rows.push([{ text: tb(locale, "applyBtn"), callback_data: "apply" }]);
+  if (checkEnabled()) rows.push([{ text: tb(locale, "checkMenuBtn"), callback_data: "bcheck" }]);
+  rows.push([{ text: tb(locale, "sponsorsMenuBtn"), callback_data: "bsponsors" }]);
   rows.push([
     { text: tb(locale, "channel"), url: CHANNEL_URL },
     { text: tb(locale, "ownersBtn"), callback_data: "owners" },
   ]);
   rows.push([{ text: tb(locale, "langBtn"), callback_data: "lang" }]);
   return { inline_keyboard: rows };
+}
+
+// Users who tapped "Проверить контрагента" — their next text is the query.
+const checkWait = new Set<string>();
+
+function backToMenuKeyboard(locale: Locale) {
+  return { inline_keyboard: [[{ text: `⬅️ ${tb(locale, "back")}`, callback_data: "home" }]] };
+}
+
+function checkResultKeyboard(locale: Locale) {
+  return {
+    inline_keyboard: [
+      [{ text: tb(locale, "checkMore"), callback_data: "bcheck" }],
+      [{ text: tb(locale, "inMenu"), callback_data: "home" }],
+    ],
+  };
+}
+
+// Sponsors list for the bot: chat titles as links (admin-set links only).
+async function botSponsorsText(locale: Locale): Promise<string> {
+  const list = await listSponsors().catch(() => [] as Awaited<ReturnType<typeof listSponsors>>);
+  const lines = [`<b>${tb(locale, "sponsorsMenuBtn").replace(/^💠\s*/, "")}</b>`, ""];
+  if (!list.length) {
+    lines.push(tb(locale, "sponsorsEmptyB"));
+    return lines.join("\n");
+  }
+  for (const s of list.slice(0, 20)) {
+    lines.push(s.link ? `• <a href="${s.link}">${escapeHtml(s.title)}</a>` : `• ${escapeHtml(s.title)}`);
+  }
+  if (list.length > 20) lines.push(`… +${list.length - 20}`);
+  return lines.join("\n");
+}
+
+// Formats a counterparty-check result for a bot message.
+function formatBotCheck(locale: Locale, input: string, res: CheckResult): string {
+  const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : input.trim();
+  const found = res.epb.length || res.manual.length || res.channels.length;
+  if (!found) return tb(locale, "checkClean", { q: escapeHtml(q) });
+  const lines: string[] = [`🔎 <b>${escapeHtml(q)}</b>`, ""];
+  if (res.epb.length) {
+    lines.push(tb(locale, "checkEpbHdr"));
+    for (const e of res.epb.slice(0, 6)) {
+      lines.push(`• ${escapeHtml(e.accounts)}${e.amount ? ` — ${escapeHtml(e.amount)} ${escapeHtml(e.currency)}` : ""}`);
+    }
+    lines.push("");
+  }
+  for (const m of res.manual.slice(0, 6)) lines.push(`📛 ${escapeHtml(m.source)}: ${escapeHtml(m.account)}`);
+  if (res.channels.length) {
+    const allWwh = res.channels.every((c) => /wwh/i.test(c.channelTitle || ""));
+    lines.push(allWwh ? tb(locale, "checkFoundForum") : tb(locale, "checkFoundChats"));
+    for (const c of res.channels.slice(0, 8)) {
+      const wwh = /wwh/i.test(c.channelTitle || "");
+      const name = wwh ? "WWH" : c.channelTitle || "источник";
+      // WWH shown without a message link (same rule as the app).
+      lines.push(wwh ? `• ${escapeHtml(name)}` : `• <a href="${c.link}">${escapeHtml(name)}</a>`);
+    }
+    lines.push("");
+  }
+  lines.push(tb(locale, "checkDispute"));
+  return lines.join("\n").slice(0, 3900);
+}
+
+async function runBotCheck(chatId: number | string, input: string) {
+  const locale = langOf(chatId);
+  await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
+  let res: CheckResult;
+  try {
+    res = await checkCounterparty(input);
+  } catch {
+    res = { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
+  }
+  await sendCeMessage(chatId, formatBotCheck(locale, input, res), {
+    reply_markup: checkResultKeyboard(locale),
+    disable_web_page_preview: true,
+  });
 }
 
 // Cancel row shown on every step of the in-bot complaint flow.
@@ -6702,8 +6838,23 @@ async function handleTelegramUpdate(update: TgUpdate) {
     }
     if (cb.data === "home") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      checkWait.delete(String(cb.message.chat.id));
       const locale = langOf(cb.from?.id);
       await editCard(cb, await startCaption(locale), applyKeyboard(locale));
+      return;
+    }
+    if (cb.data === "bsponsors") {
+      void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      const locale = langOf(cb.from?.id);
+      await editCard(cb, await botSponsorsText(locale), backToMenuKeyboard(locale));
+      return;
+    }
+    if (cb.data === "bcheck") {
+      void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      if (!checkEnabled() || cb.message.chat.type !== "private") return;
+      const locale = langOf(cb.from?.id);
+      checkWait.add(String(cb.message.chat.id));
+      await editCard(cb, tb(locale, "checkPrompt"), backToMenuKeyboard(locale));
       return;
     }
     if (cb.data === "lang") {
@@ -7036,6 +7187,12 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (msg.chat.type !== "private") return;
   if (isOwner(msg.from?.id) && !cmd && ownerLoginActive(msg.chat.id) && msg.text) {
     if (await handleOwnerLogin(msg.chat.id, msg.text)) return;
+  }
+  // A user who tapped "Проверить контрагента": their next text is the query.
+  if (checkWait.has(String(msg.chat.id)) && msg.text && !cmd) {
+    checkWait.delete(String(msg.chat.id));
+    await runBotCheck(msg.chat.id, msg.text);
+    return;
   }
   const session = sessions.get(userId);
   if (session) await handleApplyMessage(msg, session);
