@@ -84,9 +84,84 @@ function floodBlocked(req) {
   return false;
 }
 
+// Load shedding. Event-loop lag (how late a 100 ms timer fires) shows how busy
+// the process is; the bot runs in the same process, so when pages start to
+// choke it, extra page/API traffic is turned away fast with 503 instead of
+// being rendered. Mild overload: only busy addresses are turned away; severe:
+// everyone except Telegram's webhook.
+const SHED_LAG_MS = Number(process.env.EPB_SHED_LAG_MS || 150);
+const SHED_HARD_LAG_MS = Number(process.env.EPB_SHED_HARD_LAG_MS || 600);
+const SHED_INFLIGHT = Number(process.env.EPB_SHED_INFLIGHT || 300);
+const SHED_HARD_INFLIGHT = Number(process.env.EPB_SHED_HARD_INFLIGHT || 800);
+const SHED_BUSY_IP = 40; // requests in the current 10 s window
+let loopLag = 0;
+let inflight = 0;
+{
+  let last = Date.now();
+  const tick = setInterval(() => {
+    const now = Date.now();
+    const lag = Math.max(0, now - last - 100);
+    last = now;
+    // fast to rise, slow to fall
+    loopLag = lag > loopLag ? lag : loopLag * 0.8 + lag * 0.2;
+  }, 100);
+  tick.unref?.();
+}
+
+function shouldShed(req) {
+  if ((req.url || "").startsWith("/api/telegram/webhook")) return false;
+  const hard = loopLag > SHED_HARD_LAG_MS || inflight > SHED_HARD_INFLIGHT;
+  if (hard) return true;
+  const soft = loopLag > SHED_LAG_MS || inflight > SHED_INFLIGHT;
+  if (!soft) return false;
+  const h = floodHits.get(clientIp(req));
+  return Boolean(h && h.n > SHED_BUSY_IP);
+}
+
+// Slow-connection attacks (headers or bodies dribbled in to hold sockets open)
+// are cut off; oversized bodies are refused up front.
+const MAX_BODY_BYTES = 3 * 1024 * 1024;
+const origListen = http.Server.prototype.listen;
+http.Server.prototype.listen = function (...args) {
+  try {
+    this.headersTimeout = 15_000;
+    this.requestTimeout = 120_000;
+    this.keepAliveTimeout = 5_000;
+    this.maxHeadersCount = 100;
+    if (!this.maxConnections) this.maxConnections = 4000;
+  } catch {
+    /* ignore */
+  }
+  return origListen.apply(this, args);
+};
+
+function reject(res, code, text, extra = {}) {
+  try {
+    res.statusCode = code;
+    for (const [k, v] of Object.entries(extra)) res.setHeader(k, v);
+    res.setHeader("connection", "close");
+    res.end(text);
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
 const origEmit = http.Server.prototype.emit;
 http.Server.prototype.emit = function (event, req, res, ...rest) {
   if (event === "request" && req && typeof req.url === "string") {
+    if (Number(req.headers["content-length"] || 0) > MAX_BODY_BYTES) return reject(res, 413, "too large");
+    if (shouldShed(req)) return reject(res, 503, "busy, try again shortly", { "retry-after": "10" });
+    inflight += 1;
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        inflight -= 1;
+      }
+    };
+    res.once("close", finish);
+    res.once("finish", finish);
     if (floodBlocked(req)) {
       try {
         res.statusCode = 429;
