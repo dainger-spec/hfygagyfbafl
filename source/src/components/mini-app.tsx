@@ -959,7 +959,8 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         setCapAnswer("");
         setCapMsg(t(locale, "capWrong"));
       } else {
-        await loadCaptcha(t(locale, "capExpired"));
+        if (r.result === "again") haptic("heavy");
+        await loadCaptcha(t(locale, r.result === "again" ? "capWrongNew" : "capExpired"));
       }
     } catch {
       setCapMsg(t(locale, "checkFail"));
@@ -992,12 +993,16 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // One search at a time (Enter in the field would otherwise start a second one).
+  const running = useRef(false);
   async function run() {
+    if (running.current) return;
     const input = value.trim();
     if (!input) {
       setError(t(locale, "checkEmptyInput"));
       return;
     }
+    running.current = true;
     haptic("light");
     setError("");
     setScanHits(null);
@@ -1031,6 +1036,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     } catch {
       setError(t(locale, "checkFail"));
     } finally {
+      running.current = false;
       setLoading(false);
     }
   }

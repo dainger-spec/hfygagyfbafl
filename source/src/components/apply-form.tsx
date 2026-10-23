@@ -94,7 +94,8 @@ export function ApplyForm({
         setCapAnswer("");
         setCapMsg(t(locale, "capWrong"));
       } else {
-        await loadCaptcha(t(locale, "capExpired"));
+        if (r.result === "again") haptic("heavy");
+        await loadCaptcha(t(locale, r.result === "again" ? "capWrongNew" : "capExpired"));
       }
     } catch {
       setCapMsg(t(locale, "sentFail"));

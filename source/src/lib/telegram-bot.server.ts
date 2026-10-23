@@ -3253,7 +3253,8 @@ export function newCaptchaImage(userId: string, purpose: CaptchaPurpose = "check
   return renderCaptcha(word);
 }
 
-export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "expired" {
+// "again": wrong, and this picture is used up (a new one is needed).
+export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "again" | "expired" {
   const uid = String(userId);
   const p = captchaPending.get(uid);
   if (!p || Date.now() > p.exp) {
@@ -3278,7 +3279,7 @@ export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "
   if (captchaWrong.size > 20_000) captchaWrong.clear();
   if (p.tries >= 2 || wrong.length >= CAPTCHA_WRONG_MAX) {
     captchaPending.delete(uid);
-    return "expired";
+    return "again";
   }
   return "wrong";
 }
@@ -4631,24 +4632,73 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
 const botCaptchaWait = new Map<string, string>();
 const SUBMIT_CAPTCHA = "\u0000submit";
 
+// The captcha picture currently shown in each chat, so only one is ever on
+// screen (an older one would carry a word that no longer counts).
+const botCaptchaMsg = new Map<string, number>();
+
+function dropBotCaptchaMsg(chatId: number | string) {
+  const id = botCaptchaMsg.get(String(chatId));
+  botCaptchaMsg.delete(String(chatId));
+  if (id) void tgSoft("deleteMessage", { chat_id: chatId, message_id: id });
+}
+
+type BotCapText = "check" | "submit" | "new" | "wrong" | "again" | "expired" | "locked" | "failed";
+function botCapText(chatId: number | string, key: BotCapText): string {
+  const en = langOf(chatId) === "en";
+  const ru: Record<BotCapText, string> = {
+    check: "🤖 Много проверок подряд. Напишите слово с картинки, чтобы продолжить.",
+    submit: "🤖 Последний шаг: напишите слово с картинки, чтобы отправить жалобу.",
+    new: "🔄 Новое слово:",
+    wrong: "❌ Неверно. Попробуйте ещё раз.",
+    again: "❌ Неверно. Вот новое слово:",
+    expired: "⌛ Картинка устарела. Новое слово:",
+    locked: "Слишком много неверных ответов. Попробуйте позже.",
+    failed: "Не удалось показать картинку. Попробуйте ещё раз через минуту.",
+  };
+  const enT: Record<BotCapText, string> = {
+    check: "🤖 Many checks in a row. Type the word from the picture (in Russian) to continue.",
+    submit: "🤖 Last step: type the word from the picture (in Russian) to send the complaint.",
+    new: "🔄 New word:",
+    wrong: "❌ Wrong. Try again.",
+    again: "❌ Wrong. Here is a new word:",
+    expired: "⌛ The picture expired. New word:",
+    locked: "Too many wrong answers. Please try again later.",
+    failed: "Couldn't show the picture. Please try again in a minute.",
+  };
+  return (en ? enT : ru)[key];
+}
+
 async function sendBotCaptcha(chatId: number | string, intro: string, purpose?: CaptchaPurpose): Promise<boolean> {
   const why: CaptchaPurpose = purpose ?? (botCaptchaWait.get(String(chatId)) === SUBMIT_CAPTCHA ? "submit" : "check");
   const png = newCaptchaImage(String(chatId), why);
+  dropBotCaptchaMsg(chatId);
   if (!png) {
-    await tgSoft("sendMessage", { chat_id: chatId, text: "Слишком много попыток. Попробуйте через 10 минут." });
+    botCaptchaWait.delete(String(chatId));
+    await tgSoft("sendMessage", { chat_id: chatId, text: botCapText(chatId, "locked") });
     return false;
   }
   const form = new FormData();
   form.set("chat_id", String(chatId));
   form.set("caption", intro);
-  form.set("reply_markup", JSON.stringify({ inline_keyboard: [[{ text: "🔄 Другая картинка", callback_data: "bcap:new" }], [{ text: "✖ Отмена", callback_data: "bcap:x" }]] }));
+  const en = langOf(chatId) === "en";
+  form.set(
+    "reply_markup",
+    JSON.stringify({
+      inline_keyboard: [
+        [{ text: en ? "🔄 Another picture" : "🔄 Другая картинка", callback_data: "bcap:new" }],
+        [{ text: en ? "✖ Cancel" : "✖ Отмена", callback_data: "bcap:x" }],
+      ],
+    }),
+  );
   form.set("photo", new File([new Uint8Array(png)], "captcha.png", { type: "image/png" }));
   try {
-    await tgForm("sendPhoto", form);
+    const sent = await tgForm<{ message_id: number }>("sendPhoto", form);
+    if (sent?.message_id) botCaptchaMsg.set(String(chatId), sent.message_id);
+    if (botCaptchaMsg.size > 20_000) botCaptchaMsg.clear();
     return true;
   } catch (err) {
     console.error("[epb] captcha photo failed:", err);
-    await tgSoft("sendMessage", { chat_id: chatId, text: "Не удалось показать картинку. Нажмите ещё раз через минуту." });
+    await tgSoft("sendMessage", { chat_id: chatId, text: botCapText(chatId, "failed") });
     return false;
   }
 }
@@ -4661,7 +4711,7 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
     }
     if (captchaRequired(String(chatId))) {
       botCaptchaWait.set(String(chatId), input);
-      await sendBotCaptcha(chatId, "🤖 Много проверок подряд. Напишите слово с картинки, чтобы продолжить.");
+      await sendBotCaptcha(chatId, botCapText(chatId, "check"), "check");
       return;
     }
   }
@@ -5120,7 +5170,10 @@ async function startApply(chatId: number, from: TgUser) {
 }
 
 async function cancelApply(chatId: number, userId: string, notice?: string) {
-  if (botCaptchaWait.get(String(chatId)) === SUBMIT_CAPTCHA) botCaptchaWait.delete(String(chatId));
+  if (botCaptchaWait.get(String(chatId)) === SUBMIT_CAPTCHA) {
+    botCaptchaWait.delete(String(chatId));
+    dropBotCaptchaMsg(chatId);
+  }
   clearStepMessage(chatId);
   sessions.delete(userId);
   // sendCeMessage so the menu buttons here get the same custom-emoji icons.
@@ -5466,7 +5519,7 @@ async function handleApplyCallback(
   if (cb.data === "apply:send") {
     if (!hasSubmitPass(userId)) {
       botCaptchaWait.set(String(chatId), SUBMIT_CAPTCHA);
-      await sendBotCaptcha(chatId, "🤖 Последний шаг: напишите слово с картинки, чтобы отправить жалобу.", "submit");
+      await sendBotCaptcha(chatId, botCapText(chatId, "submit"), "submit");
       return;
     }
     await submitSession(chatId, userId, session);
@@ -7350,12 +7403,13 @@ async function handleTelegramUpdate(update: TgUpdate) {
     if (cb.data === "bcap:x") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
       botCaptchaWait.delete(String(cb.message.chat.id));
+      botCaptchaMsg.delete(String(cb.message.chat.id));
       void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
       return;
     }
     if (cb.data === "bcap:new") {
       void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
-      if (botCaptchaWait.has(String(cb.message.chat.id))) await sendBotCaptcha(cb.message.chat.id, "🔄 Новое слово:");
+      if (botCaptchaWait.has(String(cb.message.chat.id))) await sendBotCaptcha(cb.message.chat.id, botCapText(cb.message.chat.id, "new"));
       return;
     }
     if (cb.data === "bsponsors") {
@@ -7714,6 +7768,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
     if (r === "ok") {
       const q = botCaptchaWait.get(cid) || "";
       botCaptchaWait.delete(cid);
+      dropBotCaptchaMsg(cid);
       if (q === SUBMIT_CAPTCHA) {
         const session = sessions.get(userId);
         if (session) await submitSession(msg.chat.id, userId, session);
@@ -7723,9 +7778,9 @@ async function handleTelegramUpdate(update: TgUpdate) {
       captchaRequired(cid); // consume one credit for this check
       await runBotCheck(msg.chat.id, q, true);
     } else if (r === "wrong") {
-      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "❌ Неверно. Попробуйте ещё раз." });
+      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: botCapText(cid, "wrong") });
     } else {
-      await sendBotCaptcha(msg.chat.id, "⌛ Картинка устарела. Новое слово:");
+      await sendBotCaptcha(msg.chat.id, botCapText(cid, r === "again" ? "again" : "expired"));
     }
     return;
   }
