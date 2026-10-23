@@ -141,6 +141,11 @@ export const getSponsors = createServerFn({ method: "GET" }).handler(async () =>
   return listSponsors();
 });
 
+export const getBaseStats = createServerFn({ method: "GET" }).handler(async () => {
+  const { publicBaseStats } = await import("@/lib/telegram-bot.server");
+  return publicBaseStats();
+});
+
 export const getSponsorStats = createServerFn({ method: "GET" }).handler(async () => {
   const { sponsorStats } = await import("@/lib/telegram-bot.server");
   return sponsorStats();

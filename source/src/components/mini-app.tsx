@@ -15,7 +15,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -241,16 +241,19 @@ type BannerItem = { id: string; type: "image" | "video"; link: string; src: stri
 // videos and GIFs play muted and looped; a tap opens the banner's link.
 function Banners() {
   const [items, setItems] = useState<BannerItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [active, setActive] = useState(0);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void getBanners()
       .then((list) => setItems(Array.isArray(list) ? (list as BannerItem[]) : []))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
 
-  if (!items.length) return null;
+  // No banners: the blacklist base card takes their place.
+  if (!items.length) return loaded ? <BaseCard /> : null;
 
   const open = (link: string) => {
     if (!link) return;
@@ -308,6 +311,71 @@ function Banners() {
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+type BaseStats = { accounts: number; sources: number; updatedAt: number };
+
+// "Blacklist base: N accounts from M sources", with when the copies were last
+// updated. Refreshed every minute while the home screen is open.
+function BaseCard() {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [stats, setStats] = useState<BaseStats | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      void getBaseStats()
+        .then((r) => {
+          if (alive) setStats(r && typeof r.accounts === "number" ? (r as BaseStats) : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(() => {
+      setNow(Date.now());
+      load();
+    }, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  if (!stats) return null;
+  const n = stats.sources;
+  const src = t(locale, n % 10 === 1 && n % 100 !== 11 ? "baseSrcOne" : "baseSrcMany");
+  const mins = Math.max(0, Math.floor((now - stats.updatedAt) / 60_000));
+  const updated =
+    mins < 1
+      ? t(locale, "baseUpdatedNow")
+      : mins < 60
+        ? t(locale, "baseUpdatedMin", { n: mins })
+        : t(locale, "baseUpdatedHour", { n: Math.floor(mins / 60) });
+
+  return (
+    <div className="mx-auto w-full max-w-sm px-2 pt-3">
+      <div className="epb-base-card relative overflow-hidden rounded-2xl px-5 py-4">
+        <img
+          src="/brand/emblem-v2.webp"
+          alt=""
+          aria-hidden
+          draggable={false}
+          className="pointer-events-none absolute -right-8 -top-3 h-[150%] w-auto select-none opacity-[0.18]"
+        />
+        <div className="relative">
+          <div className="text-[11px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
+          <div className="epb-gold-text mt-1 font-display text-4xl leading-none font-extrabold tracking-tight">
+            {stats.accounts.toLocaleString(locale === "en" ? "en-US" : "ru-RU")}
+          </div>
+          <div className="mt-1.5 text-sm text-muted">{t(locale, "baseSub", { n, src })}</div>
+          <div className="mt-2.5 inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2.5 py-1 text-xs font-semibold text-emerald-300">
+            <span className="size-1.5 rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(110,231,183,0.9)]" />
+            {updated}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

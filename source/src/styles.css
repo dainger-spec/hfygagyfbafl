@@ -272,3 +272,13 @@
 @media (prefers-reduced-motion: reduce) {
   .epb-cap-backdrop, .epb-cap-card, .epb-cap-img, .epb-frog-in, .epb-scan-row, .epb-scan-pop { animation: none; }
 }
+
+/* The blacklist base card on the home screen (in place of banners). */
+.epb-base-card {
+  background:
+    radial-gradient(120% 140% at 88% 0%, rgba(241, 187, 76, 0.2), transparent 55%),
+    #121212;
+  box-shadow:
+    0 0 0 1px rgba(241, 187, 76, 0.2),
+    0 12px 32px -18px rgba(241, 187, 76, 0.35);
+}

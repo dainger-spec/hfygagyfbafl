@@ -6443,6 +6443,19 @@ async function startCaption(locale: Locale): Promise<string> {
   return `${text}\n\n${tb(locale, "baseLine", { n: n.toLocaleString(locale === "en" ? "en-US" : "ru-RU") })}`;
 }
 
+// The base card at the top of the app (when there are no banners): size, number
+// of sources, and when the copies last took in new posts. Public, no names.
+export function publicBaseStats(): { accounts: number; sources: number; updatedAt: number } | null {
+  const accounts = blacklistBaseCached();
+  if (!accounts) return null;
+  let updatedAt = baseCountCache.at;
+  for (const c of mirrorChannels()) {
+    const m = mirrors.get(chatIdKey(c.id));
+    if (m && m.updatedAt > 0 && m.updatedAt <= Date.now()) updatedAt = Math.max(updatedAt, m.updatedAt);
+  }
+  return { accounts, sources: checkSources().length, updatedAt };
+}
+
 // The base size for the /start card, counted at most once a minute (every user
 // sees the menu, the count only needs to be roughly current).
 let baseCountCache = { at: 0, n: 0 };
