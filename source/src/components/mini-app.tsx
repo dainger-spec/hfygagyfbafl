@@ -417,14 +417,33 @@ function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
   );
 }
 
+// Scrolling strip of partner blacklist/forum logos (sponsors and check pages).
+function PartnerMarquee() {
+  return (
+    <div
+      className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      style={{ "--epb-marquee-dur": "22s" } as CSSProperties}
+    >
+      <div className="epb-marquee-track">
+        <PartnerLogos size={48} gap />
+        <PartnerLogos size={48} gap />
+      </div>
+      <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
+      <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
+    </div>
+  );
+}
+
 // Gold-gradient text that leaves emoji in their own colours (a background-clip
 // gradient would otherwise paint emoji glyphs gold too).
 function GoldText({ text }: { text: string }) {
-  const parts = text.split(/(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)/u);
+  const parts = text.split(
+    /(\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)/u,
+  );
   return (
     <span>
       {parts.map((p, i) =>
-        !p ? null : /\p{Extended_Pictographic}/u.test(p) ? (
+        !p ? null : /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(p) ? (
           <span key={i}>{p}</span>
         ) : (
           <span key={i} className="epb-gold-text">
@@ -462,9 +481,10 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       })
       .catch(() => {});
   }, []);
+  if (!items.length) return null;
+
   const Seq = () => (
     <>
-      <PartnerLogos size={24} />
       <span className="inline-flex items-center">
         <span className="epb-gold-text opacity-80">{t(locale, "sponsorsTitle")}</span>
         <span className="mx-3 text-gold/40">·</span>
@@ -489,7 +509,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       }}
       aria-label="project sponsors"
       className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
-      style={{ "--epb-marquee-dur": `${Math.max(12, items.length * 2.5 + PARTNER_LOGOS.length * 1.6)}s` } as CSSProperties}
+      style={{ "--epb-marquee-dur": `${Math.max(9, items.length * 2.5)}s` } as CSSProperties}
     >
       <div key={items.length} className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
         <Seq />
@@ -571,15 +591,7 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
             {t(locale, "back")}
           </button>
         </div>
-        {/* Partner logos running along the top of the page. */}
-        <div className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]" style={{ "--epb-marquee-dur": "22s" } as CSSProperties}>
-          <div className="epb-marquee-track">
-            <PartnerLogos size={48} gap />
-            <PartnerLogos size={48} gap />
-          </div>
-          <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
-          <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
-        </div>
+        <PartnerMarquee />
         <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
         {items === null ? (
           <div className="space-y-2">
@@ -835,6 +847,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           </div>
           <p className="text-sm text-muted">{t(locale, "checkHint")}</p>
         </div>
+        <PartnerMarquee />
         <div className="flex gap-2">
           <Input
             value={value}
