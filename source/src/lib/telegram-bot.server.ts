@@ -1712,25 +1712,14 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// A username/id appears in many posts that are NOT a report about it: ads, a
-// reporter's handle, or the "dispute with the arbiter" footer. We keep a post
-// only when it (a) reads like a scam report and (b) carries the username/id on a
-// subject line, not a contact/ad line. Words are a starting lexicon — easy to
-// extend. The owner can always open the exact post via the link we return.
-const SCAM_WORDS_RE =
-  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|арбитраж|arbitr|жалоб|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑|📛)/iu;
-// A line that is clearly contact/ad context rather than the accused subject.
-const CONTACT_LINE_RE =
-  /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|\bгарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|заказ|отзыв|подписку|канал\b)/iu;
-// A line that marks the accused subject. Kept to strong report/label markers so
-// an ad line like "продам аккаунты @seller" is NOT treated as an accusation;
-// handle labels ("тг:", "ник:", "юзер:", "username") are included.
-const SUBJECT_LINE_RE =
-  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|ответчик|обвиняем|виновник|respondent|defendant|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди|ник[:\s]|тг[:\s]|телеграм|телега|юзернейм|юзер[:\s]|username)/iu;
-// A line that is JUST an accused label (e.g. "Ответчик:", "📛Ответчик:",
-// "Скамер"), whose handles are listed on the following line.
-const SUBJECT_LABEL_RE =
-  /^(?:[📛🚫❌🤡⚠🔴🛑\s])*(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant)\s*:?\s*$/iu;
+// The configured channels are dedicated scam/blacklist/tag channels, so a
+// mentioned handle/id is the accused BY DEFAULT. Rather than trying to recognise
+// the endless ways a report can be worded, we match any mention and only EXCLUDE
+// the few clear non-accusation cases: a contact/dispute/ad footer line, the
+// filer side of an arbitration, and known service handles. Easy to tune: add a
+// word here to exclude more, remove one to match more.
+const NON_ACCUSATION_LINE_RE =
+  /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|гарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|сервис|магазин|\bshop\b|подписк|вступай|вступить|присоединя|заказать|скидк|акци|цен[аы])/iu;
 // Known arbiter / service / off-limits handles that are never the accused party
 // and never shown in search results.
 const IGNORE_USERNAMES = new Set(["europepromo", "ctoroot", "sbepbank", BOT_USERNAME.toLowerCase()]);
@@ -1750,69 +1739,39 @@ function idOnLine(line: string, id: string): boolean {
   return new RegExp("(?<!\\d)" + digits + "(?!\\d)").test(line);
 }
 
-// A line that is ONLY @handles (optionally comma/space/bullet separated), e.g.
-// "@a, @b". In a blacklist channel such a line is the accused list — not an ad
-// (ads carry prose). Used to accept handle-list posts that lack a keyword.
-function handleOnlyLine(line: string): boolean {
-  const t = line.trim().replace(/^[📛🚫❌🤡⚠🔴🛑‼️\s]+/u, "");
-  if (!t.startsWith("@")) return false;
-  return /^(?:@[A-Za-z][A-Za-z0-9_]{2,31}[\s,;/|•·–—-]*)+$/.test(t);
-}
-
 // Arbitration posts (e.g. WWH Info) name both sides on one line:
 //   "Арбитраж пользователя <заявитель> на пользователя <обвиняемый>".
-// Only the accused — the side after "на [пользователя]" / "против" — should be
-// flagged, never the person who filed. Returns that accused segment, or "".
+// Only the accused — the side after "на [пользователя]" / "против" / "on" /
+// "against" — should be flagged, never the person who filed.
 function arbitrationAccused(line: string): string {
-  // Marker for the accused side: RU "на"/"против", EN "on"/"against".
-  // \b is ASCII-only, so anchor the marker on whitespace/start.
   const m = line.match(
     /(?:^|\s)(?:на|против|on|against)\s+(?:пользовател\S*\s+|юзер\S*\s+|человек\S*\s+|аккаунт\S*\s+|user\s+|@)?(.+)$/i,
   );
   if (!m) return "";
-  // Drop a trailing filer clause ("… от @reporter", "… from @x", "… заявитель …")
-  // so only the accused side is kept. Multiple accused ("mule1 и mule2") stay.
+  // Drop a trailing filer clause ("… от @reporter", "… from @x", "… заявитель …").
   return m[1].split(/\s+(?:от|from|by|заявител\S*|подал\S*|reporter)\s+/i)[0] || "";
 }
 
-// Does this post actually accuse `username`/`id` of scamming? Exported for tests.
+// Does this post accuse `username`/`id`? Exported for tests.
 export function postMatchesSubject(body: string, username: string, id: string): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
   const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
   // Nothing to match on (handle is an off-limits/service handle and no id given).
   if (ignoredName && !id) return false;
-  // A scam/alert keyword anywhere makes the whole post a report; otherwise a
-  // single occurrence still counts if it sits on a clear subject line.
-  const hasScamWord = SCAM_WORDS_RE.test(body);
-  // True when the previous non-empty line was an accused label ("Ответчик:"),
-  // so handles listed on the next line count as the subject.
-  let labelAbove = false;
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer.
     if (/арбитраж|arbitr/i.test(line)) {
       const accused = arbitrationAccused(line);
-      if (accused) {
-        if (!ignoredName && usernameOnLine(accused, uname)) return true;
-        if (idOnLine(accused, id)) return true;
-      }
-      if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
+      if (accused && ((!ignoredName && usernameOnLine(accused, uname)) || idOnLine(accused, id))) return true;
       continue;
     }
     const hasId = idOnLine(line, id);
     const hasU = !ignoredName && usernameOnLine(line, uname);
-    if (!hasId && !hasU) {
-      if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
-      continue;
-    }
-    const subjectLine = SUBJECT_LINE_RE.test(line) || labelAbove || handleOnlyLine(line);
-    // A pure contact/ad line (dispute footer, "по рекламе", "менеджер") is not
-    // an accusation.
-    if (!(CONTACT_LINE_RE.test(line) && !subjectLine)) {
-      // Count it when the post reads like a report, or the line (or the label
-      // above it) marks a subject.
-      if (hasScamWord || subjectLine) return true;
-    }
-    if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
+    if (!hasId && !hasU) continue;
+    // In a blacklist channel a mention is an accusation unless the line is a
+    // contact/dispute/ad footer.
+    if (NON_ACCUSATION_LINE_RE.test(line)) continue;
+    return true;
   }
   return false;
 }
