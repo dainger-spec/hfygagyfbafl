@@ -149,3 +149,10 @@ export const getBlacklistEntry = createServerFn({ method: "POST" })
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return { ok: true as const, entry: bot.blacklistEntry(data.id) };
   });
+
+export const getAccess = createServerFn({ method: "POST" })
+  .validator(z.object({ initData: z.string().max(16384) }))
+  .handler(async ({ data }) => {
+    const { appAccess } = await import("@/lib/telegram-bot.server");
+    return appAccess(data.initData);
+  });

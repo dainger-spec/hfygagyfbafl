@@ -108,6 +108,8 @@ type ManualBlacklistEntry = {
   addedAt: number;
 };
 
+type BannedUser = { id?: string; username?: string; at: number };
+
 // A counterparty check that found something, kept in a shared recent list.
 type RecentFind = {
   id: string;
@@ -139,6 +141,8 @@ type Bindings = {
   // Recently found counterparty checks, shared across all users (newest first,
   // capped). Shown in the app's "recent blacklists" list.
   recentFinds?: RecentFind[];
+  // Users banned from the bot and the mini app (by Telegram id and/or username).
+  bannedUsers?: BannedUser[];
   webhookStamp?: string;
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
@@ -598,7 +602,32 @@ function tooMany(key: string, max: number, windowMs: number) {
   return false;
 }
 
+// Is this Telegram user banned (by id or username)? The owner never is.
+export function isBannedUser(id?: string | number, username?: string): boolean {
+  if (id != null && isOwner(id)) return false;
+  const uid = id != null ? String(id) : "";
+  const un = (username || "").replace(/^@/, "").toLowerCase();
+  return (bindings.bannedUsers || []).some(
+    (b) => (uid && b.id === uid) || (un && (b.username || "").toLowerCase() === un),
+  );
+}
+
+// Signed mini-app user; banned users are treated as not signed in, which closes
+// every app endpoint (complaints, checks, history) for them.
 export function verifyTelegramInitData(initData: string): { id: string; username?: string } | null {
+  const u = verifyInitDataRaw(initData);
+  if (!u || isBannedUser(u.id, u.username)) return null;
+  return u;
+}
+
+// For the app's access check: signed user plus whether they are banned.
+export function appAccess(initData: string): { ok: boolean; banned: boolean } {
+  const u = verifyInitDataRaw(initData);
+  if (!u) return { ok: false, banned: false };
+  return { ok: true, banned: isBannedUser(u.id, u.username) };
+}
+
+function verifyInitDataRaw(initData: string): { id: string; username?: string } | null {
   if (!botToken() || !initData) return null;
   try {
     const params = new URLSearchParams(initData);
@@ -5972,6 +6001,11 @@ function adminHome(): AdminView {
       [{ text: "📢 Канал для постов", callback_data: "adm:ch" }],
       [{ text: "📣 Рассылка пользователям бота", callback_data: "adm:ub" }],
       [{ text: `🖼 Баннеры (${(bindings.banners || []).length})`, callback_data: "adm:bn" }],
+      [
+        { text: "🚫 Забанить", callback_data: "adm:ban" },
+        { text: `⛔️ Баны (${(bindings.bannedUsers || []).length})`, callback_data: "adm:bans:0" },
+      ],
+      [{ text: `🧹 Недавние проверки (${(bindings.recentFinds || []).length})`, callback_data: "adm:rf:0" }],
       ...(checkEnabled()
         ? [
             [{ text: "➕ Добавить юзера в блеклист", callback_data: "adm:bladd" }],
@@ -6422,6 +6456,75 @@ async function sendAdminPanel(chatId: number | string) {
   });
 }
 
+const banSetup = new Set<string>();
+
+function banLabel(b: BannedUser): string {
+  return [b.username ? `@${b.username}` : "", b.id ? `ID ${b.id}` : ""].filter(Boolean).join(" · ") || "—";
+}
+
+function adminBans(page: number): AdminView {
+  const list = bindings.bannedUsers || [];
+  const per = 8;
+  const items = list.slice(page * per, page * per + per);
+  const rows: AdminView["keyboard"] = items.map((b) => [
+    { text: `✅ Разбанить ${banLabel(b)}`.slice(0, 60), callback_data: `adm:unban:${b.id ? `i:${b.id}` : `u:${b.username}`}` },
+  ]);
+  const nav: { text: string; callback_data: string }[] = [];
+  if (page > 0) nav.push({ text: "⬅", callback_data: `adm:bans:${page - 1}` });
+  if ((page + 1) * per < list.length) nav.push({ text: "➡", callback_data: `adm:bans:${page + 1}` });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: "🚫 Забанить ещё", callback_data: "adm:ban" }], [{ text: "⬅ Назад", callback_data: "adm:home" }]);
+  return {
+    text: list.length ? `<b>Забаненные (${list.length})</b>\nНажмите, чтобы снять бан.` : "<b>Забаненных нет.</b>",
+    keyboard: rows,
+  };
+}
+
+function adminRecentFinds(page: number): AdminView {
+  const list = bindings.recentFinds || [];
+  const per = 8;
+  const items = list.slice(page * per, page * per + per);
+  const rows: AdminView["keyboard"] = items.map((f) => [
+    { text: `🗑 ${f.label} — ${(f.sources || []).join(", ")}`.slice(0, 60), callback_data: `adm:rfdel:${f.id}:${page}` },
+  ]);
+  const nav: { text: string; callback_data: string }[] = [];
+  if (page > 0) nav.push({ text: "⬅", callback_data: `adm:rf:${page - 1}` });
+  if ((page + 1) * per < list.length) nav.push({ text: "➡", callback_data: `adm:rf:${page + 1}` });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: "⬅ Назад", callback_data: "adm:home" }]);
+  return {
+    text: list.length
+      ? `<b>Недавние проверки (${list.length})</b>\nПубличный список в приложении. Нажмите на ошибочную запись, чтобы удалить её.`
+      : "<b>Недавних проверок нет.</b>",
+    keyboard: rows,
+  };
+}
+
+async function applyBan(chatId: number | string, raw: string) {
+  banSetup.delete(String(chatId));
+  const parsed = parseTelegramInput(raw.trim().split(/\s+/)[0] || "");
+  const username = parsed.username.replace(/^@/, "").toLowerCase();
+  const id = parsed.id;
+  if (!username && !id) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Не понял. Пришлите @username или ID." });
+    return;
+  }
+  if (id && isOwner(id)) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Владельца забанить нельзя." });
+    return;
+  }
+  const list = (bindings.bannedUsers || []).filter(
+    (b) => !((id && b.id === id) || (username && (b.username || "").toLowerCase() === username)),
+  );
+  const entry: BannedUser = { id: id || undefined, username: username || undefined, at: Date.now() };
+  bindings.bannedUsers = [entry, ...list];
+  saveBindings();
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: `🚫 Забанен: ${banLabel(entry)}\nБот и мини-приложение для него закрыты. Снять бан: /admin → ⛔️ Баны.`,
+  });
+}
+
 async function renderAdmin(cb: NonNullable<TgUpdate["callback_query"]>, view: AdminView) {
   if (!cb.message) return;
   const edited = await tgSoft("editMessageText", {
@@ -6533,6 +6636,44 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
       chat_id: chatId,
       text: "Пришлите номер жалобы (EPB-…) либо @username / ID аккаунта, который нужно убрать из блеклиста (поиска). Жалоба останется в истории, но перестанет находиться в проверке контрагента.",
     });
+    return;
+  }
+  if (action === "ban") {
+    banSetup.add(String(chatId));
+    await answer("Пришлите @username или ID");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите @username или ID пользователя, которого нужно забанить. Ему закроется доступ к боту и мини-приложению.",
+    });
+    return;
+  }
+  if (action === "bans") {
+    await answer();
+    await renderAdmin(cb, adminBans(Number(rest[0] || 0)));
+    return;
+  }
+  if (action === "unban") {
+    const [kind, ...v] = rest;
+    const val = v.join(":").toLowerCase();
+    bindings.bannedUsers = (bindings.bannedUsers || []).filter((b) =>
+      kind === "i" ? b.id !== val : (b.username || "").toLowerCase() !== val,
+    );
+    saveBindings();
+    await answer("Бан снят");
+    await renderAdmin(cb, adminBans(0));
+    return;
+  }
+  if (action === "rf") {
+    await answer();
+    await renderAdmin(cb, adminRecentFinds(Number(rest[0] || 0)));
+    return;
+  }
+  if (action === "rfdel") {
+    const before = (bindings.recentFinds || []).length;
+    bindings.recentFinds = (bindings.recentFinds || []).filter((f) => f.id !== rest[0]);
+    if (bindings.recentFinds.length !== before) saveBindings();
+    await answer("Удалено из недавних");
+    await renderAdmin(cb, adminRecentFinds(Number(rest[1] || 0)));
     return;
   }
   if (action === "bladd") {
@@ -6800,6 +6941,20 @@ async function handleTelegramUpdate(update: TgUpdate) {
     ...(update.message?.reply_to_message?.entities || []),
   ]) {
     rememberUser(ent.user);
+  }
+
+  // Banned users get no bot in private chats (one short notice now and then).
+  {
+    const priv = update.message?.chat.type === "private" || update.callback_query?.message?.chat.type === "private";
+    const from = update.message?.from || update.callback_query?.from;
+    if (priv && from && isBannedUser(from.id, from.username)) {
+      if (update.callback_query) void tgSoft("answerCallbackQuery", { callback_query_id: update.callback_query.id, text: "⛔️ Доступ закрыт", show_alert: true });
+      const key = `ban-notice:${from.id}`;
+      if (!tooMany(key, 1, 10 * 60_000)) {
+        await tgSoft("sendMessage", { chat_id: from.id, text: "⛔️ Доступ к боту и приложению для вас закрыт." });
+      }
+      return;
+    }
   }
 
   const groupMsg = update.message;
@@ -7186,6 +7341,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && removeFromCheckSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyRemoveFromCheck(msg.chat.id, msg.text);
+    return;
+  }
+  if (isOfficialArbiterChat(msg.chat.id) && banSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+    await applyBan(msg.chat.id, msg.text);
     return;
   }
   if (isOfficialArbiterChat(msg.chat.id) && addBlacklistSetup.has(String(msg.chat.id)) && msg.text && !cmd) {

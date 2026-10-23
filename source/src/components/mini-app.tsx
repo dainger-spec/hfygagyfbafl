@@ -14,7 +14,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getAccess, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -48,6 +48,7 @@ export function MiniApp({
   const openCheck = useCallback(() => onPage("check"), [onPage]);
   const openSponsors = useCallback(() => onPage("sponsors"), [onPage]);
   const [checkOn, setCheckOn] = useState(false);
+  const [banned, setBanned] = useState(false);
   useEffect(() => {
     void getFeatures()
       .then((f) => setCheckOn(Boolean(f?.check)))
@@ -76,6 +77,17 @@ export function MiniApp({
           /* ignore */
         }
       }
+      // A banned user gets a "closed" screen instead of the app.
+      try {
+        const init = telegramInitData();
+        if (init) {
+          const acc = await getAccess({ data: { initData: init } });
+          if (!cancelled && acc?.banned) setBanned(true);
+        }
+      } catch {
+        /* access check is best-effort; the server still refuses banned users */
+      }
+      if (cancelled) return;
       setReady(true);
     })();
     return () => {
@@ -84,8 +96,8 @@ export function MiniApp({
     };
   }, [setIdentity]);
 
-  const showLang = ready && langPicked === false;
-  const showApp = ready && langPicked === true;
+  const showLang = ready && !banned && langPicked === false;
+  const showApp = ready && !banned && langPicked === true;
 
 
   return (
@@ -115,6 +127,13 @@ export function MiniApp({
 
       <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply"].includes(page) && "pt-10")}>
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
+        {ready && banned ? (
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
+            <EuStarsLogo size={112} title="Europe Private Blacklist" emblem />
+            <p className="mt-6 font-display text-xl font-bold">{t(locale, "bannedTitle")}</p>
+            <p className="mt-2 max-w-xs text-sm leading-relaxed text-muted">{t(locale, "bannedText")}</p>
+          </div>
+        ) : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
           <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} checkOn={checkOn} />
