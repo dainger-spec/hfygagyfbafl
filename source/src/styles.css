@@ -246,6 +246,14 @@
   from { opacity: 0; filter: blur(8px); transform: scale(1.04); }
   to { opacity: 1; filter: none; transform: none; }
 }
+/* Frog loader on counterparty search: fades in and rises gently. */
+.epb-frog-in {
+  animation: epb-frog-in 0.6s cubic-bezier(0.2, 0.9, 0.25, 1.1) both;
+}
+@keyframes epb-frog-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.9); }
+  to { opacity: 1; transform: none; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .epb-cap-backdrop, .epb-cap-card, .epb-cap-img { animation: none; }
+  .epb-cap-backdrop, .epb-cap-card, .epb-cap-img, .epb-frog-in { animation: none; }
 }

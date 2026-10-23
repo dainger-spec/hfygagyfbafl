@@ -424,6 +424,9 @@ function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
   );
 }
 
+// Gold animated frog (animated WebP with alpha) used as the loader.
+const FROG_ANIM = "/brand/sending-frog.webp";
+
 // Scrolling strip of partner blacklist/forum logos (sponsors and check pages).
 function PartnerMarquee() {
   return (
@@ -792,6 +795,12 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     };
   }, []);
 
+  // Warm the cache so the frog loader shows instantly on the first search.
+  useEffect(() => {
+    const img = new Image();
+    img.src = FROG_ANIM;
+  }, []);
+
   const [captcha, setCaptcha] = useState<string | null>(null);
   const [capAnswer, setCapAnswer] = useState("");
   const [capMsg, setCapMsg] = useState("");
@@ -850,7 +859,11 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     setLoading(true);
     setData(null);
     try {
-      const res = await checkCounterparty({ data: { input, initData: telegramInitData() } });
+      // Hold the frog loader for at least 2.5 s so it never just flashes.
+      const [res] = await Promise.all([
+        checkCounterparty({ data: { input, initData: telegramInitData() } }),
+        new Promise((r) => window.setTimeout(r, 2500)),
+      ]);
       if (res.ok) {
         const r = res.result as CheckData;
         setData(r);
@@ -951,14 +964,22 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           </div>
         ) : null}
         {loading ? (
-          <p className="flex items-center gap-2 py-10 text-sm text-muted">
-            <LoaderCircle className="size-4 animate-spin text-gold" />
-            {t(locale, "checkChecking")}
-          </p>
+          <div className="epb-frog-in flex flex-col items-center gap-4 py-6 text-center">
+            <img
+              src={FROG_ANIM}
+              alt=""
+              width={150}
+              height={154}
+              draggable={false}
+              className="h-[154px] w-[150px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
+            />
+            <p className="text-sm font-semibold text-muted">{t(locale, "checkChecking")}</p>
+            <div className="epb-progress h-1.5 w-48 max-w-full rounded-full bg-surface" />
+          </div>
         ) : null}
 
         {data && !loading ? (
-          found ? (
+          <div className="epb-frog-in">{found ? (
             <div className="space-y-4">
               {data.epb.length ? (
                 <div className="space-y-2">
@@ -1026,7 +1047,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
               <p className="font-display text-lg font-bold">{t(locale, "checkClean")}</p>
               <p className="max-w-xs text-sm leading-relaxed text-muted">{t(locale, "checkCleanHint")}</p>
             </div>
-          )
+          )}</div>
         ) : null}
 
         {!data && !loading && (recent.length || recentLoading) ? (
