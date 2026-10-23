@@ -565,12 +565,11 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
               haptic("light");
               onBack();
             }}
-            aria-label={t(locale, "back")}
-            className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded-xl text-fg hover:bg-surface"
+            className="-ml-2 flex h-9 shrink-0 items-center gap-1 rounded-xl pr-2 font-display text-xl font-bold text-fg hover:bg-surface"
           >
             <ChevronLeft className="size-5" />
+            {t(locale, "back")}
           </button>
-          <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
         </div>
         {/* Partner logos running along the top of the page. */}
         <div className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]" style={{ "--epb-marquee-dur": "22s" } as CSSProperties}>
