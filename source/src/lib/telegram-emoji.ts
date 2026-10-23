@@ -63,6 +63,8 @@ export const BUTTON_EMOJI: Record<string, string> = {
   "🌐": "5776233299424843260", // globe — language
   "⬅️": "5960671702059848143", // left arrow — back
   "✅": "5774022692642492953", // check — confirm/keep
+  "🔎": "6032850693348399258", // magnifier — check counterparty
+  "🌟": "5805331990618053402", // star — project sponsors
 };
 
 const BTN_KEYS = Object.keys(BUTTON_EMOJI).sort((a, b) => b.length - a.length);

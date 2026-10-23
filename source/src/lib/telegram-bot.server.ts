@@ -2792,9 +2792,11 @@ function recordFind(uname: string, id: string, display: string, result: CheckRes
   const sources: string[] = [];
   if (result.epb.length) sources.push("Блеклист EPB");
   for (const m of result.manual) if (m.source && !sources.includes(m.source)) sources.push(m.source);
-  if (result.channels.length) {
-    const allWwh = result.channels.every((c) => /wwh/i.test(c.channelTitle || ""));
-    sources.push(allWwh ? "Форум WWH" : "Чаты и форумы");
+  // Name the actual source channels (WWH shortened), not a generic label.
+  for (const c of result.channels) {
+    const title = c.channelTitle || "источник";
+    const name = /wwh/i.test(title) ? "WWH" : title;
+    if (!sources.includes(name)) sources.push(name);
   }
   const list = [...(bindings.recentFinds || [])];
   const same = (f: RecentFind) =>
@@ -4301,7 +4303,7 @@ function checkResultKeyboard(locale: Locale) {
 // Sponsors list for the bot: chat titles as links (admin-set links only).
 async function botSponsorsText(locale: Locale): Promise<string> {
   const list = await listSponsors().catch(() => [] as Awaited<ReturnType<typeof listSponsors>>);
-  const lines = [`<b>${tb(locale, "sponsorsMenuBtn").replace(/^💠\s*/, "")}</b>`, ""];
+  const lines = [`<b>${tb(locale, "sponsorsMenuBtn").replace(/^\s*[^\p{L}\p{N}]+\s*/u, "")}</b>`, ""];
   if (!list.length) {
     lines.push(tb(locale, "sponsorsEmptyB"));
     return lines.join("\n");
