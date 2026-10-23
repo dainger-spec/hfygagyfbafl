@@ -135,7 +135,7 @@ export default defineConfig(({ command, isPreview }) => ({
           nitro({
             preset: process.env.NITRO_PRESET || "node-server",
             serverDir: "./server",
-            plugins: ["./server/plugins/ignore-aborts.ts"],
+            plugins: ["./server/plugins/http-guards.ts", "./server/plugins/ignore-aborts.ts", "./server/plugins/start-bot.ts"],
             routeRules: {
               "/api/telegram/evidence": { cache: false },
             },
