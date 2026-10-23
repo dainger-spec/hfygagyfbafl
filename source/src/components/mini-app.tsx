@@ -239,21 +239,22 @@ type BannerItem = { id: string; type: "image" | "video"; link: string; src: stri
 
 // Promo banners at the very top of the app. A horizontal, swipeable strip;
 // videos and GIFs play muted and looped; a tap opens the banner's link.
-function Banners() {
+function Banners({ onLoaded }: { onLoaded?: (count: number) => void }) {
   const [items, setItems] = useState<BannerItem[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [active, setActive] = useState(0);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void getBanners()
-      .then((list) => setItems(Array.isArray(list) ? (list as BannerItem[]) : []))
-      .catch(() => {})
-      .finally(() => setLoaded(true));
+      .then((list) => {
+        const value = Array.isArray(list) ? (list as BannerItem[]) : [];
+        setItems(value);
+        onLoaded?.(value.length);
+      })
+      .catch(() => onLoaded?.(0));
   }, []);
 
-  // No banners: the blacklist base card takes their place.
-  if (!items.length) return loaded ? <BaseCard /> : null;
+  if (!items.length) return null;
 
   const open = (link: string) => {
     if (!link) return;
@@ -404,13 +405,16 @@ function Home({
     ? `@${identity.username}`
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
   const canUse = Boolean(identity.telegramId);
+  const [noBanners, setNoBanners] = useState(false);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
-      <Banners />
+      <Banners onLoaded={(count) => setNoBanners(count === 0)} />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
       </div>
+      {/* No banners: the blacklist base card shows under the ticker. */}
+      {noBanners ? <BaseCard /> : null}
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
