@@ -48,6 +48,10 @@ const FLOOD_BLOCK = 60_000;
 const floodHits = new Map();
 
 function clientIp(req) {
+  // Behind Cloudflare the proxies in front of us all look like Cloudflare's own
+  // IPs; Cloudflare puts the visitor's real address in CF-Connecting-IP.
+  const cf = String(req.headers["cf-connecting-ip"] || "").trim();
+  if (cf) return cf;
   const real = String(req.headers["x-real-ip"] || "").trim();
   if (real) return real;
   const xff = String(req.headers["x-forwarded-for"] || "")
