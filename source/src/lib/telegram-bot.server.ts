@@ -2787,12 +2787,12 @@ const RECENT_FINDS_MAX = 25;
 // Record a successful counterparty check into the shared recent list. De-duped
 // by username/id (an existing entry is refreshed and moved to the front), capped.
 function recordFind(uname: string, id: string, display: string, result: CheckResult) {
-  if (!result.epb.length && !result.manual.length && !result.channels.length) return;
+  // Only external forum/chat discoveries are worth recording — anything in the
+  // EPB or manual blacklist is already shown in the recent list on its own.
+  if (!result.channels.length) return;
   if (!uname && !id) return;
-  const sources: string[] = [];
-  if (result.epb.length) sources.push("Блеклист EPB");
-  for (const m of result.manual) if (m.source && !sources.includes(m.source)) sources.push(m.source);
   // Name the actual source channels (WWH shortened), not a generic label.
+  const sources: string[] = [];
   for (const c of result.channels) {
     const title = c.channelTitle || "источник";
     const name = /wwh/i.test(title) ? "WWH" : title;
@@ -2820,16 +2820,24 @@ function recordFind(uname: string, id: string, display: string, result: CheckRes
 export function recentBlacklist(limit = 24): BlacklistEntry[] {
   if (!checkEnabled()) return [];
   const out: BlacklistEntry[] = [];
-  for (const [key, rec] of Object.entries(pendingPosts)) {
+  // Handles/ids already represented by an EPB or manual entry, so the same
+  // account isn't shown twice when it's also in the recent-finds list.
+  const shownKeys = new Set<string>();
+  const key = (v?: string) => (v || "").replace(/^@/, "").toLowerCase().trim();
+  for (const [k, rec] of Object.entries(pendingPosts)) {
     if (rec.status !== "published" || !rec.channelPosted || rec.removedFromCheck) continue;
     out.push({
       kind: "epb",
-      id: key,
+      id: k,
       account: scamLabel(rec),
       amount: rec.amount || "",
       currency: rec.currency || "",
       date: rec.createdAt || 0,
     });
+    for (const a of pendingAccounts(rec)) {
+      if (a.username) shownKeys.add(key(a.username));
+      if (a.id) shownKeys.add(key(a.id));
+    }
   }
   for (const e of bindings.manualBlacklist || []) {
     out.push({
@@ -2840,8 +2848,12 @@ export function recentBlacklist(limit = 24): BlacklistEntry[] {
       source: e.source || DEFAULT_MANUAL_SOURCE,
       note: e.note,
     });
+    if (e.username) shownKeys.add(key(e.username));
+    if (e.telegramId) shownKeys.add(key(e.telegramId));
   }
   for (const f of bindings.recentFinds || []) {
+    // Skip a find that's already shown as an EPB/manual entry.
+    if ((f.username && shownKeys.has(key(f.username))) || (f.telegramId && shownKeys.has(key(f.telegramId)))) continue;
     out.push({ kind: "find", id: f.id, account: f.label, date: f.at, source: (f.sources || []).join(" · ") });
   }
   out.sort((a, b) => b.date - a.date);
