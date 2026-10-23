@@ -320,7 +320,6 @@ function Home({
       <Banners />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
-        <SponsorStats className="mt-2" />
       </div>
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
@@ -329,13 +328,7 @@ function Home({
           Europe Private
           <span className="block text-gold">Blacklist</span>
         </h1>
-        {handle ? (
-          <p className="mt-4 text-xs text-subtle">
-            {t(locale, "signedIn")} <span className="font-medium text-fg">{handle}</span>
-          </p>
-        ) : (
-          <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>
-        )}
+        {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
           <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
             {t(locale, "fileComplaint")}
@@ -345,9 +338,6 @@ function Home({
               {t(locale, "checkBtn")}
             </Button>
           ) : null}
-          <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onHistory} disabled={!canUse}>
-            {t(locale, "history")}
-          </Button>
         </div>
         <a
           href={CHANNEL_URL}
@@ -490,7 +480,6 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
           <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
         </div>
         <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
-        <SponsorStats className="!text-left" />
         {items === null ? (
           <div className="space-y-2">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -1076,15 +1065,6 @@ function Done({
             {t(locale, "addEvidence")} <ExternalLink className="size-4" />
           </span>
         </Button>
-        {onReview ? (
-          <Button size="lg" variant="secondary" className="w-full" onClick={onReview}>
-            {t(locale, "history")}
-          </Button>
-        ) : (
-          <Button size="lg" variant="secondary" className="w-full" onClick={() => onPage("history")}>
-            {t(locale, "history")}
-          </Button>
-        )}
         <Button size="lg" variant="secondary" className="w-full" onClick={() => onPage("home")}>
           {t(locale, "home")}
         </Button>

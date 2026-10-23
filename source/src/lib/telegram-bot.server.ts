@@ -4389,20 +4389,10 @@ async function sendCard(
   }));
 }
 
-// The /start caption: the welcome text plus the live connected-chats/audience
-// line. Shared by the first send and by in-place "back to menu" edits.
+// The /start caption. Shared by the first send and by in-place "back to menu"
+// edits. (The connected-chats/audience line was removed on request.)
 async function startCaption(locale: Locale): Promise<string> {
-  let text = startText(locale);
-  try {
-    const st = await sponsorStats();
-    if (st.chats > 0) {
-      const audience = st.audience.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
-      text += `\n\n${tb(locale, "statsLine", { chats: String(st.chats), audience })}`;
-    }
-  } catch {
-    /* stats are optional */
-  }
-  return text;
+  return startText(locale);
 }
 
 async function replyStart(chatId: number, userId?: string | number) {
