@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { EvidencePicker } from "@/components/evidence-picker";
-import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { persistEvidence } from "@/lib/evidence";
 import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount, haptic } from "@/lib/telegram";
 import { getCaptcha, solveCaptcha, submitToTelegram } from "@/lib/telegram-bot.functions";
@@ -64,7 +63,7 @@ export function ApplyForm({
     setCapAnswer("");
     setCapMsg(msg);
     try {
-      const r = await getCaptcha({ data: { initData: telegramInitData() } });
+      const r = await getCaptcha({ data: { initData: telegramInitData(), purpose: "submit" } });
       if (r.ok) setCaptcha(r.image);
       else {
         setCaptcha(null);
@@ -100,6 +99,12 @@ export function ApplyForm({
       setCapBusy(false);
     }
   }
+
+  // Warm the cache so the sending animation shows instantly.
+  useEffect(() => {
+    const img = new Image();
+    img.src = SENDING_ANIM;
+  }, []);
 
   useEffect(() => {
     const tg = readTelegramWebUser();
@@ -261,7 +266,14 @@ export function ApplyForm({
       ) : null}
       {sending ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-bg/95 px-8 text-center backdrop-blur-sm">
-          <EuStarsLogo size={112} title="Europe Private Blacklist" spin fast emblem />
+          <img
+            src={SENDING_ANIM}
+            alt=""
+            width={168}
+            height={172}
+            draggable={false}
+            className="h-[172px] w-[168px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
+          />
           <div className="space-y-1.5">
             <p className="font-display text-lg font-bold">{t(locale, "sendingTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "sendingHint")}</p>
@@ -391,6 +403,9 @@ export function ApplyForm({
     </form>
   );
 }
+
+// Gold animated frog shown while a complaint is being sent (animated WebP with alpha).
+const SENDING_ANIM = "/brand/sending-frog.webp";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

@@ -101,15 +101,13 @@ for f in range(N):
 
     # ---- dynamic light behind: an orbiting warm glow + slow rotating rays
     rise = ease_out_cubic(t / 1.2)
-    lx = CX + 70 * math.cos(t * 0.9)
-    ly = CY - 10 + 45 * math.sin(t * 1.3)
+    lx = CX + 150 * math.cos(t * 0.8)
+    ly = CY - 30 + 95 * math.sin(t * 1.1)
     pulse = 0.85 + 0.15 * math.sin(t * 2.1)
     d2 = (xx - lx) ** 2 + (yy - ly) ** 2
-    glow = np.exp(-d2 / (2 * 260 ** 2)) * 0.62 * pulse * rise
-    glow2 = np.exp(-((xx - (CX - 60 * math.cos(t * 0.6))) ** 2 + (yy - (CY + 30 * math.sin(t * 0.7))) ** 2) / (2 * 150 ** 2)) * 0.28 * rise
-    rays = (0.5 + 0.5 * np.cos(10 * (th - t * 0.18))) ** 6 * np.exp(-((rr - 40) / 330) ** 2) * (rr > 30)
-    rays = rays * 0.20 * rise * (0.8 + 0.2 * math.sin(t * 1.7))
-    light = (glow + glow2 + rays)[..., None]
+    glow = np.exp(-d2 / (2 * 240 ** 2)) * 0.34 * pulse * rise
+    glow2 = np.exp(-((xx - (CX - 60 * math.cos(t * 0.6))) ** 2 + (yy - (CY + 30 * math.sin(t * 0.7))) ** 2) / (2 * 150 ** 2)) * 0.12 * rise
+    light = (glow + glow2)[..., None]
     frame += light * WARM
     frame *= 0.35 + 0.65 * vign
 
@@ -158,10 +156,18 @@ for f in range(N):
                 pos = -0.2 + 1.4 * q
                 sh = np.exp(-((band - pos) / 0.06) ** 2)[..., None] * 0.55
                 spr[..., :3] = np.clip(spr[..., :3] + sh * np.array([1.0, 0.9, 0.65]), 0, 1)
+        # the same moving light falls on the medallion: lit side brighter,
+        # far side darker, plus a soft specular spot
+        px = CX - ew / 2 + ex
+        py = CY - eh / 2 + ey
+        dl = ((px - lx) ** 2 + (py - ly) ** 2)
+        lit = (0.62 + 0.62 * np.exp(-dl / (2 * 190 ** 2)) * pulse * rise)[..., None]
+        spec = (np.exp(-dl / (2 * 55 ** 2)) * 0.22 * rise)[..., None]
+        spr[..., :3] = np.clip(spr[..., :3] * lit + spec * np.array([1.0, 0.88, 0.6]) * spr[..., 3:4], 0, 1)
         spr = resize_rgba(spr, sc)
         # glow halo under the emblem
         halo = np.exp(-(((xx - CX) / (150 * sc)) ** 2 + ((yy - CY) / (195 * sc)) ** 2))
-        frame += halo[..., None] * WARM * 0.45 * al
+        frame += halo[..., None] * WARM * 0.22 * al
         over(frame, spr, CX, CY, al)
         # expanding flash ring
         pr = (t - 0.45) / 0.8

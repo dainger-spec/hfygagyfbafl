@@ -164,12 +164,12 @@ export const getAccess = createServerFn({ method: "POST" })
   });
 
 export const getCaptcha = createServerFn({ method: "POST" })
-  .validator(z.object({ initData: z.string().max(16384) }))
+  .validator(z.object({ initData: z.string().max(16384), purpose: z.enum(["check", "submit"]).optional() }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
     const user = bot.verifyTelegramInitData(data.initData);
     if (!user) return { ok: false as const, error: "telegram auth required" };
-    const png = bot.newCaptchaImage(user.id);
+    const png = bot.newCaptchaImage(user.id, data.purpose ?? "check");
     if (!png) return { ok: false as const, error: "too many" };
     return { ok: true as const, image: `data:image/png;base64,${png.toString("base64")}` };
   });

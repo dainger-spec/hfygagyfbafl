@@ -126,7 +126,7 @@ type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
   miniAppUrl?: string;
-  cards?: Partial<Record<"welcome" | "welcomeAnim" | "submitted" | "published", string>>;
+  cards?: Partial<Record<"welcome" | "welcomeAnim2" | "submitted" | "published", string>>;
   cardStamp?: string;
   relayChats?: RelayChat[];
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
@@ -3161,7 +3161,10 @@ const CAPTCHA_WINDOW = 3 * 60_000;
 const CAPTCHA_CREDIT = 15;
 const checkTimes = new Map<string, number[]>();
 const captchaCredit = new Map<string, number>();
-const captchaPending = new Map<string, { word: string; exp: number; tries: number }>();
+// purpose "check" unlocks more counterparty checks; "submit" unlocks sending one
+// complaint. They are kept apart so a check captcha never skips the complaint one.
+type CaptchaPurpose = "check" | "submit";
+const captchaPending = new Map<string, { word: string; exp: number; tries: number; purpose: CaptchaPurpose }>();
 // A solved captcha also allows sending one complaint within 15 minutes.
 const submitPass = new Map<string, number>();
 
@@ -3199,11 +3202,11 @@ export function captchaRequired(userId: string): boolean {
 }
 
 // A fresh captcha image for this user (null when they request too many images).
-export function newCaptchaImage(userId: string): Buffer | null {
+export function newCaptchaImage(userId: string, purpose: CaptchaPurpose = "check"): Buffer | null {
   const uid = String(userId);
   if (tooMany(`capimg:${uid}`, 12, 10 * 60_000)) return null;
   const word = randomCaptchaWord();
-  captchaPending.set(uid, { word, exp: Date.now() + 5 * 60_000, tries: 0 });
+  captchaPending.set(uid, { word, exp: Date.now() + 5 * 60_000, tries: 0, purpose });
   if (captchaPending.size > 20_000) captchaPending.clear();
   return renderCaptcha(word);
 }
@@ -3217,10 +3220,13 @@ export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "
   }
   if (normalizeCaptchaAnswer(answer) === normalizeCaptchaAnswer(p.word)) {
     captchaPending.delete(uid);
-    checkTimes.delete(uid);
-    captchaCredit.set(uid, CAPTCHA_CREDIT);
-    submitPass.set(uid, Date.now() + 15 * 60_000);
-    if (submitPass.size > 20_000) submitPass.clear();
+    if (p.purpose === "submit") {
+      submitPass.set(uid, Date.now() + 15 * 60_000);
+      if (submitPass.size > 20_000) submitPass.clear();
+    } else {
+      checkTimes.delete(uid);
+      captchaCredit.set(uid, CAPTCHA_CREDIT);
+    }
     return "ok";
   }
   p.tries += 1;
@@ -4574,8 +4580,9 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
 const botCaptchaWait = new Map<string, string>();
 const SUBMIT_CAPTCHA = "\u0000submit";
 
-async function sendBotCaptcha(chatId: number | string, intro: string): Promise<boolean> {
-  const png = newCaptchaImage(String(chatId));
+async function sendBotCaptcha(chatId: number | string, intro: string, purpose?: CaptchaPurpose): Promise<boolean> {
+  const why: CaptchaPurpose = purpose ?? (botCaptchaWait.get(String(chatId)) === SUBMIT_CAPTCHA ? "submit" : "check");
+  const png = newCaptchaImage(String(chatId), why);
   if (!png) {
     await tgSoft("sendMessage", { chat_id: chatId, text: "Слишком много попыток. Попробуйте через 10 минут." });
     return false;
@@ -4588,7 +4595,9 @@ async function sendBotCaptcha(chatId: number | string, intro: string): Promise<b
   try {
     await tgForm("sendPhoto", form);
     return true;
-  } catch {
+  } catch (err) {
+    console.error("[epb] captcha photo failed:", err);
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Не удалось показать картинку. Нажмите ещё раз через минуту." });
     return false;
   }
 }
@@ -4731,7 +4740,7 @@ async function sendCard(
   // The /start card is an animation (medallion + circling stars); the still
   // picture below stays as the fallback if Telegram refuses it.
   if (kind === "welcome") {
-    const cachedAnim = bindings.cards?.welcomeAnim;
+    const cachedAnim = bindings.cards?.welcomeAnim2;
     if (cachedAnim) {
       const sent = await trySend("sendAnimation", (c, markup) => ({
         chat_id: chatId,
@@ -4741,7 +4750,7 @@ async function sendCard(
         ...rest(markup),
       }));
       if (sent) return;
-      if (bindings.cards) delete bindings.cards.welcomeAnim;
+      if (bindings.cards) delete bindings.cards.welcomeAnim2;
       saveBindings();
     }
     let mp4: Buffer | null = null;
@@ -4773,7 +4782,7 @@ async function sendCard(
         }
         const fileId = sent.animation?.file_id || sent.document?.file_id;
         if (fileId) {
-          bindings.cards = { ...bindings.cards, welcomeAnim: fileId };
+          bindings.cards = { ...bindings.cards, welcomeAnim2: fileId };
           saveBindings();
         }
         return;
@@ -5018,6 +5027,7 @@ async function askConfirm(chatId: number, session: ApplySession) {
 }
 
 async function startApply(chatId: number, from: TgUser) {
+  botCaptchaWait.delete(String(chatId)); // a pending check captcha must not eat the complaint answers
   const session = newSession(from);
   sessions.set(String(from.id), session);
   await sendCeMessage(chatId, btUser(from.id, "applyStart"));
@@ -5370,7 +5380,7 @@ async function handleApplyCallback(
   if (cb.data === "apply:send") {
     if (!hasSubmitPass(userId)) {
       botCaptchaWait.set(String(chatId), SUBMIT_CAPTCHA);
-      await sendBotCaptcha(chatId, "🤖 Последний шаг: напишите слово с картинки, чтобы отправить жалобу.");
+      await sendBotCaptcha(chatId, "🤖 Последний шаг: напишите слово с картинки, чтобы отправить жалобу.", "submit");
       return;
     }
     await submitSession(chatId, userId, session);
