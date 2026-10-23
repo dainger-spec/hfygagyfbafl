@@ -8,7 +8,7 @@ import { EvidencePicker } from "@/components/evidence-picker";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { persistEvidence } from "@/lib/evidence";
 import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount, haptic } from "@/lib/telegram";
-import { submitToTelegram } from "@/lib/telegram-bot.functions";
+import { getCaptcha, solveCaptcha, submitToTelegram } from "@/lib/telegram-bot.functions";
 import { useBlacklistStore } from "@/lib/store";
 import { t } from "@/lib/i18n";
 import type { Currency, EvidenceItem, PersonRef } from "@/lib/types";
@@ -52,6 +52,54 @@ export function ApplyForm({
   const [files, setFiles] = useState<EvidenceItem[]>([]);
   const [formError, setFormError] = useState("");
   const [sending, setSending] = useState(false);
+  // Every complaint ends with a word captcha; a solved one is good for 15 min.
+  const formRef = useRef<HTMLFormElement>(null);
+  const capPassed = useRef(false);
+  const [captcha, setCaptcha] = useState<string | null>(null);
+  const [capAnswer, setCapAnswer] = useState("");
+  const [capMsg, setCapMsg] = useState("");
+  const [capBusy, setCapBusy] = useState(false);
+
+  async function loadCaptcha(msg = "") {
+    setCapAnswer("");
+    setCapMsg(msg);
+    try {
+      const r = await getCaptcha({ data: { initData: telegramInitData() } });
+      if (r.ok) setCaptcha(r.image);
+      else {
+        setCaptcha(null);
+        setFormError(t(locale, r.error === "too many" ? "capTooMany" : "errOpenBot"));
+      }
+    } catch {
+      setCaptcha(null);
+      setFormError(t(locale, "sentFail"));
+    }
+  }
+
+  async function submitCaptcha() {
+    if (!capAnswer.trim() || capBusy) return;
+    setCapBusy(true);
+    try {
+      const r = await solveCaptcha({ data: { initData: telegramInitData(), answer: capAnswer } });
+      if (r.result === "ok") {
+        haptic("soft");
+        capPassed.current = true;
+        setCaptcha(null);
+        setCapMsg("");
+        formRef.current?.requestSubmit();
+      } else if (r.result === "wrong") {
+        haptic("heavy");
+        setCapAnswer("");
+        setCapMsg(t(locale, "capWrong"));
+      } else {
+        await loadCaptcha(t(locale, "capExpired"));
+      }
+    } catch {
+      setCapMsg(t(locale, "sentFail"));
+    } finally {
+      setCapBusy(false);
+    }
+  }
 
   useEffect(() => {
     const tg = readTelegramWebUser();
@@ -109,6 +157,10 @@ export function ApplyForm({
       setFormError(t(locale, "errFiles"));
       return;
     }
+    if (!capPassed.current) {
+      await loadCaptcha();
+      return;
+    }
 
     setSending(true);
     try {
@@ -137,10 +189,16 @@ export function ApplyForm({
           window.setTimeout(() => resolve({ ok: false, error: t(locale, "errTimeout") }), 90_000),
         ),
       ]);
+      if (!tg.ok && tg.error === "captcha") {
+        capPassed.current = false;
+        await loadCaptcha();
+        return;
+      }
       if (!tg.ok) {
         setFormError(tg.error || t(locale, "sentFail"));
         return;
       }
+      capPassed.current = false;
       submitApplication(app);
       setIdentity({ username: vUser, telegramId: vId, firstName: tgUser?.firstName || identity.firstName });
       onSubmitted(t(locale, "sentOk"));
@@ -153,9 +211,54 @@ export function ApplyForm({
 
   return (
     <form
+      ref={formRef}
       onSubmit={onSubmit}
       className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
     >
+      {captcha && !sending ? (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-bg/95 px-5 backdrop-blur-sm">
+          <div className="w-full max-w-md space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+            <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
+            <p className="text-sm text-muted">{t(locale, "capHintSubmit")}</p>
+            <img src={captcha} alt="" draggable={false} className="w-full select-none rounded-xl" />
+            <Input
+              value={capAnswer}
+              onChange={(e) => setCapAnswer(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitCaptcha();
+                }
+              }}
+              placeholder={t(locale, "capPlaceholder")}
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus
+            />
+            {capMsg ? <p className="text-sm text-danger">{capMsg}</p> : null}
+            <div className="flex gap-2">
+              <Button type="button" className="flex-1 rounded-xl" onClick={() => void submitCaptcha()} disabled={capBusy || !capAnswer.trim()}>
+                {t(locale, "capSubmit")}
+              </Button>
+              <Button type="button" variant="secondary" className="rounded-xl" onClick={() => void loadCaptcha()} disabled={capBusy}>
+                {t(locale, "capNew")}
+              </Button>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full rounded-xl"
+              onClick={() => {
+                setCaptcha(null);
+                setCapMsg("");
+              }}
+            >
+              {t(locale, "back")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {sending ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-bg/95 px-8 text-center backdrop-blur-sm">
           <EuStarsLogo size={112} title="Europe Private Blacklist" spin fast emblem />

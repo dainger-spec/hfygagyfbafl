@@ -3161,6 +3161,19 @@ const CAPTCHA_CREDIT = 15;
 const checkTimes = new Map<string, number[]>();
 const captchaCredit = new Map<string, number>();
 const captchaPending = new Map<string, { word: string; exp: number; tries: number }>();
+// A solved captcha also allows sending one complaint within 15 minutes.
+const submitPass = new Map<string, number>();
+
+export function hasSubmitPass(userId: string): boolean {
+  const uid = String(userId);
+  if (isOwner(uid)) return true;
+  const exp = submitPass.get(uid) || 0;
+  return exp > Date.now();
+}
+
+export function consumeSubmitPass(userId: string) {
+  submitPass.delete(String(userId));
+}
 
 // Returns true when this user must solve a captcha before the next check;
 // otherwise records the check.
@@ -3205,6 +3218,8 @@ export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "
     captchaPending.delete(uid);
     checkTimes.delete(uid);
     captchaCredit.set(uid, CAPTCHA_CREDIT);
+    submitPass.set(uid, Date.now() + 15 * 60_000);
+    if (submitPass.size > 20_000) submitPass.clear();
     return "ok";
   }
   p.tries += 1;
@@ -4553,8 +4568,10 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
   return lines.join("\n").slice(0, 3900);
 }
 
-// Bot users waiting to answer a captcha: chat -> the check they asked for.
+// Bot users waiting to answer a captcha: chat -> the check they asked for, or
+// SUBMIT_CAPTCHA when the captcha guards sending a complaint.
 const botCaptchaWait = new Map<string, string>();
+const SUBMIT_CAPTCHA = "\u0000submit";
 
 async function sendBotCaptcha(chatId: number | string, intro: string): Promise<boolean> {
   const png = newCaptchaImage(String(chatId));
@@ -5024,6 +5041,7 @@ async function submitSession(chatId: number, userId: string, session: ApplySessi
     });
     return;
   }
+  consumeSubmitPass(userId);
   clearStepMessage(chatId);
   sessions.delete(userId);
   await tgSoft("sendMessage", {
@@ -5294,6 +5312,11 @@ async function handleApplyCallback(
     return;
   }
   if (cb.data === "apply:send") {
+    if (!hasSubmitPass(userId)) {
+      botCaptchaWait.set(String(chatId), SUBMIT_CAPTCHA);
+      await sendBotCaptcha(chatId, "🤖 Последний шаг: напишите слово с картинки, чтобы отправить жалобу.");
+      return;
+    }
     await submitSession(chatId, userId, session);
   }
 }
@@ -7539,6 +7562,12 @@ async function handleTelegramUpdate(update: TgUpdate) {
     if (r === "ok") {
       const q = botCaptchaWait.get(cid) || "";
       botCaptchaWait.delete(cid);
+      if (q === SUBMIT_CAPTCHA) {
+        const session = sessions.get(userId);
+        if (session) await submitSession(msg.chat.id, userId, session);
+        else await tgSoft("sendMessage", { chat_id: msg.chat.id, text: btUser(userId, "restart") });
+        return;
+      }
       captchaRequired(cid); // consume one credit for this check
       await runBotCheck(msg.chat.id, q, true);
     } else if (r === "wrong") {

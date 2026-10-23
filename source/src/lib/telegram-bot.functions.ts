@@ -57,6 +57,8 @@ export const submitToTelegram = createServerFn({ method: "POST" })
     if (!authed) {
       return { ok: false as const, error: t(locale, "errOpenBot") };
     }
+    // Every complaint ends with a captcha (solved via getCaptcha/solveCaptcha).
+    if (!bot.hasSubmitPass(authed.id)) return { ok: false as const, error: "captcha" };
     bot.saveUserLocaleServer(authed.id, locale);
     const app = {
       id: data.id,
@@ -74,7 +76,9 @@ export const submitToTelegram = createServerFn({ method: "POST" })
       damageCurrency: data.damageCurrency,
       evidence: data.evidence,
     };
-    return bot.sendApplicationToArbiters(app);
+    const res = await bot.sendApplicationToArbiters(app);
+    if (res.ok) bot.consumeSubmitPass(authed.id);
+    return res;
   });
 
 export const configureTelegram = createServerFn({ method: "POST" })

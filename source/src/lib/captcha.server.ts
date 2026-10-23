@@ -80,7 +80,10 @@ function flatten(cmds: Cmd[]): number[][][] {
 }
 
 // Non-zero winding scanline fill of polygons into the RGB buffer.
-function fillPolys(buf: Uint8ClampedArray, polys: number[][][], col: [number, number, number], alpha: number) {
+type Rgb = [number, number, number];
+type Paint = Rgb | ((y: number) => Rgb);
+
+function fillPolys(buf: Uint8ClampedArray, polys: number[][][], paint: Paint, alpha: number) {
   let minY = Infinity;
   let maxY = -Infinity;
   for (const p of polys) for (const [, y] of p) {
@@ -103,6 +106,7 @@ function fillPolys(buf: Uint8ClampedArray, polys: number[][][], col: [number, nu
       }
     }
     xs.sort((a, b) => a.x - b.x);
+    const col = typeof paint === "function" ? paint(py) : paint;
     let wind = 0;
     for (let i = 0; i < xs.length - 1; i++) {
       wind += xs[i]!.d;
@@ -119,7 +123,7 @@ function fillPolys(buf: Uint8ClampedArray, polys: number[][][], col: [number, nu
   }
 }
 
-function disc(buf: Uint8ClampedArray, cx: number, cy: number, r: number, col: [number, number, number], alpha: number) {
+function disc(buf: Uint8ClampedArray, cx: number, cy: number, r: number, col: Rgb, alpha: number) {
   for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(SH - 1, Math.ceil(cy + r)); y++) {
     for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(SW - 1, Math.ceil(cx + r)); x++) {
       if ((x - cx) ** 2 + (y - cy) ** 2 > r * r) continue;
@@ -133,7 +137,7 @@ function disc(buf: Uint8ClampedArray, cx: number, cy: number, r: number, col: [n
 
 // A wavy line across the image, in colours close to the letters, so it can't
 // be removed by colour filtering.
-function noiseLine(buf: Uint8ClampedArray, col: [number, number, number], width: number) {
+function noiseLine(buf: Uint8ClampedArray, col: Rgb, width: number) {
   const yA = rnd(0.15, 0.85) * SH;
   const yB = rnd(0.15, 0.85) * SH;
   const amp = rnd(6, 22) * SS;
@@ -192,9 +196,9 @@ function encodePng(rgb: Uint8Array, w: number, h: number): Buffer {
 export function renderCaptcha(word: string): Buffer {
   const buf = new Uint8ClampedArray(SW * SH * 3);
   // Background: random dark two-colour diagonal gradient.
-  const hue = rnd(0, 360);
-  const c1 = hsl(hue, rnd(25, 55), rnd(10, 18));
-  const c2 = hsl((hue + rnd(60, 180)) % 360, rnd(25, 55), rnd(16, 26));
+  // Blacklist palette: near-black background with a faint warm glow.
+  const c1 = hsl(rnd(30, 45), rnd(10, 30), rnd(3, 7));
+  const c2 = hsl(rnd(32, 48), rnd(30, 55), rnd(11, 17));
   for (let y = 0; y < SH; y++) {
     for (let x = 0; x < SW; x++) {
       const t = (x / SW) * 0.6 + (y / SH) * 0.4;
@@ -204,9 +208,19 @@ export function renderCaptcha(word: string): Buffer {
       buf[o + 2] = c1[2] + (c2[2] - c1[2]) * t;
     }
   }
-  const letterCol = () => hsl(rnd(0, 360), rnd(55, 90), rnd(58, 74));
+  // Golds from pale to deep; noise uses the same range so colour filtering
+  // can't separate letters from lines.
+  const letterCol = (): Rgb => hsl(rnd(34, 50), rnd(65, 95), rnd(48, 78));
+  const goldGradient = (top: number, bottom: number): ((y: number) => Rgb) => {
+    const a = hsl(rnd(40, 50), rnd(80, 100), rnd(74, 86));
+    const b = hsl(rnd(30, 40), rnd(65, 85), rnd(42, 54));
+    return (y) => {
+      const t = Math.max(0, Math.min(1, (y - top) / Math.max(1, bottom - top)));
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    };
+  };
   // Background clutter: dots and a few lines behind the text.
-  for (let i = 0; i < 500; i++) disc(buf, rnd(0, SW), rnd(0, SH), rnd(0.6, 1.8) * SS, letterCol(), rnd(0.25, 0.6));
+  for (let i = 0; i < 420; i++) disc(buf, rnd(0, SW), rnd(0, SH), rnd(0.6, 1.8) * SS, letterCol(), rnd(0.2, 0.5));
   for (let i = 0; i < 3; i++) noiseLine(buf, letterCol(), rnd(1.5, 2.5));
 
   const font = pick(DATA.fonts);
@@ -250,7 +264,13 @@ export function renderCaptcha(word: string): Buffer {
           return [rx + wa2 * Math.sin(ry * wf2 + wp), ry + wa * Math.sin(rx * wf + wp)];
         }),
       );
-      fillPolys(buf, polys, letterCol(), 0.96);
+      let top = Infinity;
+      let bottom = -Infinity;
+      for (const poly of polys) for (const [, y] of poly) {
+        if (y! < top) top = y!;
+        if (y! > bottom) bottom = y!;
+      }
+      fillPolys(buf, polys, goldGradient(top, bottom), 0.97);
     }
     penX += adv;
   }
