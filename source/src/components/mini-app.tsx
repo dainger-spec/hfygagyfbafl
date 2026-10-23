@@ -382,17 +382,19 @@ const SPONSORS_CACHE_KEY = "epb-sponsors";
 
 // Logos of the partner blacklists/forums, shown in the top ticker and on the
 // sponsors page. Transparent PNGs in /public/partners.
-const PARTNER_LOGOS: { src: string; alt: string }[] = [
-  { src: "/partners/wwh.png", alt: "WWH Club" },
-  { src: "/partners/animal-planet.png", alt: "Animal Planet Blacklist" },
-  { src: "/partners/kidalam.png", alt: "KidaLam NeT" },
-  { src: "/partners/z-black.png", alt: "Z-BLACK" },
-  { src: "/partners/pi.png", alt: "π" },
-  { src: "/partners/ws-blacklist.png", alt: "WS Blacklist" },
-  { src: "/partners/cookie.png", alt: "Cookie Blacklist" },
+// `r` is width/height, so every logo gets its final size before it loads and
+// the scrolling track never changes width mid-animation (which made it jump).
+const PARTNER_LOGOS: { src: string; alt: string; r: number }[] = [
+  { src: "/partners/wwh.png", alt: "WWH Club", r: 740 / 128 },
+  { src: "/partners/animal-planet.png", alt: "Animal Planet Blacklist", r: 1 },
+  { src: "/partners/kidalam.png", alt: "KidaLam NeT", r: 1 },
+  { src: "/partners/z-black.png", alt: "Z-BLACK", r: 122 / 128 },
+  { src: "/partners/pi.png", alt: "π", r: 107 / 128 },
+  { src: "/partners/ws-blacklist.png", alt: "WS Blacklist", r: 1 },
+  { src: "/partners/cookie.png", alt: "Cookie Blacklist", r: 1 },
 ];
 
-function PartnerLogos({ className, gap = false }: { className: string; gap?: boolean }) {
+function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
   return (
     <>
       {PARTNER_LOGOS.map((l) => (
@@ -401,7 +403,12 @@ function PartnerLogos({ className, gap = false }: { className: string; gap?: boo
             src={l.src}
             alt={l.alt}
             draggable={false}
-            className={cn("w-auto max-w-none shrink-0 select-none", className)}
+            width={Math.round(size * l.r)}
+            height={size}
+            loading="eager"
+            decoding="async"
+            style={{ width: Math.round(size * l.r), height: size }}
+            className="max-w-none shrink-0 select-none"
           />
           {gap ? <span className="w-6 shrink-0" /> : <span className="mx-3 text-gold/40">·</span>}
         </span>
@@ -457,6 +464,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   }, []);
   const Seq = () => (
     <>
+      <PartnerLogos size={24} />
       <span className="inline-flex items-center">
         <span className="epb-gold-text opacity-80">{t(locale, "sponsorsTitle")}</span>
         <span className="mx-3 text-gold/40">·</span>
@@ -467,7 +475,6 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
           <span className="mx-3 text-gold/40">/</span>
         </span>
       ))}
-      <PartnerLogos className="h-6" />
     </>
   );
 
@@ -484,7 +491,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
       style={{ "--epb-marquee-dur": `${Math.max(12, items.length * 2.5 + PARTNER_LOGOS.length * 1.6)}s` } as CSSProperties}
     >
-      <div className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
+      <div key={items.length} className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
         <Seq />
         <Seq />
       </div>
@@ -568,8 +575,8 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
         {/* Partner logos running along the top of the page. */}
         <div className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]" style={{ "--epb-marquee-dur": "22s" } as CSSProperties}>
           <div className="epb-marquee-track">
-            <PartnerLogos className="h-12" gap />
-            <PartnerLogos className="h-12" gap />
+            <PartnerLogos size={48} gap />
+            <PartnerLogos size={48} gap />
           </div>
           <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
           <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
