@@ -1669,9 +1669,21 @@ async function serverSearch(client: UserClient, peer: unknown, query: string): P
 
 // Fallback when server search doesn't surface the post: read the channel's
 // recent history and filter locally.
-async function scanRecent(client: UserClient, peer: unknown, limit = 500): Promise<TgMsgLite[]> {
+async function scanRecent(client: UserClient, peer: unknown, limit = 800): Promise<TgMsgLite[]> {
   const c = client as unknown as UserClientSearch;
-  return ((await withTimeout(c.getMessages(peer, { limit }), 30_000, "scan timeout")) || []) as TgMsgLite[];
+  return ((await withTimeout(c.getMessages(peer, { limit }), 45_000, "scan timeout")) || []) as TgMsgLite[];
+}
+
+// The recent-history scan is independent of the search term, so cache it briefly
+// per channel: one check searches by username AND id, and people re-check often.
+const scanCache = new Map<string, { at: number; msgs: TgMsgLite[] }>();
+const SCAN_TTL = 120_000;
+async function scanRecentCached(client: UserClient, peer: unknown, channelKey: string): Promise<TgMsgLite[]> {
+  const hit = scanCache.get(channelKey);
+  if (hit && Date.now() - hit.at < SCAN_TTL) return hit.msgs;
+  const msgs = await scanRecent(client, peer);
+  scanCache.set(channelKey, { at: Date.now(), msgs });
+  return msgs;
 }
 
 // Telegram's full-text search splits on underscores/punctuation, so a username
@@ -1725,6 +1737,15 @@ function idOnLine(line: string, id: string): boolean {
   return new RegExp("(?<!\\d)" + digits + "(?!\\d)").test(line);
 }
 
+// A line that is ONLY @handles (optionally comma/space/bullet separated), e.g.
+// "@a, @b". In a blacklist channel such a line is the accused list — not an ad
+// (ads carry prose). Used to accept handle-list posts that lack a keyword.
+function handleOnlyLine(line: string): boolean {
+  const t = line.trim().replace(/^[📛🚫❌🤡⚠🔴🛑‼️\s]+/u, "");
+  if (!t.startsWith("@")) return false;
+  return /^(?:@[A-Za-z][A-Za-z0-9_]{2,31}[\s,;/|•·–—-]*)+$/.test(t);
+}
+
 // Arbitration posts (e.g. WWH Info) name both sides on one line:
 //   "Арбитраж пользователя <заявитель> на пользователя <обвиняемый>".
 // Only the accused — the side after "на [пользователя]" / "против" — should be
@@ -1770,7 +1791,7 @@ export function postMatchesSubject(body: string, username: string, id: string): 
       if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
       continue;
     }
-    const subjectLine = SUBJECT_LINE_RE.test(line) || labelAbove;
+    const subjectLine = SUBJECT_LINE_RE.test(line) || labelAbove || handleOnlyLine(line);
     // A pure contact/ad line (dispute footer, "по рекламе", "менеджер") is not
     // an accusation.
     if (!(CONTACT_LINE_RE.test(line) && !subjectLine)) {
@@ -1792,26 +1813,24 @@ async function userSearchChannel(
   try {
     const { client } = await userbot();
     const peer = await userInputPeer(client, channelRef(channel));
-    const toHits = (msgs: TgMsgLite[]): CheckHit[] => {
-      const out: CheckHit[] = [];
-      for (const m of msgs || []) {
-        const body = m.message || "";
-        if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
-        out.push({
-          channelId: channel.id,
-          channelTitle: channel.title || "канал",
-          messageId: m.id,
-          link: messageLink(channel, m.id),
-          date: (m.date || 0) * 1000,
-          snippet: snippetAround(body, subject.username || subject.id),
-        });
-      }
-      return out;
-    };
-    // Server search first; if it surfaced no actual accusation, scan the recent
-    // history (Telegram's FTS misses many posts).
-    let out = toHits(await serverSearch(client, peer, query));
-    if (!out.length) out = toHits(await scanRecent(client, peer));
+    // Merge the server full-text search (reaches old posts) with a cached scan of
+    // recent history (covers what Telegram's FTS misses). Dedup by message id.
+    const byId = new Map<number, TgMsgLite>();
+    for (const m of await serverSearch(client, peer, query)) if (m.id) byId.set(m.id, m);
+    for (const m of await scanRecentCached(client, peer, chatIdKey(channel.id))) if (m.id) byId.set(m.id, m);
+    const out: CheckHit[] = [];
+    for (const m of byId.values()) {
+      const body = m.message || "";
+      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
+      out.push({
+        channelId: channel.id,
+        channelTitle: channel.title || "канал",
+        messageId: m.id,
+        link: messageLink(channel, m.id),
+        date: (m.date || 0) * 1000,
+        snippet: snippetAround(body, subject.username || subject.id),
+      });
+    }
     return out;
   } catch (err) {
     const wait = floodSeconds(err);
@@ -1857,21 +1876,17 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
     try {
       const { client } = await userbot();
       const peer = await userInputPeer(client, channelRef(ch));
-      const relevantOf = (msgs: TgMsgLite[]) => (msgs || []).filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
-      // Server search, then recent-history scan if it surfaced no accusation.
-      let msgs = await serverSearch(client, peer, q);
-      let relevant = relevantOf(msgs);
-      let how = "поиск";
-      if (!relevant.length) {
-        msgs = await scanRecent(client, peer);
-        relevant = relevantOf(msgs);
-        how = "скан";
-      }
-      const mentioned = (msgs || []).filter((m) => m.id && mentions(m.message || ""));
+      // Merge server search + cached recent-history scan, same as the real check.
+      const byId = new Map<number, TgMsgLite>();
+      for (const m of await serverSearch(client, peer, q)) if (m.id) byId.set(m.id, m);
+      for (const m of await scanRecentCached(client, peer, chatIdKey(ch.id))) if (m.id) byId.set(m.id, m);
+      const msgs = [...byId.values()];
+      const mentioned = msgs.filter((m) => m.id && mentions(m.message || ""));
+      const relevant = msgs.filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
       total += relevant.length;
       // "упомянут" = handle/id appears at all; "в тему" = actually accused (kept).
       lines.push(
-        `• ${ch.title || ch.username || ch.id}: ${how} ${(msgs || []).length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
+        `• ${ch.title || ch.username || ch.id}: просмотрено ${msgs.length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
       );
     } catch (err) {
       lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
