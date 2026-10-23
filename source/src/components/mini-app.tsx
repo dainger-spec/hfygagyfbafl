@@ -801,6 +801,17 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     img.src = FROG_ANIM;
   }, []);
 
+  // After a few seconds of searching, a grey note says it can take up to 30 s.
+  const [slowSearch, setSlowSearch] = useState(false);
+  useEffect(() => {
+    if (!loading) {
+      setSlowSearch(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSlowSearch(true), 4000);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
+
   const [captcha, setCaptcha] = useState<string | null>(null);
   const [capAnswer, setCapAnswer] = useState("");
   const [capMsg, setCapMsg] = useState("");
@@ -975,6 +986,9 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
             />
             <p className="text-sm font-semibold text-muted">{t(locale, "checkChecking")}</p>
             <div className="epb-progress h-1.5 w-48 max-w-full rounded-full bg-surface" />
+            {slowSearch ? (
+              <p className="epb-frog-in max-w-xs text-xs leading-relaxed text-muted/80">{t(locale, "checkSlow")}</p>
+            ) : null}
           </div>
         ) : null}
 

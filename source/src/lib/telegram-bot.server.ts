@@ -4641,11 +4641,24 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
   }
   const locale = langOf(chatId);
   await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
+  // A slow search gets a "can take up to 30 s" note, removed once the result is in.
+  let slowNote: Promise<{ message_id: number } | null> | null = null;
+  const slowTimer = setTimeout(() => {
+    slowNote = tgSoft<{ message_id: number }>("sendMessage", {
+      chat_id: chatId,
+      text: locale === "en" ? "⏳ The search can take up to 30 seconds. Please wait." : "⏳ Поиск может продлиться до 30 сек. Пожалуйста, ожидайте.",
+    });
+  }, 4000);
   let res: CheckResult;
   try {
     res = await checkCounterparty(input);
   } catch {
     res = { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
+  }
+  clearTimeout(slowTimer);
+  if (slowNote) {
+    const note = await (slowNote as Promise<{ message_id: number } | null>);
+    if (note?.message_id) void tgSoft("deleteMessage", { chat_id: chatId, message_id: note.message_id });
   }
   await sendCeMessage(chatId, formatBotCheck(locale, input, res), {
     reply_markup: checkResultKeyboard(locale),
