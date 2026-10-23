@@ -2465,8 +2465,6 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
   const q = uname || id;
   if (!q) return "Укажите @username или ID для проверки.";
   if (!hasUserbot()) return "Юзербот не подключён (нет сессии). Подключите: /userbot.";
-  const channels = checkChannels();
-  if (!channels.length) return "Не выбрано ни одного канала для поиска. Выберите: /userbot → каналы.";
   const st = await userbotStatus();
   if (!st.ok) return `Аккаунт не отвечает: ${st.error || "ошибка"}`;
   // Also resolve the username to a numeric id and match on that — blacklist
@@ -2479,36 +2477,44 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
   const idDigits = (resolvedId || "").replace(/\D/g, "");
   const mentions = (body: string) =>
     (uname && body.toLowerCase().includes(uname)) || (idDigits.length >= 5 && body.includes(idDigits));
-  const lines: string[] = [
-    `Аккаунт: ${st.name || "ок"}. Каналов: ${channels.length}. Ищу «${q}»${resolvedId && resolvedId !== q ? ` (id ${resolvedId})` : ""}…`,
-  ];
+  const lines: string[] = [`Аккаунт: ${st.name || "ок"}. Ищу «${q}».`];
+  if (uname && !id) {
+    lines.push(
+      resolvedId
+        ? `ID по нику: ${resolvedId} (ищу и по нему).`
+        : "ID по нику узнать не удалось — аккаунт удалён, сменил ник или Telegram не ответил. Ищу только по нику.",
+    );
+  }
+  lines.push("");
+  const subject = { username: uname, id: resolvedId, nick: /[_.]/.test(uname) ? uname : "" };
   let total = 0;
-  for (const ch of channels) {
-    try {
-      const { client } = await userbot();
-      const peer = await userInputPeer(client, channelRef(ch));
-      // Merge server search + cached recent-history scan, same as the real check.
-      const byId = new Map<number, TgMsgLite>();
-      for (const m of await serverSearch(client, peer, q)) if (m.id) byId.set(m.id, m);
-      for (const m of await scanRecentCached(client, peer, chatIdKey(ch.id))) if (m.id) byId.set(m.id, m);
-      const msgs = [...byId.values()];
-      const strict = isStrictChannel(ch);
-      const mentioned = msgs.filter((m) => m.id && mentions(m.message || ""));
-      const relevant = msgs.filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId, strict));
-      total += relevant.length;
-      // "упомянут" = handle/id appears at all; "в тему" = actually accused (kept).
-      lines.push(
-        `• ${ch.title || ch.username || ch.id}: просмотрено ${msgs.length}, упомянут ${mentioned.length}, в тему ${relevant.length}`,
-      );
-    } catch (err) {
-      lines.push(`• ${ch.title || ch.username || ch.id}: ошибка — ${(err as Error)?.message || String(err)}`);
+  for (const ch of mirrorChannels()) {
+    const title = ch.title || ch.username || ch.id;
+    // The local copy: what a real check uses.
+    const m = loadMirror(ch);
+    const found = m.msgs.size ? searchMirror(ch, m, subject) : [];
+    total += found.length;
+    let line =
+      `• ${title}: копия ${m.msgs.size.toLocaleString("ru-RU")} постов (${m.complete ? "вся история" : "докачивается"}) — ` +
+      `найдено ${found.length}${found[0] ? ` (${found[0].link})` : ""}`;
+    // Telegram's own search, for comparison (only for the connected channels).
+    if (isCheckChannel(ch.id)) {
+      try {
+        const { client } = await userbot();
+        const peer = await userInputPeer(client, channelRef(ch));
+        const byId = new Map<number, TgMsgLite>();
+        for (const msg of await serverSearch(client, peer, q)) if (msg.id) byId.set(msg.id, msg);
+        const msgs = [...byId.values()];
+        const mentioned = msgs.filter((x) => x.id && mentions(x.message || ""));
+        const relevant = msgs.filter((x) => x.id && postMatchesSubject(x.message || "", uname, resolvedId, isStrictChannel(ch)));
+        line += `; поиск Telegram: упомянут ${mentioned.length}, в тему ${relevant.length}`;
+      } catch (err) {
+        line += `; поиск Telegram: ошибка — ${(err as Error)?.message || String(err)}`;
+      }
     }
+    lines.push(line);
   }
-  lines.push(`Итого по делу: ${total}.`);
-  lines.push("", "Локальная копия каналов (по ней идёт быстрый поиск):");
-  for (const st of mirrorStatus()) {
-    lines.push(`• ${st.title}: ${st.posts.toLocaleString("ru-RU")} постов — ${st.complete ? "вся история" : "докачивается"}`);
-  }
+  lines.push("", `Итого по копии: ${total}.`);
   return lines.join("\n");
 }
 
