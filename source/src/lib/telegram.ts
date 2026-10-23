@@ -430,6 +430,25 @@ export function openExternal(url: string) {
 }
 
 // Phone vibration: Telegram's haptics (iPhone and Android), else the browser's vibrate().
+// Telegram's notification pattern (a distinct double buzz), with a plain
+// vibration pattern as the fallback outside Telegram.
+export function hapticNotify(type: "success" | "warning" | "error") {
+  try {
+    const hf = window.Telegram?.WebApp?.HapticFeedback;
+    if (hf?.notificationOccurred && window.Telegram?.WebApp?.isVersionAtLeast?.("6.1")) {
+      hf.notificationOccurred(type);
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    navigator.vibrate?.(type === "error" ? [30, 60, 30] : [18, 50, 18]);
+  } catch {
+    /* no vibration */
+  }
+}
+
 export function haptic(style: "light" | "medium" | "heavy" | "rigid" | "soft") {
   try {
     const hf = window.Telegram?.WebApp?.HapticFeedback;

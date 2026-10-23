@@ -9,6 +9,7 @@ import {
   CHANNEL_URL,
   lockTelegramViewport,
   haptic,
+  hapticNotify,
   openExternal,
   readTelegramWebUser,
   telegramInitData,
@@ -801,7 +802,10 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     setCapMsg(msg);
     try {
       const r = await getCaptcha({ data: { initData: telegramInitData() } });
-      if (r.ok) setCaptcha(r.image);
+      if (r.ok) {
+        if (!captcha) hapticNotify("warning");
+        setCaptcha(r.image);
+      }
       else {
         setCaptcha(null);
         setError(t(locale, "capTooMany"));
@@ -920,10 +924,10 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         </div>
         {error ? <p className="text-sm text-danger">{error}</p> : null}
         {captcha ? (
-          <div className="space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+          <div className="epb-cap-card space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
             <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "capHint")}</p>
-            <img src={captcha} alt="" draggable={false} className="w-full select-none rounded-xl" />
+            <img key={captcha} src={captcha} alt="" draggable={false} className="epb-cap-img w-full select-none rounded-xl" />
             <Input
               value={capAnswer}
               onChange={(e) => setCapAnswer(e.target.value)}

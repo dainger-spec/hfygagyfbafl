@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { EvidencePicker } from "@/components/evidence-picker";
 import { persistEvidence } from "@/lib/evidence";
-import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount, haptic } from "@/lib/telegram";
+import { readTelegramWebUser, parseTelegramInput, lookupTelegramHandle, telegramInitData, parseDamageAmount, haptic, hapticNotify } from "@/lib/telegram";
 import { getCaptcha, solveCaptcha, submitToTelegram } from "@/lib/telegram-bot.functions";
 import { useBlacklistStore } from "@/lib/store";
 import { t } from "@/lib/i18n";
@@ -64,7 +64,10 @@ export function ApplyForm({
     setCapMsg(msg);
     try {
       const r = await getCaptcha({ data: { initData: telegramInitData(), purpose: "submit" } });
-      if (r.ok) setCaptcha(r.image);
+      if (r.ok) {
+        if (!captcha) hapticNotify("warning");
+        setCaptcha(r.image);
+      }
       else {
         setCaptcha(null);
         setFormError(t(locale, r.error === "too many" ? "capTooMany" : "errOpenBot"));
@@ -168,6 +171,9 @@ export function ApplyForm({
     }
 
     setSending(true);
+    const sendStarted = Date.now();
+    // Keep the sending screen up for at least 4 s so it never just flashes.
+    const holdSending = () => new Promise<void>((r) => window.setTimeout(r, Math.max(0, 4000 - (Date.now() - sendStarted))));
     try {
       const uploaded = await persistEvidence(files);
       setFiles(uploaded);
@@ -194,6 +200,7 @@ export function ApplyForm({
           window.setTimeout(() => resolve({ ok: false, error: t(locale, "errTimeout") }), 90_000),
         ),
       ]);
+      await holdSending();
       if (!tg.ok && tg.error === "captcha") {
         capPassed.current = false;
         await loadCaptcha();
@@ -208,6 +215,7 @@ export function ApplyForm({
       setIdentity({ username: vUser, telegramId: vId, firstName: tgUser?.firstName || identity.firstName });
       onSubmitted(t(locale, "sentOk"));
     } catch {
+      await holdSending();
       setFormError(t(locale, "sentFail"));
     } finally {
       setSending(false);
@@ -221,11 +229,11 @@ export function ApplyForm({
       className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
     >
       {captcha && !sending ? (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-bg/95 px-5 backdrop-blur-sm">
-          <div className="w-full max-w-md space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+        <div className="epb-cap-backdrop absolute inset-0 z-30 flex items-center justify-center bg-bg/95 px-5 backdrop-blur-sm">
+          <div className="epb-cap-card w-full max-w-md space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
             <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "capHintSubmit")}</p>
-            <img src={captcha} alt="" draggable={false} className="w-full select-none rounded-xl" />
+            <img key={captcha} src={captcha} alt="" draggable={false} className="epb-cap-img w-full select-none rounded-xl" />
             <Input
               value={capAnswer}
               onChange={(e) => setCapAnswer(e.target.value)}

@@ -222,3 +222,30 @@
   background-clip: text;
   color: transparent;
 }
+
+/* Captcha appearing: backdrop fades in, the card rises and settles, the picture
+   un-blurs a beat later. */
+.epb-cap-backdrop {
+  animation: epb-cap-fade 0.35s ease-out both;
+}
+.epb-cap-card {
+  animation: epb-cap-in 0.55s cubic-bezier(0.2, 0.9, 0.25, 1.12) both;
+}
+.epb-cap-img {
+  animation: epb-cap-img 0.6s ease-out 0.15s both;
+}
+@keyframes epb-cap-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes epb-cap-in {
+  from { opacity: 0; transform: translateY(28px) scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes epb-cap-img {
+  from { opacity: 0; filter: blur(8px); transform: scale(1.04); }
+  to { opacity: 1; filter: none; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .epb-cap-backdrop, .epb-cap-card, .epb-cap-img { animation: none; }
+}
