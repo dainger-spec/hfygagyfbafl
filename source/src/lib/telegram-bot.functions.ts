@@ -151,6 +151,15 @@ export const getSponsorStats = createServerFn({ method: "GET" }).handler(async (
   return sponsorStats();
 });
 
+export const getLatestParsed = createServerFn({ method: "POST" })
+  .validator(z.object({ initData: z.string().max(16384) }))
+  .handler(async ({ data }) => {
+    const bot = await import("@/lib/telegram-bot.server");
+    const gate = bot.allowCheck(data.initData);
+    if (!gate.ok) return { ok: false as const, error: gate.error };
+    return { ok: true as const, items: bot.latestParsed(30) };
+  });
+
 export const getRecentBlacklist = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384) }))
   .handler(async ({ data }) => {

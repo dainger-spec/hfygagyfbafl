@@ -6456,6 +6456,52 @@ export function publicBaseStats(): { accounts: number; sources: number; updatedA
   return { accounts, sources: checkSources().length, updatedAt };
 }
 
+// The newest posts copied from the blacklist channels, for the list at the bottom
+// of the app's home screen: the accused account, where and when, and the damage
+// when the post has a "Сумма/Ущерб" field. One row per account, cached a minute.
+export type LatestParsed = { id: string; account: string; source: string; date: number; amount?: string };
+let latestParsedCache = { at: 0, items: [] as LatestParsed[] };
+const AMOUNT_RE = /(?:сумм[аы]?|ущерб|damage|amount)\s*[:\-–—]?\s*([~≈]?\s*\d[\d\s.,]*\s*(?:\$|usdt|usd|€|eur|евро|руб\.?|₽|rub|грн|₴|k|к)?)/i;
+export function latestParsed(limit = 30): LatestParsed[] {
+  if (!checkEnabled()) return [];
+  if (Date.now() - latestParsedCache.at < 60_000) return latestParsedCache.items.slice(0, limit);
+  const rows: (LatestParsed & { key: string })[] = [];
+  for (const c of mirrorChannels()) {
+    const m = mirrors.get(chatIdKey(c.id)) || loadMirror(c);
+    if (!m.msgs.size) continue;
+    const parsed = mirrorAccused(c, m).perMsg;
+    const newest = [...m.msgs.values()].sort((x, y) => y.date - x.date || y.id - x.id);
+    let taken = 0;
+    for (const msg of newest) {
+      if (taken >= limit) break;
+      const p = parsed.get(msg.id);
+      if (!p || (!p.hs.length && !p.is.length)) continue;
+      const account = p.hs.length ? p.hs.slice(0, 2).join(", ") : `ID ${p.is[0]}`;
+      const amount = msg.text.match(AMOUNT_RE)?.[1]?.replace(/\s+/g, " ").trim();
+      rows.push({
+        key: (p.hs[0] || p.is[0] || "").toLowerCase(),
+        id: `${m.key}:${msg.id}`,
+        account,
+        source: checkSourceName(c.title || c.username || ""),
+        date: msg.date * 1000,
+        ...(amount && /\d/.test(amount) ? { amount: amount.slice(0, 24) } : {}),
+      });
+      taken++;
+    }
+  }
+  rows.sort((x, y) => y.date - x.date);
+  const seen = new Set<string>();
+  const items: LatestParsed[] = [];
+  for (const { key, ...row } of rows) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(row);
+    if (items.length >= 30) break;
+  }
+  latestParsedCache = { at: Date.now(), items };
+  return items.slice(0, limit);
+}
+
 // The base size for the /start card, counted at most once a minute (every user
 // sees the menu, the count only needs to be roughly current).
 let baseCountCache = { at: 0, n: 0 };

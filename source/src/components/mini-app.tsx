@@ -15,7 +15,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -406,9 +406,31 @@ function Home({
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
   const canUse = Boolean(identity.telegramId);
   const [noBanners, setNoBanners] = useState(false);
+  const latest = useLatestParsed(checkOn && canUse);
+  // The home screen keeps its full height minus a strip where the latest list
+  // peeks out; scrolling snaps between the two (home ↔ list over the whole screen).
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [viewH, setViewH] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => setViewH(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const withList = latest.length > 0 && viewH > 0;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
+    <div
+      ref={scrollRef}
+      className={cn(
+        "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]",
+        withList && "snap-y snap-mandatory",
+      )}
+    >
+      <div className={cn("flex shrink-0 flex-col", withList && "snap-start")} style={withList ? { minHeight: viewH - LATEST_PEEK } : { flexGrow: 1 }}>
       <Banners onLoaded={(count) => setNoBanners(count === 0)} />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
@@ -449,7 +471,95 @@ function Home({
       >
         {t(locale, "ownersLink")}
       </button>
+      </div>
+      {withList ? <LatestSheet items={latest} height={viewH} /> : null}
     </div>
+  );
+}
+
+type LatestItem = { id: string; account: string; source: string; date: number; amount?: string };
+const LATEST_PEEK = 96; // px of the list visible under the home screen
+const LATEST_CACHE_KEY = "epb-latest";
+
+function useLatestParsed(enabled: boolean): LatestItem[] {
+  const [items, setItems] = useState<LatestItem[]>(() => {
+    try {
+      const raw = sessionStorage.getItem(LATEST_CACHE_KEY);
+      return raw ? (JSON.parse(raw) as LatestItem[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    void getLatestParsed({ data: { initData: telegramInitData() } })
+      .then((r) => {
+        if (!alive || !r.ok) return;
+        const list = r.items as LatestItem[];
+        setItems(list);
+        try {
+          sessionStorage.setItem(LATEST_CACHE_KEY, JSON.stringify(list));
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [enabled]);
+  return enabled ? items : [];
+}
+
+function agoText(locale: Locale, ms: number): string {
+  const mins = Math.max(0, Math.floor((Date.now() - ms) / 60_000));
+  if (mins < 1) return t(locale, "agoNow");
+  if (mins < 60) return t(locale, "agoMin", { n: mins });
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return t(locale, "agoHour", { n: hours });
+  const days = Math.floor(hours / 24);
+  if (days < 30) return t(locale, "agoDay", { n: days });
+  return new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "numeric", month: "short", year: "numeric" });
+}
+
+// "Latest blacklists": a sheet under the home screen. Its top peeks out; a swipe
+// up snaps it over the whole screen, scrolling back to its top snaps home again.
+function LatestSheet({ items, height }: { items: LatestItem[]; height: number }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  return (
+    <section className="epb-latest-sheet -mx-4 shrink-0 snap-start rounded-t-[28px]" style={{ minHeight: height }}>
+      <div className="epb-latest-head sticky top-0 z-10 rounded-t-[28px] px-5 pt-2.5 pb-3">
+        <div className="mx-auto h-1 w-10 rounded-full bg-fg/20" />
+        <div className="mt-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-[15px] font-bold">
+            <ShieldAlert className="size-4 text-gold" />
+            {t(locale, "latestTitle")}
+          </div>
+          <span className="rounded-full bg-gold/10 px-2 py-0.5 text-xs font-bold text-gold">{items.length}</span>
+        </div>
+      </div>
+      <ul className="space-y-2 px-4 pb-8">
+        {items.map((e, i) => (
+          <li
+            key={e.id}
+            className="epb-latest-row flex items-center gap-3 rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]"
+            style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}
+          >
+            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-danger/10 text-sm font-extrabold text-danger uppercase">
+              {(e.account.replace(/^@|^ID\s*/i, "")[0] || "?").toString()}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold">{e.account}</span>
+              <span className="mt-0.5 block truncate text-xs text-muted">
+                {e.source} · {agoText(locale, e.date)}
+              </span>
+            </span>
+            {e.amount ? <span className="shrink-0 rounded-full bg-danger/10 px-2 py-0.5 text-xs font-bold text-danger">{e.amount}</span> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

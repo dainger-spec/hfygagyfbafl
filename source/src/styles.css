@@ -282,3 +282,29 @@
     0 0 0 1px rgba(241, 187, 76, 0.2),
     0 12px 32px -18px rgba(241, 187, 76, 0.35);
 }
+
+/* "Latest blacklists" sheet under the home screen. */
+.epb-latest-sheet {
+  background: #0f0f0f;
+  box-shadow:
+    0 -1px 0 rgba(241, 187, 76, 0.18),
+    0 -18px 40px -20px rgba(241, 187, 76, 0.25);
+}
+.epb-latest-head {
+  background: #0f0f0f;
+  box-shadow: 0 10px 14px -10px #0f0f0f;
+}
+.epb-latest-row {
+  animation: epb-latest-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes epb-latest-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .epb-latest-row {
+    animation: none;
+  }
+}
