@@ -355,25 +355,27 @@ function BaseCard() {
         : t(locale, "baseUpdatedHour", { n: Math.floor(mins / 60) });
 
   return (
-    <div className="mx-auto w-full max-w-sm px-2 pt-3">
-      <div className="epb-base-card relative overflow-hidden rounded-2xl px-5 py-4">
+    <div className="mx-auto w-full max-w-md pt-3">
+      <div className="epb-base-card relative overflow-hidden rounded-2xl px-4 py-2.5">
         <img
           src="/brand/emblem-v2.webp"
           alt=""
           aria-hidden
           draggable={false}
-          className="pointer-events-none absolute -right-8 -top-3 h-[150%] w-auto select-none opacity-[0.18]"
+          className="pointer-events-none absolute -right-4 top-1/2 h-[180%] w-auto -translate-y-1/2 select-none opacity-[0.16]"
         />
-        <div className="relative">
-          <div className="text-[11px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
-          <div className="epb-gold-text mt-1 font-display text-4xl leading-none font-extrabold tracking-tight">
-            {stats.accounts.toLocaleString(locale === "en" ? "en-US" : "ru-RU")}
-          </div>
-          <div className="mt-1.5 text-sm text-muted">{t(locale, "baseSub", { n, src })}</div>
-          <div className="mt-2.5 inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2.5 py-1 text-xs font-semibold text-emerald-300">
+        <div className="relative flex items-center justify-between gap-3">
+          <div className="text-[10px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
+          <div className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-300">
             <span className="size-1.5 rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(110,231,183,0.9)]" />
             {updated}
           </div>
+        </div>
+        <div className="relative mt-0.5 flex items-baseline gap-2">
+          <span className="epb-gold-text font-display text-2xl leading-tight font-extrabold tracking-tight">
+            {stats.accounts.toLocaleString(locale === "en" ? "en-US" : "ru-RU")}
+          </span>
+          <span className="truncate text-xs text-muted">{t(locale, "baseSub", { n, src })}</span>
         </div>
       </div>
     </div>
