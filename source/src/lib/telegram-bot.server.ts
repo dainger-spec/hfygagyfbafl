@@ -2002,6 +2002,48 @@ function arbitrationAccused(line: string, strict = false): string {
 // Does this post accuse `username`/`id`? In a pure blacklist channel any mention
 // counts (loose); in a strict channel only a structured accusation does.
 // Exported for tests.
+// Most blacklist posts name the accused in a field — "Кидала: @x", "Тег: @x",
+// "ID: 123", or card lines like "👤 123" / "🌐 @x" — and mention other people
+// (the garant, who recommended them, a group) only inside the story. When a post
+// has such fields, only the people in them are accused.
+const INVISIBLE_RE = /[\u200B-\u200F\u2060-\u206F\uFE0E\uFE0F]/g;
+const NAME_TOKEN_RE = /@([A-Za-z][A-Za-z0-9_]{3,31})|(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})|(?<![\d/.,])(\d{5,15})(?![\d/.,%$€₽])/gi;
+// Field labels that are not about the accused (and amounts/dates).
+const FIELD_NOT_ACCUSED_RE =
+  /(гарант|заявител|истец|пострадавш|жертв|автор|свидетел|рекоменд|связ|контакт|админ|модер|владел|owner|канал|чат|групп|предложк|вопрос|оспор|обжал|support|поддержк|реклам|менеджер|наш|подпис|сумм|ущерб|amount|цен|дат|обновл|итог|оплат|телефон|карт)/iu;
+
+function nameTokens(line: string): { value: string; index: number }[] {
+  const out: { value: string; index: number }[] = [];
+  for (const m of line.matchAll(NAME_TOKEN_RE)) {
+    const value = m[1] || m[2] ? `@${(m[1] || m[2])!.toLowerCase()}` : m[3]!;
+    out.push({ value, index: m.index || 0 });
+  }
+  return out;
+}
+
+// Names standing in accused fields of the post (empty: the post has no fields).
+function accusedFields(body: string): Set<string> {
+  const fields = new Set<string>();
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.replace(INVISIBLE_RE, "");
+    const tokens = nameTokens(line);
+    if (!tokens.length) continue;
+    const prefix = line
+      .slice(0, tokens[0]!.index)
+      .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u20E3]/gu, " ")
+      .replace(/[^\p{L}\p{N}\s:\-—–]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const label = prefix.replace(/[:\-—–\s]+$/u, "").trim();
+    const hasSep = /[:\-—–]$/u.test(prefix);
+    // "@x …" / "👤 123" (nothing before the name) or a short "Label: @x".
+    const isField = !label || (hasSep && label.split(" ").length <= 3);
+    if (!isField || (label && FIELD_NOT_ACCUSED_RE.test(label))) continue;
+    for (const t of tokens) fields.add(t.value);
+  }
+  return fields;
+}
+
 // `nick` is a forum nickname typed as free text (may contain spaces); it is only
 // ever matched strictly (arbitration accused side or an accused label), since a
 // plain word would otherwise match unrelated posts.
@@ -2014,6 +2056,15 @@ export function postMatchesSubject(body: string, username: string, id: string, s
   if (ignoredName && !id && !nickName) return false;
   const named = (text: string) =>
     (!ignoredName && usernameOnLine(text, uname)) || idOnLine(text, id) || (Boolean(nickName) && nickOnLine(text, nickName));
+  // A post with accused fields (plain blacklist channels): the people in the
+  // fields are accused; anyone else only by a one-name line with an accusation
+  // word (checked in the loop below).
+  const fields = strict ? new Set<string>() : accusedFields(body);
+  const structured = fields.size > 0;
+  if (structured) {
+    const idDigits0 = (id || "").replace(/\D/g, "");
+    if ((!ignoredName && fields.has(`@${uname}`)) || (idDigits0.length >= 5 && fields.has(idDigits0))) return true;
+  }
   let labelAbove = false;
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer (both modes).
@@ -2055,6 +2106,15 @@ export function postMatchesSubject(body: string, username: string, id: string, s
     if (uname) rest = rest.replace(new RegExp("@?" + escapeRe(uname), "ig"), " ");
     const idDigits = (id || "").replace(/\D/g, "");
     if (idDigits.length >= 5) rest = rest.replace(new RegExp(idDigits, "g"), " ");
+    if (structured) {
+      // In a post with fields, a name inside the story counts only when it is
+      // the only name on the line and the line accuses ("его второй акк @x тоже
+      // кинул"), never "по рекомендации @a и @b обратился к @c".
+      const single = nameTokens(line.replace(INVISIBLE_RE, "")).length === 1;
+      if (single && ACCUSATION_LINE_RE.test(rest) && !NON_ACCUSATION_LINE_RE.test(rest)) return true;
+      if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
+      continue;
+    }
     // A contact/dispute/ad footer line is never an accusation (both modes).
     if (!NON_ACCUSATION_LINE_RE.test(rest)) {
       if (!strict) return true; // pure blacklist channel: a mention is an accusation
