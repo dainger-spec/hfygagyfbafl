@@ -128,6 +128,7 @@ type Bindings = {
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
   userbotApi?: { apiId: number; apiHash: string };
   blacklistCleanupStamp?: string;
+  findsCleanupStamp?: string;
   checkEnabled?: boolean;
   banners?: Banner[];
   manualBlacklist?: ManualBlacklistEntry[];
@@ -352,6 +353,15 @@ if (bindings.blacklistCleanupStamp !== BLACKLIST_CLEANUP_STAMP) {
   }
   if (changed) savePending();
   bindings.blacklistCleanupStamp = BLACKLIST_CLEANUP_STAMP;
+  saveBindings();
+}
+
+// One-time wipe of recent finds polluted by the earlier loose matcher (false
+// positives like HARRYFRAUD from WWH ad-stat posts). They re-populate correctly.
+const FINDS_CLEANUP_STAMP = "finds-v1";
+if (bindings.findsCleanupStamp !== FINDS_CLEANUP_STAMP) {
+  if (bindings.recentFinds?.length) bindings.recentFinds = [];
+  bindings.findsCleanupStamp = FINDS_CLEANUP_STAMP;
   saveBindings();
 }
 
@@ -1720,6 +1730,19 @@ function escapeRe(s: string): string {
 // word here to exclude more, remove one to match more.
 const NON_ACCUSATION_LINE_RE =
   /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|гарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|сервис|магазин|\bshop\b|подписк|вступай|вступить|присоединя|заказать|скидк|акци|цен[аы])/iu;
+// Strict channels (e.g. WWH) are NOT pure blacklists — they mix arbitrations with
+// ad-stat rankings and other posts, so a bare mention there is often not an
+// accusation. In strict mode a mention counts only with an accusation signal on
+// the line (or the accused label just above it), plus arbitration lines.
+const ACCUSATION_LINE_RE =
+  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди)/iu;
+const ACCUSED_LABEL_RE =
+  /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant)\s*:?\s*$/iu;
+
+function isStrictChannel(channel: CheckChannel): boolean {
+  return /wwh/i.test(channel.title || "") || /wwh/i.test(channel.username || "");
+}
+
 // Known arbiter / service / off-limits handles that are never the accused party
 // and never shown in search results.
 const IGNORE_USERNAMES = new Set(["europepromo", "ctoroot", "sbepbank", BOT_USERNAME.toLowerCase()]);
@@ -1752,26 +1775,42 @@ function arbitrationAccused(line: string): string {
   return m[1].split(/\s+(?:от|from|by|заявител\S*|подал\S*|reporter)\s+/i)[0] || "";
 }
 
-// Does this post accuse `username`/`id`? Exported for tests.
-export function postMatchesSubject(body: string, username: string, id: string): boolean {
+// Does this post accuse `username`/`id`? In a pure blacklist channel any mention
+// counts (loose); in a strict channel only a structured accusation does.
+// Exported for tests.
+export function postMatchesSubject(body: string, username: string, id: string, strict = false): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
   const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
   // Nothing to match on (handle is an off-limits/service handle and no id given).
   if (ignoredName && !id) return false;
+  let labelAbove = false;
   for (const line of body.split(/\r?\n/)) {
-    // Arbitration lines: match only the accused side, never the filer.
+    // Arbitration lines: match only the accused side, never the filer (both modes).
     if (/арбитраж|arbitr/i.test(line)) {
       const accused = arbitrationAccused(line);
       if (accused && ((!ignoredName && usernameOnLine(accused, uname)) || idOnLine(accused, id))) return true;
+      if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
     }
     const hasId = idOnLine(line, id);
     const hasU = !ignoredName && usernameOnLine(line, uname);
-    if (!hasId && !hasU) continue;
-    // In a blacklist channel a mention is an accusation unless the line is a
-    // contact/dispute/ad footer.
-    if (NON_ACCUSATION_LINE_RE.test(line)) continue;
-    return true;
+    if (!hasId && !hasU) {
+      if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
+      continue;
+    }
+    // Strip the matched handle/id from the line so keywords INSIDE it (e.g. the
+    // "fraud" in @HARRYFRAUD) don't count as an accusation or a footer word.
+    let rest = line;
+    if (uname) rest = rest.replace(new RegExp("@?" + escapeRe(uname), "ig"), " ");
+    const idDigits = (id || "").replace(/\D/g, "");
+    if (idDigits.length >= 5) rest = rest.replace(new RegExp(idDigits, "g"), " ");
+    // A contact/dispute/ad footer line is never an accusation (both modes).
+    if (!NON_ACCUSATION_LINE_RE.test(rest)) {
+      if (!strict) return true; // pure blacklist channel: a mention is an accusation
+      // strict channel: require an accusation signal on the line or the label above it
+      if (ACCUSATION_LINE_RE.test(rest) || labelAbove) return true;
+    }
+    if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
   }
   return false;
 }
@@ -1785,6 +1824,7 @@ async function userSearchChannel(
   try {
     const { client } = await userbot();
     const peer = await userInputPeer(client, channelRef(channel));
+    const strict = isStrictChannel(channel);
     // Merge the server full-text search (reaches old posts) with a cached scan of
     // recent history (covers what Telegram's FTS misses). Dedup by message id.
     const byId = new Map<number, TgMsgLite>();
@@ -1793,7 +1833,7 @@ async function userSearchChannel(
     const out: CheckHit[] = [];
     for (const m of byId.values()) {
       const body = m.message || "";
-      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id)) continue;
+      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id, strict)) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
@@ -1853,8 +1893,9 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
       for (const m of await serverSearch(client, peer, q)) if (m.id) byId.set(m.id, m);
       for (const m of await scanRecentCached(client, peer, chatIdKey(ch.id))) if (m.id) byId.set(m.id, m);
       const msgs = [...byId.values()];
+      const strict = isStrictChannel(ch);
       const mentioned = msgs.filter((m) => m.id && mentions(m.message || ""));
-      const relevant = msgs.filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId));
+      const relevant = msgs.filter((m) => m.id && postMatchesSubject(m.message || "", uname, resolvedId, strict));
       total += relevant.length;
       // "упомянут" = handle/id appears at all; "в тему" = actually accused (kept).
       lines.push(
