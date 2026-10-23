@@ -736,7 +736,90 @@ type CheckData = {
   channels: { channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
   sourceHits?: Record<string, number>;
+  account?: {
+    id: string;
+    idSource: "input" | "telegram" | "posts";
+    usernames: string[];
+    name: string;
+    premium: boolean;
+    scam: boolean;
+    fake: boolean;
+    bot: boolean;
+    verified: boolean;
+    reg: { year: number; part: 0 | 1 | 2; later?: boolean } | null;
+    previous: { username: string; since: number; source: "post" | "bot"; where?: string }[];
+  };
 };
+
+function regText(locale: Locale, reg: NonNullable<CheckData["account"]>["reg"]): string {
+  if (!reg) return "";
+  const en = locale === "en";
+  if (reg.later) return en ? `late ${reg.year} or later` : `конец ${reg.year} или позже`;
+  return `${(en ? ["early", "mid", "late"] : ["начало", "середина", "конец"])[reg.part]} ${reg.year}`;
+}
+
+// What is known about the account itself: id, name, Telegram's own marks, an
+// estimated registration date and earlier usernames.
+function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const monthYear = (sec: number) => {
+    if (!sec) return "";
+    const d = new Date(sec * 1000);
+    return `${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+  };
+  const tags = [a.premium ? "⭐ Premium" : "", a.bot ? `🤖 ${t(locale, "accBot")}` : "", a.verified ? `✔️ ${t(locale, "accVerified")}` : ""].filter(Boolean);
+  return (
+    <div className="mb-4 space-y-2 rounded-2xl bg-surface/70 p-4 text-sm shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+      <p className="font-display text-base font-bold">👤 {t(locale, "accCardTitle")}</p>
+      {a.scam || a.fake ? (
+        <p className="flex items-center gap-2 rounded-xl bg-danger/10 px-3 py-2 font-semibold text-danger">
+          <ShieldAlert className="size-4 shrink-0" />
+          {t(locale, a.scam ? "accScam" : "accFake")}
+        </p>
+      ) : null}
+      {a.id ? (
+        <p>
+          <span className="text-muted">ID:</span> <span className="font-mono font-semibold">{a.id}</span>
+          {a.idSource === "posts" ? <span className="text-muted"> · {t(locale, "accFromPosts")}</span> : null}
+        </p>
+      ) : null}
+      {a.name ? (
+        <p>
+          <span className="text-muted">{t(locale, "accName")}:</span> {a.name}
+        </p>
+      ) : null}
+      {a.usernames.length ? (
+        <p>
+          <span className="text-muted">{t(locale, "accNow")}:</span> {a.usernames.map((u) => `@${u}`).join(", ")}
+        </p>
+      ) : a.idSource === "posts" ? (
+        <p className="text-muted">{t(locale, "accGone")}</p>
+      ) : null}
+      {tags.length ? <p className="text-muted">{tags.join(" · ")}</p> : null}
+      {a.reg ? (
+        <p>
+          <span className="text-muted">{t(locale, "accReg")}:</span> ≈ {regText(locale, a.reg)}{" "}
+          <span className="text-xs text-muted">({t(locale, "accRegEstimate")})</span>
+        </p>
+      ) : null}
+      {a.previous.length ? (
+        <div className="space-y-1 pt-1">
+          <p className="text-muted">{t(locale, "accPrev")}:</p>
+          {a.previous.slice(0, 6).map((p) => (
+            <p key={p.username} className="pl-2">
+              <span className="font-semibold">@{p.username}</span>
+              <span className="text-xs text-muted">
+                {" "}
+                — {p.source === "post" ? t(locale, "accPrevPost", { where: p.where || t(locale, "accBlacklist") }) : t(locale, "accPrevBot")}
+                {p.since ? `, ${monthYear(p.since)}` : ""}
+              </span>
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 type ScanSource = { key: string; title: string };
 
@@ -1150,7 +1233,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         ) : null}
 
         {data && !loading ? (
-          <div className="epb-frog-in">{found ? (
+          <div className="epb-frog-in">{data.account ? <AccountCardView a={data.account} /> : null}{found ? (
             <div className="space-y-4">
               {data.epb.length ? (
                 <div className="space-y-2">

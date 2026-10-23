@@ -421,9 +421,43 @@ function rememberUser(user?: { id?: number; username?: string } | null) {
   rememberHandle(user.username, String(user.id));
 }
 
+// Usernames seen for each account id, and when (unix seconds). Telegram keeps
+// no username history; this is what the bot itself has observed over time.
+const UNAME_HISTORY_PATH = join(DATA_DIR, "telegram-username-history.json");
+type UsernameSeen = { u: string; first: number; last: number };
+const usernameHistory: Record<string, UsernameSeen[]> = readJson<Record<string, UsernameSeen[]>>(UNAME_HISTORY_PATH) || {};
+let usernameHistoryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function noteUsername(id: string, username: string) {
+  const u = (username || "").replace(/^@/, "").toLowerCase();
+  if (!u || !/^\d{5,15}$/.test(id)) return;
+  const now = Math.floor(Date.now() / 1000);
+  const list = usernameHistory[id] || (usernameHistory[id] = []);
+  const seen = list.find((e) => e.u === u);
+  if (seen) {
+    if (now - seen.last < 6 * 3600) return;
+    seen.last = now;
+  } else {
+    list.push({ u, first: now, last: now });
+    if (list.length > 12) list.splice(0, list.length - 12);
+  }
+  const ids = Object.keys(usernameHistory);
+  if (ids.length > 40_000) for (const old of ids.slice(0, ids.length - 36_000)) delete usernameHistory[old];
+  if (usernameHistoryTimer) return;
+  usernameHistoryTimer = setTimeout(() => {
+    usernameHistoryTimer = null;
+    try {
+      writeJsonAtomic(UNAME_HISTORY_PATH, usernameHistory);
+    } catch {
+      /* ignore */
+    }
+  }, 5000);
+}
+
 function rememberHandle(username: string, id: string) {
   const key = username.replace(/^@/, "").toLowerCase();
   if (!key || !id || !/^\d{5,15}$/.test(id)) return;
+  noteUsername(id, key);
   if (idCache[key] === id) return;
   idCache[key] = id;
   const keys = Object.keys(idCache);
@@ -2643,6 +2677,91 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
 
 
 
+// What Telegram tells about an account when its username is resolved (no extra
+// request): name, all its usernames, and Telegram's own SCAM / FAKE marks.
+type TgUserRaw = {
+  id?: unknown;
+  username?: string;
+  usernames?: { username?: string; active?: boolean }[];
+  firstName?: string;
+  lastName?: string;
+  premium?: boolean;
+  scam?: boolean;
+  fake?: boolean;
+  bot?: boolean;
+  verified?: boolean;
+  deleted?: boolean;
+};
+type TgProfile = {
+  name: string;
+  usernames: string[];
+  premium: boolean;
+  scam: boolean;
+  fake: boolean;
+  bot: boolean;
+  verified: boolean;
+  at: number;
+};
+const profileCache = new Map<string, TgProfile>();
+
+function rememberProfile(id: string, u: TgUserRaw) {
+  const usernames = [u.username, ...(u.usernames || []).filter((x) => x.active !== false).map((x) => x.username)]
+    .filter((x): x is string => Boolean(x))
+    .map((x) => x.toLowerCase());
+  const unique = [...new Set(usernames)];
+  for (const name of unique) noteUsername(id, name);
+  profileCache.set(id, {
+    name: [u.firstName, u.lastName].filter(Boolean).join(" ").slice(0, 80),
+    usernames: unique,
+    premium: Boolean(u.premium),
+    scam: Boolean(u.scam),
+    fake: Boolean(u.fake),
+    bot: Boolean(u.bot),
+    verified: Boolean(u.verified),
+    at: Date.now(),
+  });
+  if (profileCache.size > 5000) profileCache.delete(profileCache.keys().next().value!);
+}
+
+// Telegram never tells when an account was created. Ids are handed out in
+// growing order, so known (id, month) points give an estimate: half-year
+// precision at best, shown as "≈ середина 2024 (оценка по ID)".
+const REG_ANCHORS: [number, number][] = [
+  [1, 2013.6],
+  [101_260_938, 2015.17],
+  [222_021_233, 2016.44],
+  [297_621_225, 2016.96],
+  [400_169_472, 2017.58],
+  [805_158_066, 2019.54],
+  [1_974_255_900, 2021.78],
+  [5_000_000_000, 2022.1],
+  [6_000_000_000, 2023.3],
+  [7_000_000_000, 2024.1],
+  [8_000_000_000, 2025.05],
+  [8_600_000_000, 2025.75],
+];
+
+export function registrationEstimate(id: string): { year: number; part: 0 | 1 | 2; later?: boolean } | null {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n < 1) return null;
+  let at = REG_ANCHORS[REG_ANCHORS.length - 1]![1];
+  let later = false;
+  if (n >= REG_ANCHORS[REG_ANCHORS.length - 1]![0]) later = true;
+  else {
+    for (let i = 1; i < REG_ANCHORS.length; i++) {
+      const [id1, t1] = REG_ANCHORS[i]!;
+      const [id0, t0] = REG_ANCHORS[i - 1]!;
+      if (n <= id1) {
+        at = t0 + ((n - id0) / (id1 - id0)) * (t1 - t0);
+        break;
+      }
+    }
+  }
+  const year = Math.floor(at);
+  const month = Math.min(11, Math.floor((at - year) * 12));
+  return { year, part: month < 4 ? 0 : month < 8 ? 1 : 2, later: later || undefined };
+}
+
 // "busy" = not looked up because of limits (try again later), null = no such username.
 type Lookup = { username: string; id: string } | null | "busy";
 
@@ -2677,7 +2796,7 @@ async function resolveUsernameMtproto(username: string, userId = ""): Promise<Lo
       }
       const result = raw as {
         peer?: { userId?: unknown };
-        users?: { id?: unknown; username?: string }[];
+        users?: TgUserRaw[];
       };
       const user = result.users?.[0];
       const id = String(user?.id ?? result.peer?.userId ?? "");
@@ -2685,6 +2804,7 @@ async function resolveUsernameMtproto(username: string, userId = ""): Promise<Lo
         mtMisses.set(key, Date.now());
         return null;
       }
+      if (user) rememberProfile(id, user);
       return { username: user?.username || username, id };
     } catch (err) {
       const wait = floodSeconds(err);
@@ -3544,7 +3664,61 @@ export type CheckResult = {
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
   // Hits per searched source (keys from checkSources()), for the app's scan animation.
   sourceHits?: Record<string, number>;
+  // What is known about the account itself (see accountCard).
+  account?: AccountCard;
 };
+
+export type AccountCard = {
+  id: string;
+  // where the id came from: typed in, Telegram (by username), or blacklist posts
+  idSource: "input" | "telegram" | "posts";
+  usernames: string[]; // current, when known
+  name: string;
+  premium: boolean;
+  scam: boolean;
+  fake: boolean;
+  bot: boolean;
+  verified: boolean;
+  reg: { year: number; part: 0 | 1 | 2; later?: boolean } | null;
+  // usernames this account had before (seen in blacklist posts or by the bot)
+  previous: { username: string; since: number; source: "post" | "bot"; where?: string }[];
+};
+
+// id <-> username links found in blacklist posts: a post whose accused fields
+// hold exactly one @username and one id ties the two together.
+function postLinks(q: { username?: string; id?: string }): { username: string; id: string; date: number; where: string }[] {
+  const needle = q.id || (q.username || "").toLowerCase();
+  if (!needle) return [];
+  const out: { username: string; id: string; date: number; where: string }[] = [];
+  for (const ch of mirrorChannels()) {
+    const m = loadMirror(ch);
+    for (const msg of m.msgs.values()) {
+      if (!msg.low.includes(needle)) continue;
+      const fields = [...accusedFields(msg.text)];
+      const handles = fields.filter((f) => f.startsWith("@"));
+      const ids = fields.filter((f) => !f.startsWith("@"));
+      if (handles.length !== 1 || ids.length !== 1) continue;
+      const link = { username: handles[0]!.slice(1), id: ids[0]!, date: msg.date, where: ch.title || ch.username || "" };
+      if ((q.id && link.id === q.id) || (q.username && link.username === q.username.toLowerCase())) out.push(link);
+    }
+  }
+  return out;
+}
+
+// Every username known for an account id: what the bot has seen itself plus
+// what blacklist posts tie to the id. Oldest sighting first.
+function knownUsernames(id: string): { username: string; since: number; source: "post" | "bot"; where?: string }[] {
+  const byName = new Map<string, { username: string; since: number; source: "post" | "bot"; where?: string }>();
+  const add = (username: string, since: number, source: "post" | "bot", where?: string) => {
+    const u = username.toLowerCase();
+    const have = byName.get(u);
+    if (!have || (since && (!have.since || since < have.since))) byName.set(u, { username: u, since: since || have?.since || 0, source, where });
+  };
+  for (const e of usernameHistory[id] || []) add(e.u, e.first, "bot");
+  for (const [u, v] of Object.entries(idCache)) if (v === id) add(u, 0, "bot");
+  for (const l of postLinks({ id })) add(l.username, l.date, "post", l.where);
+  return [...byName.values()].sort((a, b) => (a.since || Infinity) - (b.since || Infinity));
+}
 
 // Display name of a connected check channel (WWH channels collapse into one "WWH").
 function checkSourceName(title: string): string {
@@ -3811,12 +3985,35 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
 
   const channels = checkChannels();
   let effectiveId = id;
-  if (uname && !effectiveId && hasUserbot()) {
+  let idSource: AccountCard["idSource"] | "" = id ? "input" : "";
+  if (uname && !effectiveId) {
     // Resolve the username to its id so we can also match on the numeric id,
     // which blacklist posts carry and search never mis-tokenizes.
     const r = await resolveUsernameMtproto(uname, "");
-    if (r && r !== "busy" && r.id) effectiveId = r.id;
+    if (r && r !== "busy" && r.id) {
+      effectiveId = r.id;
+      idSource = "telegram";
+    }
   }
+  if (uname && !effectiveId) {
+    // Telegram doesn't know the username any more (account deleted or renamed):
+    // blacklist posts often still tie it to the id ("Кидала: @x / ID: 123").
+    const counts = new Map<string, number>();
+    for (const l of postLinks({ username: uname })) counts.set(l.id, (counts.get(l.id) || 0) + 1);
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (best) {
+      effectiveId = best[0];
+      idSource = "posts";
+    }
+  }
+  // Earlier usernames of the same account are searched too (posts written
+  // before a rename carry only the old one).
+  const known = effectiveId ? knownUsernames(effectiveId) : [];
+  const profile = effectiveId ? profileCache.get(effectiveId) : undefined;
+  const oldNames = known
+    .map((k) => k.username)
+    .filter((u) => u !== uname && !profile?.usernames.includes(u))
+    .slice(0, 3);
   if (hasUserbot() && channels.length && (uname || id || nick)) {
     // postMatchesSubject then decides whether a post actually accuses this
     // username/id/nickname (vs mentions it as a contact/ad).
@@ -3838,6 +4035,12 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
         // The 800-post scan is skipped only once the copy (filled newest first)
         // already holds at least that many posts.
         for (const term of searchTerms) push(await userSearchChannel(channel, term, subject, m.msgs.size >= 800));
+      }
+      for (const old of oldNames) {
+        if (!m.msgs.size) break;
+        const sub = { username: old, id: "", nick: "" };
+        const found = searchMirror(channel, m, sub);
+        push(found.length ? await confirmMirrorHits(channel, m, found, sub) : []);
       }
     }
   } else if (uname || id) {
@@ -3875,6 +4078,34 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     sourceHits[key] = (sourceHits[key] || 0) + 1;
   }
   const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, sourceHits };
+  if (effectiveId || known.length) {
+    let usernames = profile?.usernames || (idSource === "telegram" && uname ? [uname] : []);
+    let name = profile?.name || "";
+    if (!uname && effectiveId && !profile) {
+      // An id typed in: the Bot API knows users who have met the bot.
+      const chat = await tgSoft<{ type?: string; username?: string; first_name?: string; last_name?: string }>("getChat", { chat_id: effectiveId });
+      if (chat?.type === "private") {
+        if (chat.username) {
+          usernames = [chat.username.toLowerCase()];
+          noteUsername(effectiveId, chat.username);
+        }
+        name = [chat.first_name, chat.last_name].filter(Boolean).join(" ");
+      }
+    }
+    result.account = {
+      id: effectiveId,
+      idSource: (idSource || "posts") as AccountCard["idSource"],
+      usernames,
+      name,
+      premium: Boolean(profile?.premium),
+      scam: Boolean(profile?.scam),
+      fake: Boolean(profile?.fake),
+      bot: Boolean(profile?.bot),
+      verified: Boolean(profile?.verified),
+      reg: effectiveId ? registrationEstimate(effectiveId) : null,
+      previous: known.filter((k) => !usernames.includes(k.username)).slice(0, 8),
+    };
+  }
   const display = uname ? `@${parsed.username.replace(/^@/, "")}` : id ? `ID ${id}` : "";
   recordFind(uname, id, display, result);
   return result;
@@ -5307,11 +5538,53 @@ async function botSponsorsText(locale: Locale): Promise<string> {
 }
 
 // Formats a counterparty-check result for a bot message.
+export function regEstimateText(locale: Locale, reg: AccountCard["reg"]): string {
+  if (!reg) return "";
+  const en = locale === "en";
+  if (reg.later) return en ? `late ${reg.year} or later` : `конец ${reg.year} или позже`;
+  const part = en ? ["early", "mid", "late"][reg.part] : ["начало", "середина", "конец"][reg.part];
+  return `${part} ${reg.year}`;
+}
+
+function monthYear(sec: number): string {
+  if (!sec) return "";
+  const d = new Date(sec * 1000);
+  return `${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+}
+
+// The "👤 Account" block of a bot check reply.
+function accountLines(locale: Locale, a?: AccountCard): string[] {
+  if (!a) return [];
+  const en = locale === "en";
+  const out = [en ? "👤 <b>Account</b>" : "👤 <b>Аккаунт</b>"];
+  if (a.id) out.push(`ID: <code>${escapeHtml(a.id)}</code>${a.idSource === "posts" ? (en ? " (from blacklist posts)" : " (по постам блеклистов)") : ""}`);
+  if (a.name) out.push(`${en ? "Name" : "Имя"}: ${escapeHtml(a.name)}`);
+  if (a.usernames.length) out.push(`${en ? "Now" : "Сейчас"}: ${a.usernames.map((u) => `@${escapeHtml(u)}`).join(", ")}`);
+  else if (a.idSource === "posts") out.push(en ? "The username belongs to no one now (account deleted or renamed)." : "Ник сейчас никому не принадлежит (аккаунт удалён или сменил ник).");
+  if (a.scam) out.push(en ? "⚠️ Telegram marked this account as <b>SCAM</b>" : "⚠️ Telegram пометил аккаунт как <b>SCAM</b>");
+  if (a.fake) out.push(en ? "⚠️ Telegram marked this account as <b>FAKE</b>" : "⚠️ Telegram пометил аккаунт как <b>FAKE</b>");
+  const tags = [a.premium ? "⭐ Premium" : "", a.bot ? (en ? "🤖 bot" : "🤖 бот") : "", a.verified ? (en ? "✔️ verified" : "✔️ верифицирован") : ""].filter(Boolean);
+  if (tags.length) out.push(tags.join(" · "));
+  if (a.reg) out.push(`${en ? "Registered" : "Регистрация"}: ≈ ${regEstimateText(locale, a.reg)} ${en ? "(estimate by ID)" : "(оценка по ID)"}`);
+  if (a.previous.length) {
+    out.push(en ? "Known usernames before:" : "Ранее известные ники:");
+    for (const p of a.previous.slice(0, 6)) {
+      const when = monthYear(p.since);
+      const src =
+        p.source === "post"
+          ? `${en ? "post in" : "пост в"} ${escapeHtml(p.where || (en ? "a blacklist" : "блеклисте"))}`
+          : en ? "seen by the bot" : "видел бот";
+      out.push(`• @${escapeHtml(p.username)} — ${src}${when ? `, ${when}` : ""}`);
+    }
+  }
+  return [...out, ""];
+}
+
 function formatBotCheck(locale: Locale, input: string, res: CheckResult): string {
   const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : input.trim();
   const found = res.epb.length || res.manual.length || res.channels.length;
-  if (!found) return tb(locale, "checkClean", { q: escapeHtml(q) });
-  const lines: string[] = [`🔎 <b>${escapeHtml(q)}</b>`, ""];
+  if (!found) return [...accountLines(locale, res.account), tb(locale, "checkClean", { q: escapeHtml(q) })].join("\n").slice(0, 3900);
+  const lines: string[] = [`🔎 <b>${escapeHtml(q)}</b>`, "", ...accountLines(locale, res.account)];
   if (res.epb.length) {
     lines.push(tb(locale, "checkEpbHdr"));
     for (const e of res.epb.slice(0, 6)) {
@@ -8608,6 +8881,7 @@ function offsiteFiles(): string[] {
     BROADCAST_PATH,
     DM_JOBS_PATH,
     join(DATA_DIR, "telegram-ids.json"),
+    UNAME_HISTORY_PATH,
   ];
 }
 
