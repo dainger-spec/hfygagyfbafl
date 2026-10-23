@@ -3197,8 +3197,8 @@ const captchaPending = new Map<string, { word: string; exp: number; tries: numbe
 const submitPass = new Map<string, number>();
 
 export function hasSubmitPass(userId: string): boolean {
+  // No owner exemption: everyone, the owner included, solves the captcha.
   const uid = String(userId);
-  if (isOwner(uid)) return true;
   const exp = submitPass.get(uid) || 0;
   return exp > Date.now();
 }
@@ -3211,7 +3211,6 @@ export function consumeSubmitPass(userId: string) {
 // otherwise records the check.
 export function captchaRequired(userId: string): boolean {
   const uid = String(userId);
-  if (isOwner(uid)) return false;
   const credit = captchaCredit.get(uid) || 0;
   if (credit > 0) {
     captchaCredit.set(uid, credit - 1);
