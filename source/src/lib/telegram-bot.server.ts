@@ -1936,8 +1936,9 @@ const NON_ACCUSATION_LINE_RE =
 // the line (or the accused label just above it), plus arbitration lines.
 const ACCUSATION_LINE_RE =
   /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди)/iu;
+// Russian word endings use \p{L}: in JS regexps \w matches Latin letters only.
 const ACCUSED_LABEL_RE =
-  /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant)\s*:?\s*$/iu;
+  /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer)\s*:?\s*$/iu;
 
 function isStrictChannel(channel: CheckChannel): boolean {
   return /wwh/i.test(channel.title || "") || /wwh/i.test(channel.username || "");
@@ -1972,7 +1973,7 @@ function nickOnLine(line: string, nick: string): boolean {
 // "Ответчик: X", "Скамер — X", "Respondent: X": an accused label right before
 // the name on the same line.
 const ACCUSED_PREFIX_RE =
-  /(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant|scammer)\s*[:\-—–]\s*@?\s*$/iu;
+  /(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer)\s*[:\-—–]\s*@?\s*$/iu;
 
 function idOnLine(line: string, id: string): boolean {
   const digits = (id || "").replace(/\D/g, "");
@@ -2299,6 +2300,20 @@ function mirrorWork(channel: CheckChannel): "update" | "backfill" | "refresh" | 
   return null;
 }
 
+// Our own channel, so posts written there by hand (not filed through the bot)
+// are found too. Searched like a plain blacklist channel.
+function epbCheckChannel(): CheckChannel | null {
+  const id = bindings.channelId || PINNED_CHANNEL;
+  return id ? { id: String(id), title: CHANNEL_NAME, addedAt: 0 } : null;
+}
+
+function mirrorChannels(): CheckChannel[] {
+  const list = [...checkChannels()];
+  const epb = epbCheckChannel();
+  if (epb && !list.some((c) => sameChat(c.id, epb.id))) list.push(epb);
+  return list;
+}
+
 // One small step at a time, only while no check is waiting for the userbot, so
 // the copy never slows a real search down.
 let mirrorBusy = false;
@@ -2307,7 +2322,7 @@ export async function mirrorTick(maxSteps = 3): Promise<number> {
   mirrorBusy = true;
   let steps = 0;
   try {
-    const channels = checkChannels();
+    const channels = mirrorChannels();
     const keep = new Set(channels.map((c) => chatIdKey(c.id)));
     for (const key of [...mirrors.keys()]) if (!keep.has(key)) dropMirror(key);
     for (; steps < maxSteps; steps++) {
@@ -2430,7 +2445,7 @@ async function confirmMirrorHits(
 
 // Owner diagnostics: how far each channel's copy has got.
 export function mirrorStatus(): { title: string; posts: number; complete: boolean; updatedAt: number }[] {
-  return checkChannels().map((c) => {
+  return mirrorChannels().map((c) => {
     const m = loadMirror(c);
     return { title: c.title || c.username || c.id, posts: m.msgs.size, complete: m.complete, updatedAt: m.updatedAt };
   });
@@ -3665,14 +3680,14 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   };
 
   const channels = checkChannels();
+  let effectiveId = id;
+  if (uname && !effectiveId && hasUserbot()) {
+    // Resolve the username to its id so we can also match on the numeric id,
+    // which blacklist posts carry and search never mis-tokenizes.
+    const r = await resolveUsernameMtproto(uname, "");
+    if (r && r !== "busy" && r.id) effectiveId = r.id;
+  }
   if (hasUserbot() && channels.length && (uname || id || nick)) {
-    let effectiveId = id;
-    if (uname && !effectiveId) {
-      // Resolve the username to its id so we can also match on the numeric id,
-      // which blacklist posts carry and search never mis-tokenizes.
-      const r = await resolveUsernameMtproto(uname, "");
-      if (r && r !== "busy" && r.id) effectiveId = r.id;
-    }
     // postMatchesSubject then decides whether a post actually accuses this
     // username/id/nickname (vs mentions it as a contact/ad).
     // A handle like "dark_money" is often written "Dark Money" on the forum: also
@@ -3690,19 +3705,43 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
         // Copy not finished yet: older posts may be missing from it, so also ask
         // Telegram's search (the recent posts are already in the copy, so the
         // slow history scan is skipped once the copy has started).
-        for (const term of searchTerms) push(await userSearchChannel(channel, term, subject, m.msgs.size > 0));
+        // The 800-post scan is skipped only once the copy (filled newest first)
+        // already holds at least that many posts.
+        for (const term of searchTerms) push(await userSearchChannel(channel, term, subject, m.msgs.size >= 800));
       }
     }
   } else if (uname || id) {
     // Fallback: posts indexed by the bot since each channel was connected.
     for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
   }
+  // Posts written by hand in our own channel. Skipped when this person has any
+  // complaint filed through the bot: those are found above (and an admin's
+  // "remove from check" must not be undone by the channel post).
+  const epbChannel = epbCheckChannel();
+  const hasBotRecord = Object.values(pendingPosts).some((rec) =>
+    pendingAccounts(rec).some(
+      (a) => (uname && a.username.replace(/^@/, "").toLowerCase() === uname) || (id && a.id === id),
+    ),
+  );
+  if (epbChannel && hasUserbot() && (uname || id) && !hasBotRecord) {
+    const m = loadMirror(epbChannel);
+    if (m.msgs.size) {
+      const botPosts = new Set<number>();
+      for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
+      const subject = { username: uname, id: effectiveId, nick: "" };
+      const found = searchMirror(epbChannel, m, subject).filter((h) => !botPosts.has(h.messageId));
+      push(found.length ? await confirmMirrorHits(epbChannel, m, found, subject) : []);
+    }
+  }
   hits.sort((a, b) => b.date - a.date);
   const manual = matchManualBlacklist(uname, id);
   const sourceHits: Record<string, number> = { epb: epb.length, manual: manual.length };
   for (const h of hits) {
     const ch = isCheckChannel(h.channelId);
-    const key = `ch:${checkSourceName(ch?.title || ch?.username || h.channelTitle)}`;
+    const key =
+      epbChannel && !ch && sameChat(h.channelId, epbChannel.id)
+        ? "epb"
+        : `ch:${checkSourceName(ch?.title || ch?.username || h.channelTitle)}`;
     sourceHits[key] = (sourceHits[key] || 0) + 1;
   }
   const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, sourceHits };
