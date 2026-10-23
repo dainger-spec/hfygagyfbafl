@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { cn } from "@/lib/utils";
 
 function r(n: number): number {
@@ -31,6 +32,8 @@ export function EuStarsLogo({
   fast?: boolean;
   emblem?: boolean;
 }) {
+  // Metallic gold like the brand artwork: bright core, warm edge.
+  const gid = `epb-star-${useId().replace(/:/g, "")}`;
   const stars = Array.from({ length: 12 }, (_, i) => {
     const angle = ((i * 30 - 90) * Math.PI) / 180;
     return {
@@ -50,8 +53,15 @@ export function EuStarsLogo({
       aria-label={emblem ? undefined : title}
     >
       {title && !emblem ? <title>{title}</title> : null}
+      <defs>
+        <radialGradient id={gid} cx="50%" cy="45%" r="60%">
+          <stop offset="0%" stopColor="#fff8e0" />
+          <stop offset="45%" stopColor="#f6c862" />
+          <stop offset="100%" stopColor="#d49a3a" />
+        </radialGradient>
+      </defs>
       {stars.map((s, i) => (
-        <polygon key={i} points={starPoints(s.cx, s.cy)} fill="currentColor" />
+        <polygon key={i} points={starPoints(s.cx, s.cy)} fill={`url(#${gid})`} />
       ))}
     </svg>
   );

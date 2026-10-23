@@ -186,10 +186,10 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
       <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem />
-      <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
-        Europe Private
-        <span className="block text-gold">Blacklist</span>
-      </h1>
+      <h1 className="mt-7 font-display text-3xl font-extrabold tracking-[0.08em] uppercase">
+          <span className="epb-gold-text block text-[0.62em] tracking-[0.18em]">Europe Private</span>
+          <span className="epb-gold-text block">Blacklist</span>
+        </h1>
       <p className="mt-5 text-sm text-muted">Выберите язык / Choose language</p>
       <div className="mt-6 flex w-full max-w-md flex-col gap-3">
         <Button size="lg" className="w-full rounded-xl" onClick={() => pick("ru")}>
@@ -324,9 +324,9 @@ function Home({
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
-        <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight">
-          Europe Private
-          <span className="block text-gold">Blacklist</span>
+        <h1 className="mt-7 font-display text-3xl font-extrabold tracking-[0.08em] uppercase">
+          <span className="epb-gold-text block text-[0.62em] tracking-[0.18em]">Europe Private</span>
+          <span className="epb-gold-text block">Blacklist</span>
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">

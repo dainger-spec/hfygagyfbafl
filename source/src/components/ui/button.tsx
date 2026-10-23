@@ -9,7 +9,8 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-gold text-gold-fg hover:bg-gold/92",
+        default:
+          "bg-gold bg-[linear-gradient(180deg,#ffe6a8_0%,#f2be55_48%,#d39a36_100%)] text-gold-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.35)] hover:brightness-105",
         secondary:
           "bg-surface-2 text-fg hover:bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
         outline:

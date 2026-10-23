@@ -1158,9 +1158,9 @@ if (!isOfficialArbiterChat(bindings.arbiterChatId)) {
 if (!bindings.channelId) {
   bindings.channelId = PINNED_CHANNEL;
 }
-if (bindings.cardStamp !== "new-bot-v1") {
+if (bindings.cardStamp !== "new-bot-v2") {
   bindings.cards = {};
-  bindings.cardStamp = "new-bot-v1";
+  bindings.cardStamp = "new-bot-v2";
 }
 saveBindings();
 

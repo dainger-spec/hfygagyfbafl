@@ -12,9 +12,9 @@
   --color-fg: #f3efe4;
   --color-muted: #9a9488;
   --color-subtle: #6e6a62;
-  --color-gold: #f0c430;
-  --color-gold-fg: #161200;
-  --color-gold-dim: #b4921c;
+  --color-gold: #f2be55;
+  --color-gold-fg: #1a1203;
+  --color-gold-dim: #c48d2e;
   --color-line: #2c2c2c;
   --color-danger: #d4524a;
   --color-danger-fg: #fff6f5;
@@ -213,4 +213,12 @@
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* Metallic gold text matching the brand medallion. */
+.epb-gold-text {
+  background: linear-gradient(180deg, #ffecb8 0%, #f2be55 50%, #c48a2e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
