@@ -2932,7 +2932,9 @@ export function blacklistEntry(id: string): BlacklistDetailResult {
       currency: rec.currency || "",
       date: rec.createdAt || 0,
       summary: rec.summary || "",
-      story: rec.story || rec.summary || "",
+      // Public card: only the short summary that went into the post. The detailed
+      // story is for arbiters only and is never sent to the app.
+      story: "",
     };
   }
   const man = (bindings.manualBlacklist || []).find((e) => e.id === id);
