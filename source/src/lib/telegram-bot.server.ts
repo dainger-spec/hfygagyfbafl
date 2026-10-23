@@ -2350,6 +2350,7 @@ function saveMirror(m: Mirror, force = false) {
 function dropMirror(channelId: string) {
   const key = chatIdKey(channelId);
   mirrors.delete(key);
+  accusedCache.delete(key);
   try {
     if (existsSync(mirrorPath(key))) unlinkSync(mirrorPath(key));
   } catch {
@@ -2628,6 +2629,112 @@ export function mirrorStats() {
     usernames: allUsernames.size,
     ids: allIds.size,
     verifiedPairs: Object.keys(idCache).length,
+  };
+}
+
+// Accused accounts in one channel's copy, cached until the copy changes: in posts
+// with fields only the people in the fields, otherwise every name (minus the
+// channel's own handle and the signature line). A username and an id tied
+// together in one post are one account.
+// Posts are parsed once and remembered by text, so while a channel is still being
+// copied only the newly copied posts are parsed again.
+type AccusedEntry = { version: number; perMsg: Map<number, { text: string; hs: string[]; is: string[] }>; usernames: Set<string>; ids: Set<string>; paired: Set<string> };
+const accusedCache = new Map<string, AccusedEntry>();
+function mirrorAccused(ch: CheckChannel, m: Mirror) {
+  const hit = accusedCache.get(m.key);
+  if (hit && hit.version === m.version) return hit;
+  const usernames = new Set<string>();
+  const ids = new Set<string>();
+  const paired = new Set<string>();
+  const perMsg: AccusedEntry["perMsg"] = new Map();
+  const self = ch.username ? `@${ch.username.replace(/^@/, "").toLowerCase()}` : "";
+  const strict = isStrictChannel(ch);
+  for (const [msgId, msg] of m.msgs) {
+    let parsed = hit?.perMsg.get(msgId);
+    if (!parsed || parsed.text !== msg.text) parsed = { text: msg.text, ...accusedInPost(msg.text, strict, ch.username, self) };
+    perMsg.set(msgId, parsed);
+    const { hs, is } = parsed;
+    for (const h of hs) usernames.add(h);
+    for (const i of is) ids.add(i);
+    if (hs.length === 1 && is.length === 1) paired.add(hs[0]!);
+  }
+  const value = { version: m.version, perMsg, usernames, ids, paired };
+  accusedCache.set(m.key, value);
+  return value;
+}
+
+function accusedInPost(text: string, strict: boolean, channelUsername: string | undefined, self: string) {
+  let names = strict ? [] : [...accusedFields(text, channelUsername)];
+  if (strict) {
+    // arbitration channels (ads and rankings mixed in): only the accused side
+    // of "X на пользователя Y" and "Ответчик: Y" lines
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(INVISIBLE_RE, "");
+      const accused = arbitrationAccused(line, true);
+      if (accused) {
+        names.push(...nameTokens(accused).map((t) => t.value));
+        continue;
+      }
+      const tokens = nameTokens(line);
+      if (tokens.length && ACCUSED_PREFIX_RE.test(line.slice(0, tokens[0]!.index))) names.push(...tokens.map((t) => t.value));
+    }
+  } else if (!names.length) {
+    const lines = text.split(/\r?\n/);
+    const sig = signatureLineIndex(lines);
+    names = lines.flatMap((l, i) => (i === sig ? [] : nameTokens(l.replace(INVISIBLE_RE, "")).map((t) => t.value)));
+  }
+  names = [...new Set(names)].filter((n) => n !== self && !IGNORE_USERNAMES.has(n.slice(1)));
+  return {
+    hs: names.filter((n) => n.startsWith("@")),
+    is: names.filter((n) => !n.startsWith("@") && n.length >= 6),
+  };
+}
+
+// How many accounts a check can find: the channel copies, EPB complaints and
+// manual entries together (no channel names, safe to show to arbiters).
+export function blacklistBase() {
+  const usernames = new Set<string>();
+  const ids = new Set<string>();
+  const paired = new Set<string>();
+  let posts = 0;
+  let complete = 0;
+  let progressSum = 0;
+  const channels = mirrorChannels();
+  for (const c of channels) {
+    const m = loadMirror(c);
+    posts += m.msgs.size;
+    if (m.complete) complete++;
+    progressSum += mirrorProgress(m);
+    const a = mirrorAccused(c, m);
+    for (const u of a.usernames) usernames.add(u);
+    for (const i of a.ids) ids.add(i);
+    for (const u of a.paired) paired.add(u);
+  }
+  for (const rec of Object.values(pendingPosts)) {
+    if (rec.status !== "published" || rec.removedFromCheck) continue;
+    const accs = pendingAccounts(rec);
+    for (const acc of accs) {
+      const u = acc.username ? `@${acc.username.replace(/^@/, "").toLowerCase()}` : "";
+      if (u) usernames.add(u);
+      if (acc.id) ids.add(acc.id);
+      if (u && acc.id) paired.add(u);
+    }
+  }
+  for (const e of bindings.manualBlacklist || []) {
+    const u = e.username ? `@${e.username.replace(/^@/, "").toLowerCase()}` : "";
+    if (u) usernames.add(u);
+    if (e.telegramId) ids.add(e.telegramId);
+    if (u && e.telegramId) paired.add(u);
+  }
+  const unpaired = [...usernames].filter((u) => !paired.has(u)).length;
+  return {
+    accounts: ids.size + unpaired,
+    usernames: usernames.size,
+    ids: ids.size,
+    posts,
+    channels: channels.length,
+    complete,
+    progress: channels.length ? Math.round(progressSum / channels.length) : 100,
   };
 }
 
@@ -3422,32 +3529,56 @@ function ownerLoginActive(chatId: string | number): boolean {
   return true;
 }
 
-async function sendOwnerPanel(chatId: string | number) {
+// The owner's private panel (/userbot): the search account, the source channels
+// with how far each one's copy has got, adding and removing channels. Never shown
+// in the arbiter chat.
+async function sendOwnerPanel(chatId: string | number, editMessageId?: number) {
   const st = await userbotStatus();
   const connected = st.ok;
   const channels = checkChannels();
+  const n = (v: number) => v.toLocaleString("ru-RU");
+  const lines = [
+    "<b>Юзербот для поиска по блеклистам</b>",
+    connected
+      ? `Аккаунт: ${escapeHtml(st.name || "подключён")} ✅`
+      : hasUserbot()
+        ? `Аккаунт не отвечает: ${escapeHtml(st.error || "ошибка")}`
+        : "Аккаунт не подключён",
+    `Каналов для поиска: ${channels.length}`,
+  ];
   const rows: { text: string; callback_data: string }[][] = [];
-  if (connected) {
-    rows.push([{ text: "📡 Выбрать каналы для поиска", callback_data: "ub:chans" }]);
+  if (hasUserbot()) {
+    const base = blacklistBase();
+    const ms = mirrorStats();
+    lines.push(
+      "",
+      "<b>📊 База блеклиста</b>",
+      `~${n(base.accounts)} аккаунтов (ников ${n(base.usernames)}, ID ${n(base.ids)}) · постов ${n(base.posts)}`,
+      `Скопировано целиком: ${base.complete} из ${base.channels} каналов${base.complete < base.channels ? ` · всего ~${base.progress}%` : ""}`,
+      `Проверенных пар username → ID: ${n(ms.verifiedPairs)}`,
+      "",
+      ...ms.channels.slice(0, 25).map(
+        (c) =>
+          `• ${escapeHtml(cut(c.title, 32))} — ${n(c.posts)} постов — ` +
+          (c.complete ? "✅ вся история" : c.failing ? "⚠️ нет доступа, повтор через 15 мин" : `⏳ ~${c.progress}%`),
+      ),
+    );
+    if (ms.channels.length > 25) lines.push(`…и ещё ${ms.channels.length - 25}`);
+    for (const c of channels.slice(0, 25)) rows.push([{ text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `ub:del:${c.id}` }]);
+    rows.push([{ text: "📡 Выбрать из подписок", callback_data: "ub:chans" }, { text: "➕ Добавить по @/ID", callback_data: "ub:add" }]);
+    rows.push([{ text: "🔄 Обновить", callback_data: "ub:panel" }]);
     rows.push([{ text: "🔌 Переподключить аккаунт", callback_data: "ub:connect" }]);
     rows.push([{ text: "❌ Отключить аккаунт", callback_data: "ub:off" }]);
   } else {
+    lines.push("", "Подключите свой аккаунт Telegram, затем выберите каналы, по которым искать. Понадобятся api_id и api_hash с my.telegram.org.");
     rows.push([{ text: "➕ Подключить аккаунт", callback_data: "ub:connect" }]);
   }
-  await tgSoft("sendMessage", {
-    chat_id: chatId,
-    text: [
-      "<b>Юзербот для поиска по блеклистам</b>",
-      connected ? `Аккаунт: ${escapeHtml(st.name || "подключён")} ✅` : "Аккаунт не подключён",
-      `Каналов выбрано для поиска: ${channels.length}`,
-      "",
-      connected
-        ? "Поиск в мини-приложении идёт по выложенным жалобам EPB и по выбранным каналам (через аккаунт, по username, включая старые посты)."
-        : "Подключите свой аккаунт Telegram, затем выберите каналы, по которым искать. Понадобятся api_id и api_hash с my.telegram.org.",
-    ].join("\n"),
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: rows },
-  });
+  const payload = { chat_id: chatId, text: lines.join("\n").slice(0, 4000), parse_mode: "HTML", reply_markup: { inline_keyboard: rows } };
+  if (editMessageId) {
+    const edited = await tgSoft("editMessageText", { ...payload, message_id: editMessageId });
+    if (edited) return;
+  }
+  await tgSoft("sendMessage", payload);
 }
 
 async function startOwnerLogin(chatId: string | number) {
@@ -3648,6 +3779,21 @@ async function handleOwnerCallback(cb: NonNullable<TgUpdate["callback_query"]>):
     saveBindings();
     await answer("Аккаунт отключён");
     await sendOwnerPanel(chatId);
+  } else if (action === "panel") {
+    await answer();
+    await sendOwnerPanel(chatId, cb.message?.message_id);
+  } else if (action === "add") {
+    checkChannelSetup.add(String(chatId));
+    await answer();
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Пришлите @username или ID канала (-100…). Аккаунт поиска должен быть на него подписан." });
+  } else if (action === "del") {
+    const target = rest.join(":");
+    bindings.checkChannels = checkChannels().filter((c) => !sameChat(c.id, target));
+    saveBindings();
+    removeCheckChannelFromIndex(target);
+    dropMirror(target);
+    await answer("Канал убран");
+    await sendOwnerPanel(chatId, cb.message?.message_id);
   } else if (action === "chans") {
     await answer();
     await sendChannelPicker(chatId);
@@ -7522,6 +7668,16 @@ function adminHome(): AdminView {
     `<b>Чаты рассылки</b>: включено ${relays.filter((c) => c.status === "on").length}, ждут ${relays.filter((c) => c.status === "pending").length}, выключено ${relays.filter((c) => c.status === "off").length}`,
     `<b>Пользователи бота</b>: ${userStats().total} (заблокировали ${userStats().blocked})`,
     `<b>Канал</b>: <code>${escapeHtml(bindings.channelId || PINNED_CHANNEL)}</code>`,
+    ...(checkEnabled()
+      ? (() => {
+          const b = blacklistBase();
+          const n = (v: number) => v.toLocaleString("ru-RU");
+          return [
+            `<b>База блеклиста</b>: ~${n(b.accounts)} аккаунтов (ников ${n(b.usernames)}, ID ${n(b.ids)}), постов ${n(b.posts)}` +
+              (b.complete < b.channels ? ` · загружается ~${b.progress}%` : ""),
+          ];
+        })()
+      : []),
     last
       ? `<b>Последняя рассылка</b>: ${ago(last.at)}, доставлено ${last.sent} из ${last.total}` +
         (last.noRights ? `, без прав ${last.noRights}` : "") +
@@ -7549,7 +7705,6 @@ function adminHome(): AdminView {
         ? [
             [{ text: "➕ Добавить юзера в блеклист", callback_data: "adm:bladd" }],
             [{ text: "🧹 Убрать юзера из блеклиста", callback_data: "adm:ccrm" }],
-            [{ text: "🔎 Каналы для проверки", callback_data: "adm:cc" }],
           ]
         : []),
       [
@@ -7697,48 +7852,6 @@ async function adminShowComplaint(arbiterChatId: number | string, key: string) {
     await tgSoft("sendMessage", payload);
   }
   return true;
-}
-
-function adminCheck(): AdminView {
-  const list = checkChannels();
-  const ub = hasUserbot();
-  const lines = [
-    "<b>Каналы для проверки контрагента</b>",
-    `Подключено: ${list.length}`,
-    `Аккаунт (юзербот): ${ub ? "подключён ✅" : "не подключён"}`,
-    "",
-    ub
-      ? "Поиск идёт через подключённый аккаунт по всем постам этих каналов, включая старые. Бота в каналы добавлять не нужно — аккаунт должен быть на них подписан."
-      : "Сейчас бот индексирует только новые посты каналов, где он сам состоит. Чтобы искать по старым постам чужих каналов без добавления бота, подключите аккаунт (юзербот) — см. HOSTING.md.",
-  ];
-  if (ub) {
-    const st = mirrorStats();
-    const n = (v: number) => v.toLocaleString("ru-RU");
-    const done = st.channels.filter((c) => c.complete).length;
-    lines.push(
-      "",
-      "<b>📊 Быстрый поиск (копия каналов)</b>",
-      `Сохранено постов: <b>${n(st.posts)}</b> · каналов скопировано целиком: ${done} из ${st.channels.length}`,
-      `Юзернеймов в постах: <b>${n(st.usernames)}</b> · ID: <b>${n(st.ids)}</b>`,
-      `Проверенных пар username → ID: ${n(st.verifiedPairs)}`,
-      "",
-      ...st.channels.slice(0, 30).map(
-        (c) =>
-          `• ${escapeHtml(cut(c.title, 32))} — ${n(c.posts)} постов, ${n(c.usernames)} юзернеймов — ` +
-          (c.complete ? "✅ вся история" : c.failing ? "⚠️ нет доступа, повтор через 15 мин" : `⏳ ~${c.progress}%`),
-      ),
-    );
-    if (st.channels.length > 30) lines.push(`…и ещё ${st.channels.length - 30}`);
-  }
-  const keyboard: AdminView["keyboard"] = list.map((c) => [
-    { text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `adm:ccdel:${c.id}` },
-  ]);
-  if (ub) keyboard.push([{ text: "🔄 Обновить статистику", callback_data: "adm:cc" }]);
-  keyboard.push([{ text: "🔌 Проверить аккаунт", callback_data: "adm:ccping" }]);
-  keyboard.push([{ text: "🧹 Убрать жалобу из блеклиста", callback_data: "adm:ccrm" }]);
-  keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
-  keyboard.push([{ text: "⬅ В меню", callback_data: "adm:home" }]);
-  return { text: lines.join("\n"), keyboard };
 }
 
 function adminBanners(): AdminView {
@@ -7986,7 +8099,7 @@ async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
       `ID: <code>${escapeHtml(entry.id)}</code>`,
       "",
       hasUserbot()
-        ? "Начал копировать историю канала для быстрого поиска. Прогресс: /admin → проверка контрагента."
+        ? "Начал копировать историю канала для быстрого поиска. Прогресс: /userbot."
         : "Новые посты этого канала будут попадать в поиск. Для старых постов подключите аккаунт (юзербот).",
     ].join("\n"),
     parse_mode: "HTML",
@@ -8175,17 +8288,13 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     if (!shown) await renderAdmin(cb, adminPendingList(0));
     return;
   }
-  if (action === "cc") {
-    await answer();
-    await renderAdmin(cb, adminCheck());
-    return;
-  }
-  if (action === "ccping") {
-    await answer("Проверяем аккаунт…");
-    const st = await userbotStatus();
-    await tgSoft("sendMessage", {
-      chat_id: chatId,
-      text: st.ok ? `Аккаунт подключён: ${escapeHtml(st.name || "аккаунт")}` : `Аккаунт не подключён: ${escapeHtml(st.error || "ошибка")}`,
+  // The search account and the list of source channels are the owner's only
+  // (/userbot in a private chat): the arbiter chat has other people in it.
+  if (action === "cc" || action === "ccping" || action === "ccadd" || action === "ccdel") {
+    await tgSoft("answerCallbackQuery", {
+      callback_query_id: cb.id,
+      text: "Аккаунт поиска и каналы настраивает владелец в личке бота: /userbot",
+      show_alert: true,
     });
     return;
   }
@@ -8243,25 +8352,6 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
       chat_id: chatId,
       text: "Пришлите @username или ID аккаунта, которого нужно добавить в блеклист (проверку контрагента). Можно с комментарием через пробел, например:\n@scammer кинул на сделке, инфа из чужого блеклиста\n\nИсточник отметится как «Сторонний источник».",
     });
-    return;
-  }
-  if (action === "ccadd") {
-    checkChannelSetup.add(String(chatId));
-    await answer("Пришлите ID канала следующим сообщением");
-    await tgSoft("sendMessage", {
-      chat_id: chatId,
-      text: "Пришлите ID канала (-100…) или @username для проверки. Бот должен быть в этом канале.",
-    });
-    return;
-  }
-  if (action === "ccdel") {
-    const target = rest.join(":");
-    bindings.checkChannels = checkChannels().filter((c) => !sameChat(c.id, target));
-    saveBindings();
-    removeCheckChannelFromIndex(target);
-    dropMirror(target);
-    await answer("Канал убран");
-    await renderAdmin(cb, adminCheck());
     return;
   }
   if (action === "dl") {
@@ -8951,7 +9041,8 @@ async function handleTelegramUpdate(update: TgUpdate) {
     await applySponsorLink(msg.chat.id, msg.text);
     return;
   }
-  if (isOfficialArbiterChat(msg.chat.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
+  // Adding a source channel: the owner, in a private chat (/userbot → add).
+  if (msg.chat.type === "private" && isOwner(msg.from?.id) && checkChannelSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyCheckChannel(msg.chat.id, msg.text);
     return;
   }
