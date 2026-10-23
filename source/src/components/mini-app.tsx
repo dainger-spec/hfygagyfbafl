@@ -380,6 +380,36 @@ function Home({
 
 const SPONSORS_CACHE_KEY = "epb-sponsors";
 
+// Logos of the partner blacklists/forums, shown in the top ticker and on the
+// sponsors page. Transparent PNGs in /public/partners.
+const PARTNER_LOGOS: { src: string; alt: string }[] = [
+  { src: "/partners/wwh.png", alt: "WWH Club" },
+  { src: "/partners/animal-planet.png", alt: "Animal Planet Blacklist" },
+  { src: "/partners/kidalam.png", alt: "KidaLam NeT" },
+  { src: "/partners/z-black.png", alt: "Z-BLACK" },
+  { src: "/partners/pi.png", alt: "π" },
+  { src: "/partners/ws-blacklist.png", alt: "WS Blacklist" },
+  { src: "/partners/cookie.png", alt: "Cookie Blacklist" },
+];
+
+function PartnerLogos({ className, gap = false }: { className: string; gap?: boolean }) {
+  return (
+    <>
+      {PARTNER_LOGOS.map((l) => (
+        <span key={l.src} className="inline-flex shrink-0 items-center">
+          <img
+            src={l.src}
+            alt={l.alt}
+            draggable={false}
+            className={cn("w-auto max-w-none shrink-0 select-none", className)}
+          />
+          {gap ? <span className="w-6 shrink-0" /> : <span className="mx-3 text-gold/40">·</span>}
+        </span>
+      ))}
+    </>
+  );
+}
+
 // Gold-gradient text that leaves emoji in their own colours (a background-clip
 // gradient would otherwise paint emoji glyphs gold too).
 function GoldText({ text }: { text: string }) {
@@ -425,8 +455,6 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       })
       .catch(() => {});
   }, []);
-  if (!items.length) return null;
-
   const Seq = () => (
     <>
       <span className="inline-flex items-center">
@@ -439,6 +467,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
           <span className="mx-3 text-gold/40">/</span>
         </span>
       ))}
+      <PartnerLogos className="h-6" />
     </>
   );
 
@@ -453,7 +482,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       }}
       aria-label="project sponsors"
       className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
-      style={{ "--epb-marquee-dur": `${Math.max(9, items.length * 2.5)}s` } as CSSProperties}
+      style={{ "--epb-marquee-dur": `${Math.max(12, items.length * 2.5 + PARTNER_LOGOS.length * 1.6)}s` } as CSSProperties}
     >
       <div className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
         <Seq />
@@ -535,6 +564,15 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
             <ChevronLeft className="size-5" />
           </button>
           <h2 className="font-display text-xl font-bold">{t(locale, "sponsorsTitle")}</h2>
+        </div>
+        {/* Partner logos running along the top of the page. */}
+        <div className="relative overflow-hidden rounded-2xl bg-surface/60 py-3 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]" style={{ "--epb-marquee-dur": "22s" } as CSSProperties}>
+          <div className="epb-marquee-track">
+            <PartnerLogos className="h-12" gap />
+            <PartnerLogos className="h-12" gap />
+          </div>
+          <span className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" />
+          <span className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" />
         </div>
         <p className="text-sm leading-relaxed text-muted">{t(locale, "sponsorsHeader")}</p>
         {items === null ? (
