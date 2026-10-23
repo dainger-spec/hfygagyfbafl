@@ -10,7 +10,7 @@ import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
 import { WELCOME_MP4_BASE64 } from "@/lib/welcome-anim";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
 import { normalizeCaptchaAnswer, randomCaptchaWord, renderCaptcha } from "@/lib/captcha.server";
-import { applyCustomEmoji, decorateButtons, hasCustomEmoji, markupHasIconableButton, stripCustomEmoji } from "@/lib/telegram-emoji";
+import { applyCustomEmoji, CUSTOM_EMOJI, decorateButtons, hasCustomEmoji, hasEmojiId, markupHasIconableButton, registerPackEmoji, stripCustomEmoji } from "@/lib/telegram-emoji";
 
 function botToken() {
   return process.env.TELEGRAM_BOT_TOKEN || "";
@@ -141,6 +141,8 @@ type Bindings = {
   audienceBase?: number;
   // Premium custom emoji in private-chat messages (default on).
   customEmoji?: boolean;
+  // Extra icons looked up in the owner's emoji pack: plain emoji -> custom_emoji_id.
+  packEmoji?: { at: number; set: string; map: Record<string, string> };
   // Recently found counterparty checks, shared across all users (newest first,
   // capped). Shown in the app's "recent blacklists" list.
   recentFinds?: RecentFind[];
@@ -1175,6 +1177,59 @@ function isCustomEmojiError(err: unknown): boolean {
 
 function isNotModified(err: unknown): boolean {
   return err instanceof TgError && /not modified/i.test(err.message || "");
+}
+
+// Plain emoji the bot writes in private chats that get a Premium icon when the
+// owner's pack has one (status marks in checks, captcha, the account card).
+const PACK_WANTED = [
+  "✅", "✔️", "⛔", "⛔️", "🚫", "❌", "❗", "⏳", "⌛", "🔄", "🤖", "📛", "⚠️", "🔍", "🔎", "📍",
+  "⭐", "▫️", "◽", "◽️", "⚪", "⚪️", "🔘", "🆔", "📅", "🗓", "🕐", "💬", "🔗", "ℹ️", "🎉", "🔒",
+];
+const noVs = (e: string) => e.replace(/\uFE0F/g, "");
+let packLoading: Promise<void> | null = null;
+let packFailedAt = 0;
+
+// The pack is found from an icon already in use (getCustomEmojiStickers gives its
+// set name), then read whole (getStickerSet). Cached for a week in bindings.
+function loadPackEmoji(force = false): Promise<void> {
+  const cached = bindings.packEmoji;
+  if (cached?.map && !force) registerPackEmoji(cached.map);
+  if (!botToken() || !customEmojiEnabled()) return Promise.resolve();
+  if (!force && cached && Date.now() - cached.at < 7 * 86_400_000) return Promise.resolve();
+  if (!force && Date.now() - packFailedAt < 3_600_000) return Promise.resolve();
+  if (packLoading) return packLoading;
+  packLoading = (async () => {
+    try {
+      const known = await tg<{ set_name?: string }[]>("getCustomEmojiStickers", { custom_emoji_ids: [CUSTOM_EMOJI["👤"]] });
+      const set = known?.[0]?.set_name;
+      if (!set) throw new Error("no set name");
+      const pack = await tg<{ stickers?: { emoji?: string; custom_emoji_id?: string }[] }>("getStickerSet", { name: set });
+      const byBase = new Map<string, string>();
+      for (const st of pack?.stickers || []) {
+        if (st.emoji && st.custom_emoji_id && !byBase.has(noVs(st.emoji))) byBase.set(noVs(st.emoji), st.custom_emoji_id);
+      }
+      const map: Record<string, string> = {};
+      for (const want of PACK_WANTED) {
+        const id = byBase.get(noVs(want));
+        if (id) map[want] = id;
+      }
+      bindings.packEmoji = { at: Date.now(), set, map };
+      saveBindings();
+      registerPackEmoji(map);
+    } catch (err) {
+      packFailedAt = Date.now();
+      console.warn("[epb] emoji pack lookup failed:", err instanceof Error ? err.message : err);
+    }
+  })().finally(() => {
+    packLoading = null;
+  });
+  return packLoading;
+}
+if (process.env.NODE_ENV !== "test") setTimeout(() => void loadPackEmoji(), 5_000).unref?.();
+
+// First of the candidates that has a Premium icon (else the first one, plain).
+function pickEmoji(...candidates: string[]): string {
+  return candidates.find((e) => hasEmojiId(e)) || candidates[0]!;
 }
 
 // Sends a private-chat text message, upgrading known plain emoji to Premium
@@ -5956,8 +6011,8 @@ function botCapText(chatId: number | string, key: BotCapText): string {
     wrong: "❌ Неверно. Попробуйте ещё раз.",
     again: "❌ Неверно. Вот новое слово:",
     expired: "⌛ Картинка устарела. Новое слово:",
-    locked: "Слишком много неверных ответов. Попробуйте позже.",
-    failed: "Не удалось показать картинку. Попробуйте ещё раз через минуту.",
+    locked: "⛔ Слишком много неверных ответов. Попробуйте позже.",
+    failed: "⚠️ Не удалось показать картинку. Попробуйте ещё раз через минуту.",
   };
   const enT: Record<BotCapText, string> = {
     check: "🤖 Many checks in a row. Type the word from the picture (in Russian) to continue.",
@@ -5966,8 +6021,8 @@ function botCapText(chatId: number | string, key: BotCapText): string {
     wrong: "❌ Wrong. Try again.",
     again: "❌ Wrong. Here is a new word:",
     expired: "⌛ The picture expired. New word:",
-    locked: "Too many wrong answers. Please try again later.",
-    failed: "Couldn't show the picture. Please try again in a minute.",
+    locked: "⛔ Too many wrong answers. Please try again later.",
+    failed: "⚠️ Couldn't show the picture. Please try again in a minute.",
   };
   return (en ? enT : ru)[key];
 }
@@ -5978,31 +6033,39 @@ async function sendBotCaptcha(chatId: number | string, intro: string, purpose?: 
   dropBotCaptchaMsg(chatId);
   if (!png) {
     botCaptchaWait.delete(String(chatId));
-    await tgSoft("sendMessage", { chat_id: chatId, text: botCapText(chatId, "locked") });
+    await sendCeMessage(chatId, botCapText(chatId, "locked"));
     return false;
   }
-  const form = new FormData();
-  form.set("chat_id", String(chatId));
-  form.set("caption", intro);
   const en = langOf(chatId) === "en";
-  form.set(
-    "reply_markup",
-    JSON.stringify({
-      inline_keyboard: [
-        [{ text: en ? "🔄 Another picture" : "🔄 Другая картинка", callback_data: "bcap:new" }],
-        [{ text: en ? "✖ Cancel" : "✖ Отмена", callback_data: "bcap:x" }],
-      ],
-    }),
-  );
-  form.set("photo", new File([new Uint8Array(png)], "captcha.png", { type: "image/png" }));
+  const buildForm = (rich: boolean) => {
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("caption", rich ? applyCustomEmoji(escapeHtml(intro)) : intro);
+    if (rich) form.set("parse_mode", "HTML");
+    form.set(
+      "reply_markup",
+      JSON.stringify({
+        inline_keyboard: [
+          [{ text: en ? "🔄 Another picture" : "🔄 Другая картинка", callback_data: "bcap:new" }],
+          [{ text: en ? "✖ Cancel" : "✖ Отмена", callback_data: "bcap:x" }],
+        ],
+      }),
+    );
+    form.set("photo", new File([new Uint8Array(png)], "captcha.png", { type: "image/png" }));
+    return form;
+  };
+  const rich = customEmojiEnabled() && isPrivateChat(chatId) && hasCustomEmoji(applyCustomEmoji(intro));
   try {
-    const sent = await tgForm<{ message_id: number }>("sendPhoto", form);
+    const sent = await tgForm<{ message_id: number }>("sendPhoto", buildForm(rich)).catch((err) => {
+      if (rich && /emoji/i.test(err instanceof Error ? err.message : "")) return tgForm<{ message_id: number }>("sendPhoto", buildForm(false));
+      throw err;
+    });
     if (sent?.message_id) botCaptchaMsg.set(String(chatId), sent.message_id);
     if (botCaptchaMsg.size > 20_000) botCaptchaMsg.clear();
     return true;
   } catch (err) {
     console.error("[epb] captcha photo failed:", err);
-    await tgSoft("sendMessage", { chat_id: chatId, text: botCapText(chatId, "failed") });
+    await sendCeMessage(chatId, botCapText(chatId, "failed"));
     return false;
   }
 }
@@ -6010,7 +6073,7 @@ async function sendBotCaptcha(chatId: number | string, intro: string, purpose?: 
 async function runBotCheck(chatId: number | string, input: string, skipGate = false) {
   if (!skipGate) {
     if (tooMany(`check:${chatId}`, 30, 60_000)) {
-      await tgSoft("sendMessage", { chat_id: chatId, text: "Слишком много проверок. Подождите минуту." });
+      await sendCeMessage(chatId, langOf(chatId) === "en" ? "⏳ Too many checks. Please wait a minute." : "⏳ Слишком много проверок. Подождите минуту.");
       return;
     }
     if (captchaRequired(String(chatId))) {
@@ -6020,51 +6083,140 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
     }
   }
   const locale = langOf(chatId);
-  // Live progress: one message lists every source as "⏳ …", grows a "can take
-  // up to 30 s" line if slow, and ends as a ✅/⛔ summary before the result.
-  const sources = checkSources();
   const en = locale === "en";
-  const head = en ? "🔎 Checking sources…" : "🔎 Проверяем источники…";
-  const slowLine = en ? "⏳ The search can take up to 30 seconds. Please wait." : "⏳ Поиск может продлиться до 30 сек. Пожалуйста, ожидайте.";
-  const pendingText = (slow: boolean) =>
-    [head, "", ...sources.map((src) => `⏳ ${escapeHtml(src.title)}`), ...(slow ? ["", slowLine] : [])].join("\n");
-  const progress = sources.length
-    ? await tgSoft<{ message_id: number }>("sendMessage", { chat_id: chatId, text: pendingText(false), parse_mode: "HTML" })
-    : null;
-  await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
-  let slowEdit: Promise<unknown> | null = null;
-  const slowTimer = setTimeout(() => {
-    if (progress?.message_id) {
-      slowEdit = tgSoft("editMessageText", { chat_id: chatId, message_id: progress.message_id, text: pendingText(true), parse_mode: "HTML" });
-    }
-  }, 4000);
+  const empty: CheckResult = { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
+  const search = checkCounterparty(input).catch(() => empty);
+  const sources = checkSources();
   let res: CheckResult;
-  try {
-    res = await checkCounterparty(input);
-  } catch {
-    res = { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
-  }
-  clearTimeout(slowTimer);
-  if (slowEdit) await slowEdit; // never let the "slow" edit land after the summary
-  if (progress?.message_id) {
-    const hits = res.sourceHits || {};
-    const lines = sources.map((src) => {
-      const n = hits[src.key] || 0;
-      return n
-        ? `⛔ <b>${escapeHtml(src.title)}</b> — ${en ? "found" : "найдено"}: ${n}`
-        : `✅ ${escapeHtml(src.title)} — ${en ? "clean" : "чисто"}`;
-    });
-    await tgSoft("editMessageText", {
-      chat_id: chatId,
-      message_id: progress.message_id,
-      text: [en ? "🔎 Sources checked:" : "🔎 Источники проверены:", "", ...lines].join("\n"),
-      parse_mode: "HTML",
-    });
+  if (sources.length) {
+    await Promise.race([loadPackEmoji(), sleep(1500)]);
+    res = await animateBotCheck(chatId, en, sources, search);
+  } else {
+    await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
+    res = await search;
   }
   await sendCeMessage(chatId, formatBotCheck(locale, input, res), {
     reply_markup: checkResultKeyboard(locale),
     disable_web_page_preview: true,
   });
+}
+
+// The live progress message of a check, edited in place about once a second:
+// a progress bar, sources taken a few at a time ("checking…"), and once the
+// search is back their results revealed in the same order, ending in a summary.
+// Premium icons when the pack has them, plain emoji otherwise.
+const CHECK_FRAME_MS = 900;
+async function animateBotCheck(
+  chatId: number | string,
+  en: boolean,
+  sources: { key: string; title: string }[],
+  search: Promise<CheckResult>,
+): Promise<CheckResult> {
+  const I = {
+    head: "🔎",
+    ok: pickEmoji("✅", "✔️"),
+    hit: pickEmoji("⛔", "⛔️", "🚫", "❌", "❗"),
+    busy: pickEmoji("⏳", "⌛", "🔄", "🔍"),
+    wait: pickEmoji("▫️", "◽️", "◽", "⚪️", "⚪", "🔘"),
+  };
+  const n = sources.length;
+  let res: CheckResult | null = null;
+  void search.then((r) => (res = r));
+  let done = 0; // sources with a result shown
+  let pos = 0; // sources started (done..pos are "checking…")
+  let slow = false;
+  let dots = 0;
+  const bar = (part: number) => {
+    const f = Math.round(Math.min(1, part) * 10);
+    return `${"▰".repeat(f)}${"▱".repeat(10 - f)} ${Math.round(Math.min(1, part) * 100)}%`;
+  };
+  const frame = (final: boolean) => {
+    const hits = (res as CheckResult | null)?.sourceHits || {};
+    const lines = sources.map((src, i) => {
+      const title = escapeHtml(src.title);
+      if (i < done) {
+        const k = hits[src.key] || 0;
+        return k ? `${I.hit} <b>${title}</b> — ${en ? "found" : "найдено"}: ${k}` : `${I.ok} ${title} — ${en ? "clean" : "чисто"}`;
+      }
+      if (i < pos) return `${I.busy} <b>${title}</b> — ${en ? "checking" : "проверяем"}…`;
+      return `${I.wait} <i>${title}</i>`;
+    });
+    const out = [
+      final
+        ? `${I.head} <b>${en ? "Sources checked" : "Источники проверены"}</b>`
+        : `${I.head} <b>${en ? "Checking sources" : "Проверяем источники"}${".".repeat(1 + (dots % 3))}</b>`,
+      // half for sources started, half for results shown: it only ever grows
+      bar(final ? 1 : (done + pos) / (2 * n)),
+      "",
+      ...lines,
+    ];
+    if (final) {
+      const found = sources.filter((src) => (hits[src.key] || 0) > 0).length;
+      out.push(
+        "",
+        found
+          ? `${I.hit} <b>${en ? `Found in ${found} of ${n}` : `Найдено в ${found} из ${n}`}</b>`
+          : `${I.ok} <b>${en ? `Clean in all ${n} sources` : `Чисто во всех источниках (${n})`}</b>`,
+      );
+    } else if (slow) {
+      out.push("", `${I.busy} ${en ? "The search can take up to 30 seconds. Please wait." : "Поиск может продлиться до 30 сек. Пожалуйста, ожидайте."}`);
+    }
+    return out.join("\n");
+  };
+
+  let useCe = customEmojiEnabled() && isPrivateChat(chatId);
+  let messageId = 0;
+  let pausedUntil = 0;
+  // One edit, never retried or waited on: a frame Telegram refuses is skipped.
+  const show = async (text: string) => {
+    if (Date.now() < pausedUntil) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const body = { chat_id: chatId, text: useCe ? applyCustomEmoji(text) : text, parse_mode: "HTML", disable_web_page_preview: true };
+      try {
+        if (!messageId) messageId = (await tgOnce<{ message_id: number }>("sendMessage", body)).message_id;
+        else await tgOnce("editMessageText", { ...body, message_id: messageId });
+        return;
+      } catch (err) {
+        if (isNotModified(err)) return;
+        if (useCe && isCustomEmojiError(err)) {
+          useCe = false;
+          continue;
+        }
+        if (err instanceof TgError && err.code === 429) pausedUntil = Date.now() + ((err.retryAfter ?? 3) + 1) * 1000;
+        return;
+      }
+    }
+  };
+
+  const stepIn = Math.max(1, Math.ceil(n / 5)); // sources started per frame
+  const stepOut = Math.max(1, Math.ceil(n / 4)); // results revealed per frame
+  const started = Date.now();
+  pos = Math.min(n, stepIn);
+  await show(frame(false));
+  void tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
+  while (done < n) {
+    await Promise.race([search, sleep(CHECK_FRAME_MS)]);
+    if (res) {
+      // the answer can come early: still finish the current frame's pause
+      await sleep(Math.max(0, CHECK_FRAME_MS - ((Date.now() - started) % CHECK_FRAME_MS)));
+      done = Math.min(n, done + stepOut);
+      pos = Math.min(n, Math.max(pos, done + stepOut));
+    } else {
+      pos = Math.min(n, pos + stepIn);
+      if (!slow && Date.now() - started > 4000) slow = true;
+      if (Date.now() - started > 60_000) break; // the search has its own timeouts; never spin forever
+    }
+    dots++;
+    if (done < n) await show(frame(false));
+  }
+  const result = (res as CheckResult | null) || (await search);
+  res = result;
+  done = n;
+  // the last frame must land, so it waits out a flood pause instead of skipping
+  if (Date.now() < pausedUntil) await sleep(Math.min(10_000, pausedUntil - Date.now()));
+  pausedUntil = 0;
+  await show(frame(true));
+  return result;
 }
 
 // Cancel row shown on every step of the in-bot complaint flow.
@@ -8921,13 +9073,24 @@ async function handleTelegramUpdate(update: TgUpdate) {
       bindings.customEmoji = arg === "on";
       saveBindings();
     }
+    if (arg === "reload") {
+      await loadPackEmoji(true);
+      const got = Object.keys(bindings.packEmoji?.map || {});
+      await tgSoft("sendMessage", {
+        chat_id: msg.chat.id,
+        text: got.length
+          ? `Из пака ${bindings.packEmoji?.set} взято ${got.length} значков: ${got.join(" ")}`
+          : "Не удалось прочитать пак эмодзи. Подробности в логах сервера.",
+      });
+      return;
+    }
     const state = customEmojiEnabled() ? "включены" : "выключены";
     await tgSoft("sendMessage", {
       chat_id: msg.chat.id,
       text:
         arg === "on" || arg === "off"
           ? `Премиум-эмодзи ${state}. Работают в личных сообщениях бота (меню и шаги жалобы), пока у владельца активен Telegram Premium.`
-          : `Премиум-эмодзи сейчас ${state}. Включить: /emoji on · выключить: /emoji off`,
+          : `Премиум-эмодзи сейчас ${state}. Включить: /emoji on · выключить: /emoji off · перечитать пак: /emoji reload`,
     });
     return;
   }
@@ -9072,7 +9235,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
       captchaRequired(cid); // consume one credit for this check
       await runBotCheck(msg.chat.id, q, true);
     } else if (r === "wrong") {
-      await tgSoft("sendMessage", { chat_id: msg.chat.id, text: botCapText(cid, "wrong") });
+      await sendCeMessage(msg.chat.id, botCapText(cid, "wrong"));
     } else {
       await sendBotCaptcha(msg.chat.id, botCapText(cid, r === "again" ? "again" : "expired"));
     }

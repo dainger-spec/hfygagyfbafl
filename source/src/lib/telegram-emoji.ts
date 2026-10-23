@@ -21,25 +21,48 @@ export const CUSTOM_EMOJI: Record<string, string> = {
   "📊": "5936143551854285132", // bar chart — stats line
 };
 
-// Longest keys first so a multi-codepoint emoji is matched before any prefix.
-const KEYS = Object.keys(CUSTOM_EMOJI).sort((a, b) => b.length - a.length);
+// More icons from the same pack, looked up at runtime by the bot (getStickerSet):
+// status marks in checks, captcha, account card. The fixed ids above always win.
+const packEmoji: Record<string, string> = {};
+
+export function registerPackEmoji(map: Record<string, string>) {
+  for (const [base, id] of Object.entries(map)) {
+    if (!/^\d{5,25}$/.test(id) || !base) continue;
+    packEmoji[base] = id;
+  }
+  EMOJI_RE = undefined;
+}
+
+// Button icons are from the same pack, so their ids work in text too.
+function idFor(base: string): string | undefined {
+  return CUSTOM_EMOJI[base] ?? packEmoji[base] ?? BUTTON_EMOJI[base];
+}
+
+// Is there a custom emoji for this plain emoji (fixed or from the pack)?
+export function hasEmojiId(base: string): boolean {
+  return Boolean(idFor(base));
+}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// One pass over the text, longest emoji first, so "⛔️" and "⛔" never wrap twice.
+let EMOJI_RE: RegExp | null | undefined;
+function emojiRe(): RegExp | null {
+  if (EMOJI_RE === undefined) {
+    const keys = [...new Set([...Object.keys(CUSTOM_EMOJI), ...Object.keys(packEmoji), ...Object.keys(BUTTON_EMOJI)])].sort((a, b) => b.length - a.length);
+    EMOJI_RE = keys.length ? new RegExp(keys.map(escapeRegExp).join("|"), "g") : null;
+  }
+  return EMOJI_RE;
+}
+
 // Wrap each known plain emoji in a <tg-emoji> tag (requires parse_mode "HTML").
 // The inner plain emoji is the fallback shown when the custom emoji can't load.
 export function applyCustomEmoji(text: string): string {
-  let out = text;
-  for (const base of KEYS) {
-    const id = CUSTOM_EMOJI[base]!;
-    out = out.replace(
-      new RegExp(escapeRegExp(base), "g"),
-      `<tg-emoji emoji-id="${id}">${base}</tg-emoji>`,
-    );
-  }
-  return out;
+  const re = emojiRe();
+  if (!re) return text;
+  return text.replace(re, (base) => `<tg-emoji emoji-id="${idFor(base)}">${base}</tg-emoji>`);
 }
 
 // Turn <tg-emoji ...>X</tg-emoji> back into its plain fallback X. Used to resend
