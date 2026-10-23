@@ -2087,7 +2087,8 @@ export async function resolveHandleServer(input: string, userId = ""): Promise<{
 } | null> {
   const parsed = parseTelegramInput(input);
   if (!parsed.username && !parsed.id) return null;
-  if (tooMany("resolve:global", 80, 60_000)) {
+  // Per-user cap first, so one user can't use up the shared lookup budget.
+  if ((userId && tooMany(`resolve:${userId}`, 20, 60_000)) || tooMany("resolve:global", 80, 60_000)) {
     const cached = parsed.username ? idCache[parsed.username.toLowerCase()] : "";
     if (cached && (!parsed.id || cached === parsed.id)) return { username: parsed.username, id: cached, source: "telegram" };
     return { username: parsed.username, id: parsed.id, source: parsed.id ? "parsed" : "unresolved" };
@@ -3202,8 +3203,23 @@ export function captchaRequired(userId: string): boolean {
 }
 
 // A fresh captcha image for this user (null when they request too many images).
+// Wrong answers per user in the last 30 min. Past the limit no new picture is
+// given, so a script can't just keep guessing words from the list.
+const captchaWrong = new Map<string, number[]>();
+const CAPTCHA_WRONG_MAX = 8;
+const CAPTCHA_WRONG_WINDOW = 30 * 60_000;
+
+function recentWrong(uid: string): number[] {
+  const now = Date.now();
+  const list = (captchaWrong.get(uid) || []).filter((t) => now - t < CAPTCHA_WRONG_WINDOW);
+  if (list.length) captchaWrong.set(uid, list);
+  else captchaWrong.delete(uid);
+  return list;
+}
+
 export function newCaptchaImage(userId: string, purpose: CaptchaPurpose = "check"): Buffer | null {
   const uid = String(userId);
+  if (recentWrong(uid).length >= CAPTCHA_WRONG_MAX) return null;
   if (tooMany(`capimg:${uid}`, 12, 10 * 60_000)) return null;
   const word = randomCaptchaWord();
   captchaPending.set(uid, { word, exp: Date.now() + 5 * 60_000, tries: 0, purpose });
@@ -3230,7 +3246,11 @@ export function solveCaptcha(userId: string, answer: string): "ok" | "wrong" | "
     return "ok";
   }
   p.tries += 1;
-  if (p.tries >= 3) {
+  const wrong = recentWrong(uid);
+  wrong.push(Date.now());
+  captchaWrong.set(uid, wrong);
+  if (captchaWrong.size > 20_000) captchaWrong.clear();
+  if (p.tries >= 2 || wrong.length >= CAPTCHA_WRONG_MAX) {
     captchaPending.delete(uid);
     return "expired";
   }
@@ -3559,6 +3579,8 @@ export async function sendApplicationToArbiters(
   // its id replaces whatever was submitted, so a post can't name the wrong person.
   for (const account of scammerAccounts(app).slice(0, 8)) {
     account.username = String(account.username || "").replace(/^@/, "").trim();
+    // Only a real Telegram username shape is kept (it ends up in posts and markers).
+    if (!/^[A-Za-z][A-Za-z0-9_]{2,31}$/.test(account.username)) account.username = "";
     account.telegramId = /^\d{5,15}$/.test(String(account.telegramId || "").trim()) ? String(account.telegramId).trim() : "";
     account.check = "unknown";
     if (account.username) {
@@ -3576,6 +3598,9 @@ export async function sendApplicationToArbiters(
         account.check = "ok";
       }
     }
+  }
+  if (!scammerAccounts(app).some((a) => a.telegramId)) {
+    return { ok: false, error: btUser(userId, "needAccountSubmit") };
   }
   try {
     const sent = await deliverApplication(app, copies);
@@ -5035,6 +5060,7 @@ async function startApply(chatId: number, from: TgUser) {
 }
 
 async function cancelApply(chatId: number, userId: string, notice?: string) {
+  if (botCaptchaWait.get(String(chatId)) === SUBMIT_CAPTCHA) botCaptchaWait.delete(String(chatId));
   clearStepMessage(chatId);
   sessions.delete(userId);
   // sendCeMessage so the menu buttons here get the same custom-emoji icons.

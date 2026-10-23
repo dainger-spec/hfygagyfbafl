@@ -407,7 +407,8 @@ declare global {
 // Opens a link from inside Telegram: t.me / tg:// links go through the native
 // handler, everything else opens in the in-app browser, with a plain-tab fallback.
 export function openExternal(url: string) {
-  if (!url) return;
+  // Only web and Telegram links; never javascript:, data: or other schemes.
+  if (!url || !/^(https?:\/\/|tg:\/\/)/i.test(url.trim())) return;
   try {
     const tg = window.Telegram?.WebApp;
     const isTg = /^tg:\/\//i.test(url) || /(?:t\.me|telegram\.me)\//i.test(url);

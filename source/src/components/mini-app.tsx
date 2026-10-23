@@ -1033,7 +1033,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                         {body}
                       </div>
                     ) : (
-                      <a key={i} href={c.link} target="_blank" rel="noreferrer" className={cls}>
+                      <a key={i} href={/^https:\/\//i.test(c.link) ? c.link : undefined} target="_blank" rel="noreferrer" className={cls}>
                         {body}
                       </a>
                     );
