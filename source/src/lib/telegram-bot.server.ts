@@ -2136,6 +2136,7 @@ type Mirror = {
   refreshedAt: number;
   dirty: boolean;
   savedAt: number;
+  version: number; // bumped on every change (admin stats are cached per version)
 };
 type MirrorFile = {
   v: 1;
@@ -2152,6 +2153,11 @@ const mirrors = new Map<string, Mirror>();
 const mirrorVerified = new Map<string, number>();
 const mirrorErrorUntil = new Map<string, number>();
 
+function touchMirror(m: Mirror) {
+  m.dirty = true;
+  m.version += 1;
+}
+
 function mirrorPath(key: string) {
   return join(MIRROR_DIR, `${key.replace(/[^0-9A-Za-z_-]/g, "")}.json`);
 }
@@ -2162,20 +2168,20 @@ function putMirrorMsg(m: Mirror, id: number, date: number, text: string) {
   m.newest = Math.max(m.newest, id);
   const body = (text || "").slice(0, MIRROR_TEXT_MAX);
   if (!body.trim()) {
-    if (m.msgs.delete(id)) m.dirty = true;
+    if (m.msgs.delete(id)) touchMirror(m);
     return;
   }
   const prev = m.msgs.get(id);
   if (prev && prev.text === body) return;
   m.msgs.set(id, { id, date: date || prev?.date || 0, text: body, low: body.toLowerCase() });
-  m.dirty = true;
+  touchMirror(m);
 }
 
 function loadMirror(channel: CheckChannel): Mirror {
   const key = chatIdKey(channel.id);
   const have = mirrors.get(key);
   if (have) return have;
-  const m: Mirror = { key, complete: false, msgs: new Map(), oldest: 0, newest: 0, updatedAt: 0, refreshedAt: 0, dirty: false, savedAt: 0 };
+  const m: Mirror = { key, complete: false, msgs: new Map(), oldest: 0, newest: 0, updatedAt: 0, refreshedAt: 0, dirty: false, savedAt: 0, version: 0 };
   const file = readJson<MirrorFile>(mirrorPath(key));
   if (file?.v === 1 && Array.isArray(file.msgs)) {
     for (const [id, date, text] of file.msgs) putMirrorMsg(m, id, date, text);
@@ -2282,7 +2288,7 @@ async function mirrorRefresh(channel: CheckChannel, m: Mirror) {
     for (const id of [...m.msgs.keys()]) {
       if (id >= low && !seen.has(id)) {
         m.msgs.delete(id);
-        m.dirty = true;
+        touchMirror(m);
       }
     }
   }
@@ -2425,7 +2431,7 @@ async function confirmMirrorHits(
       const x = alive.get(id);
       if (!x) {
         m.msgs.delete(id);
-        m.dirty = true;
+        touchMirror(m);
         dropped.add(id);
         continue;
       }
@@ -2441,6 +2447,63 @@ async function confirmMirrorHits(
     if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
     return hits;
   }
+}
+
+// How far a copy has got. Channel message ids grow from 1, so the share of
+// 1..newest already covered (oldest..newest) is a good progress estimate.
+function mirrorProgress(m: Mirror): number {
+  if (m.complete) return 100;
+  if (!m.newest || !m.oldest) return 0;
+  return Math.max(0, Math.min(99, Math.round((1 - m.oldest / m.newest) * 100)));
+}
+
+// Distinct @usernames / ids mentioned in a copy (for the admin stats), cached
+// until the copy changes.
+const mirrorTokenCache = new Map<string, { version: number; usernames: Set<string>; ids: Set<string> }>();
+function mirrorTokens(m: Mirror) {
+  const hit = mirrorTokenCache.get(m.key);
+  if (hit && hit.version === m.version) return hit;
+  const usernames = new Set<string>();
+  const ids = new Set<string>();
+  for (const msg of m.msgs.values()) {
+    const t = tokensFromText(msg.text);
+    for (const u of t.usernames) usernames.add(u);
+    for (const id of t.ids) ids.add(id);
+  }
+  const value = { version: m.version, usernames, ids };
+  mirrorTokenCache.set(m.key, value);
+  return value;
+}
+
+export function mirrorStats() {
+  const allUsernames = new Set<string>();
+  const allIds = new Set<string>();
+  const channels = mirrorChannels().map((c) => {
+    const m = loadMirror(c);
+    const t = mirrorTokens(m);
+    for (const u of t.usernames) allUsernames.add(u);
+    for (const id of t.ids) allIds.add(id);
+    return {
+      title: c.title || c.username || c.id,
+      posts: m.msgs.size,
+      usernames: t.usernames.size,
+      complete: m.complete,
+      progress: mirrorProgress(m),
+      failing: Date.now() < (mirrorErrorUntil.get(m.key) || 0),
+    };
+  });
+  return {
+    channels,
+    posts: channels.reduce((sum, c) => sum + c.posts, 0),
+    usernames: allUsernames.size,
+    ids: allIds.size,
+    verifiedPairs: Object.keys(idCache).length,
+  };
+}
+
+// Start copying right away (a channel was just added) instead of on the next tick.
+function kickMirror() {
+  setTimeout(() => void mirrorTick(5).catch(() => {}), 300);
 }
 
 // Owner diagnostics: how far each channel's copy has got.
@@ -3274,6 +3337,7 @@ async function toggleCheckChannel(id: string) {
   }
   bindings.checkChannels = list.slice(-100);
   saveBindings();
+  kickMirror();
 }
 
 // Owner callbacks (ub:*). Returns true when handled.
@@ -7137,9 +7201,29 @@ function adminCheck(): AdminView {
       ? "Поиск идёт через подключённый аккаунт по всем постам этих каналов, включая старые. Бота в каналы добавлять не нужно — аккаунт должен быть на них подписан."
       : "Сейчас бот индексирует только новые посты каналов, где он сам состоит. Чтобы искать по старым постам чужих каналов без добавления бота, подключите аккаунт (юзербот) — см. HOSTING.md.",
   ];
+  if (ub) {
+    const st = mirrorStats();
+    const n = (v: number) => v.toLocaleString("ru-RU");
+    const done = st.channels.filter((c) => c.complete).length;
+    lines.push(
+      "",
+      "<b>📊 Быстрый поиск (копия каналов)</b>",
+      `Сохранено постов: <b>${n(st.posts)}</b> · каналов скопировано целиком: ${done} из ${st.channels.length}`,
+      `Юзернеймов в постах: <b>${n(st.usernames)}</b> · ID: <b>${n(st.ids)}</b>`,
+      `Проверенных пар username → ID: ${n(st.verifiedPairs)}`,
+      "",
+      ...st.channels.slice(0, 30).map(
+        (c) =>
+          `• ${escapeHtml(cut(c.title, 32))} — ${n(c.posts)} постов, ${n(c.usernames)} юзернеймов — ` +
+          (c.complete ? "✅ вся история" : c.failing ? "⚠️ нет доступа, повтор через 15 мин" : `⏳ ~${c.progress}%`),
+      ),
+    );
+    if (st.channels.length > 30) lines.push(`…и ещё ${st.channels.length - 30}`);
+  }
   const keyboard: AdminView["keyboard"] = list.map((c) => [
     { text: `🗑 ${cut(c.title || c.username || c.id, 36)}`, callback_data: `adm:ccdel:${c.id}` },
   ]);
+  if (ub) keyboard.push([{ text: "🔄 Обновить статистику", callback_data: "adm:cc" }]);
   keyboard.push([{ text: "🔌 Проверить аккаунт", callback_data: "adm:ccping" }]);
   keyboard.push([{ text: "🧹 Убрать жалобу из блеклиста", callback_data: "adm:ccrm" }]);
   keyboard.push([{ text: "➕ Добавить канал", callback_data: "adm:ccadd" }]);
@@ -7383,6 +7467,7 @@ async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
     bindings.checkChannels = list.slice(-100);
     saveBindings();
   }
+  if (hasUserbot()) kickMirror();
   await tgSoft("sendMessage", {
     chat_id: arbiterChatId,
     text: [
@@ -7391,7 +7476,7 @@ async function applyCheckChannel(arbiterChatId: number | string, raw: string) {
       `ID: <code>${escapeHtml(entry.id)}</code>`,
       "",
       hasUserbot()
-        ? "Поиск по этому каналу идёт через подключённый аккаунт, включая старые посты."
+        ? "Начал копировать историю канала для быстрого поиска. Прогресс: /admin → проверка контрагента."
         : "Новые посты этого канала будут попадать в поиск. Для старых постов подключите аккаунт (юзербот).",
     ].join("\n"),
     parse_mode: "HTML",
