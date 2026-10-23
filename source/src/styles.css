@@ -254,6 +254,21 @@
   from { opacity: 0; transform: translateY(16px) scale(0.9); }
   to { opacity: 1; transform: none; }
 }
+/* Search scan: rows slide in, statuses pop in when resolved. */
+.epb-scan-row {
+  animation: epb-scan-row 0.35s cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+@keyframes epb-scan-row {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+.epb-scan-pop {
+  animation: epb-scan-pop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+}
+@keyframes epb-scan-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: none; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .epb-cap-backdrop, .epb-cap-card, .epb-cap-img, .epb-frog-in { animation: none; }
+  .epb-cap-backdrop, .epb-cap-card, .epb-cap-img, .epb-frog-in, .epb-scan-row, .epb-scan-pop { animation: none; }
 }

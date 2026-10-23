@@ -2880,7 +2880,27 @@ export type CheckResult = {
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: CheckHit[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
+  // Hits per searched source (keys from checkSources()), for the app's scan animation.
+  sourceHits?: Record<string, number>;
 };
+
+// Display name of a connected check channel (WWH channels collapse into one "WWH").
+function checkSourceName(title: string): string {
+  return /wwh/i.test(title || "") ? "WWH" : title || "Источник";
+}
+
+// What a counterparty check searches, in display order: our blacklist, every
+// connected channel/chat, then the third-party (manual) blacklist.
+export function checkSources(): { key: string; title: string }[] {
+  if (!checkEnabled()) return [];
+  const out: { key: string; title: string }[] = [{ key: "epb", title: "Europe Private Blacklist" }];
+  for (const c of checkChannels()) {
+    const name = checkSourceName(c.title || c.username || "");
+    if (!out.some((o) => o.key === `ch:${name}`)) out.push({ key: `ch:${name}`, title: name });
+  }
+  out.push({ key: "manual", title: "Сторонние блеклисты" });
+  return out;
+}
 
 // A compact entry for the "recent blacklists" list. Deliberately light (no
 // story/summary) so the list loads fast; the full text is fetched on tap.
@@ -3139,7 +3159,14 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
   }
   hits.sort((a, b) => b.date - a.date);
-  const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual: matchManualBlacklist(uname, id) };
+  const manual = matchManualBlacklist(uname, id);
+  const sourceHits: Record<string, number> = { epb: epb.length, manual: manual.length };
+  for (const h of hits) {
+    const ch = isCheckChannel(h.channelId);
+    const key = `ch:${checkSourceName(ch?.title || ch?.username || h.channelTitle)}`;
+    sourceHits[key] = (sourceHits[key] || 0) + 1;
+  }
+  const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, sourceHits };
   const display = uname ? `@${parsed.username.replace(/^@/, "")}` : id ? `ID ${id}` : "";
   recordFind(uname, id, display, result);
   return result;
@@ -4640,14 +4667,23 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
     }
   }
   const locale = langOf(chatId);
+  // Live progress: one message lists every source as "⏳ …", grows a "can take
+  // up to 30 s" line if slow, and ends as a ✅/⛔ summary before the result.
+  const sources = checkSources();
+  const en = locale === "en";
+  const head = en ? "🔎 Checking sources…" : "🔎 Проверяем источники…";
+  const slowLine = en ? "⏳ The search can take up to 30 seconds. Please wait." : "⏳ Поиск может продлиться до 30 сек. Пожалуйста, ожидайте.";
+  const pendingText = (slow: boolean) =>
+    [head, "", ...sources.map((src) => `⏳ ${escapeHtml(src.title)}`), ...(slow ? ["", slowLine] : [])].join("\n");
+  const progress = sources.length
+    ? await tgSoft<{ message_id: number }>("sendMessage", { chat_id: chatId, text: pendingText(false), parse_mode: "HTML" })
+    : null;
   await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
-  // A slow search gets a "can take up to 30 s" note, removed once the result is in.
-  let slowNote: Promise<{ message_id: number } | null> | null = null;
+  let slowEdit: Promise<unknown> | null = null;
   const slowTimer = setTimeout(() => {
-    slowNote = tgSoft<{ message_id: number }>("sendMessage", {
-      chat_id: chatId,
-      text: locale === "en" ? "⏳ The search can take up to 30 seconds. Please wait." : "⏳ Поиск может продлиться до 30 сек. Пожалуйста, ожидайте.",
-    });
+    if (progress?.message_id) {
+      slowEdit = tgSoft("editMessageText", { chat_id: chatId, message_id: progress.message_id, text: pendingText(true), parse_mode: "HTML" });
+    }
   }, 4000);
   let res: CheckResult;
   try {
@@ -4656,9 +4692,21 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
     res = { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
   }
   clearTimeout(slowTimer);
-  if (slowNote) {
-    const note = await (slowNote as Promise<{ message_id: number } | null>);
-    if (note?.message_id) void tgSoft("deleteMessage", { chat_id: chatId, message_id: note.message_id });
+  if (slowEdit) await slowEdit; // never let the "slow" edit land after the summary
+  if (progress?.message_id) {
+    const hits = res.sourceHits || {};
+    const lines = sources.map((src) => {
+      const n = hits[src.key] || 0;
+      return n
+        ? `⛔ <b>${escapeHtml(src.title)}</b> — ${en ? "found" : "найдено"}: ${n}`
+        : `✅ ${escapeHtml(src.title)} — ${en ? "clean" : "чисто"}`;
+    });
+    await tgSoft("editMessageText", {
+      chat_id: chatId,
+      message_id: progress.message_id,
+      text: [en ? "🔎 Sources checked:" : "🔎 Источники проверены:", "", ...lines].join("\n"),
+      parse_mode: "HTML",
+    });
   }
   await sendCeMessage(chatId, formatBotCheck(locale, input, res), {
     reply_markup: checkResultKeyboard(locale),

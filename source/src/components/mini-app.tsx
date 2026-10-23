@@ -15,7 +15,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getAccess, getCaptcha, solveCaptcha, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBlacklistEntry, getFeatures, getMyComplaints, getRecentBlacklist, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -735,7 +735,114 @@ type CheckData = {
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: { channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
+  sourceHits?: Record<string, number>;
 };
+
+type ScanSource = { key: string; title: string };
+
+// Hits per source when the server didn't send them (older cached results).
+function fallbackHits(r: CheckData): Record<string, number> {
+  const out: Record<string, number> = { epb: r.epb.length, manual: r.manual?.length ?? 0 };
+  for (const c of r.channels) {
+    const key = `ch:${forumName(c.channelTitle)}`;
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
+}
+
+// The search "scan": each source slides in as "Проверка <name>…" with a moving
+// highlight while the server works; when the answer arrives the rows resolve one
+// by one to "чисто" / "найдено: N", then onDone opens the full result.
+function SourceScan({
+  sources,
+  hits,
+  onDone,
+}: {
+  sources: ScanSource[];
+  hits: Record<string, number> | null;
+  onDone: () => void;
+}) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [shown, setShown] = useState(0);
+  const [cursor, setCursor] = useState(0);
+  const [resolved, setResolved] = useState(0);
+  const doneRef = useRef(false);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
+  const n = sources.length;
+  const appearMs = Math.min(230, 1800 / Math.max(1, n));
+  const resolveMs = Math.min(230, 1600 / Math.max(1, n));
+
+  useEffect(() => {
+    if (shown >= n) return;
+    const tm = window.setTimeout(() => setShown((v) => v + 1), appearMs);
+    return () => window.clearTimeout(tm);
+  }, [shown, n, appearMs]);
+
+  useEffect(() => {
+    if (hits) return;
+    const iv = window.setInterval(() => setCursor((c) => c + 1), 420);
+    return () => window.clearInterval(iv);
+  }, [hits]);
+
+  useEffect(() => {
+    if (!hits || shown < n) return;
+    if (resolved >= n) {
+      if (!doneRef.current) {
+        doneRef.current = true;
+        window.setTimeout(() => onDoneRef.current(), 650);
+      }
+      return;
+    }
+    const tm = window.setTimeout(() => {
+      const found = (hits[sources[resolved]!.key] ?? 0) > 0;
+      haptic(found ? "heavy" : "light");
+      setResolved((v) => v + 1);
+    }, resolved === 0 ? 150 : resolveMs);
+    return () => window.clearTimeout(tm);
+  }, [hits, shown, resolved, n, sources, resolveMs]);
+
+  const active = shown ? cursor % shown : -1;
+  return (
+    <ul className="w-full max-w-sm space-y-1.5 text-left">
+      {sources.slice(0, shown).map((s, i) => {
+        const done = Boolean(hits) && i < resolved;
+        const count = hits?.[s.key] ?? 0;
+        const isActive = !hits && i === active;
+        return (
+          <li
+            key={s.key}
+            className={cn(
+              "epb-scan-row flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-colors duration-300",
+              done ? (count ? "bg-danger/10" : "bg-ok/5") : isActive ? "bg-gold/10" : "bg-surface/50",
+            )}
+          >
+            <span className="flex size-5 shrink-0 items-center justify-center">
+              {done ? (
+                count ? (
+                  <ShieldAlert className="epb-scan-pop size-4 text-danger" />
+                ) : (
+                  <ShieldCheck className="epb-scan-pop size-4 text-ok" />
+                )
+              ) : (
+                <LoaderCircle className={cn("size-4 animate-spin", isActive ? "text-gold" : "text-muted/50")} />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              {done ? null : <span className="text-muted">{t(locale, "scanChecking")} </span>}
+              <span className={cn("font-semibold", isActive && "epb-gold-text")}>{s.title}</span>
+            </span>
+            {done ? (
+              <span className={cn("epb-scan-pop shrink-0 text-xs font-bold", count ? "text-danger" : "text-ok")}>
+                {count ? t(locale, "scanFound", { n: count }) : t(locale, "scanClean")}
+              </span>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 const RECENT_CACHE_KEY = "epb-recent-bl";
 
@@ -861,6 +968,30 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     }
   }
 
+  // Sources the check goes through (for the scan animation); fetched once.
+  const [scanSources, setScanSources] = useState<ScanSource[]>([]);
+  const [scanHits, setScanHits] = useState<Record<string, number> | null>(null);
+  const [scanId, setScanId] = useState(0);
+  const scanDone = useRef<(() => void) | null>(null);
+  const sourcesRef = useRef<Promise<ScanSource[]> | null>(null);
+  function loadSources(): Promise<ScanSource[]> {
+    if (!sourcesRef.current) {
+      sourcesRef.current = getCheckSources({ data: { initData: telegramInitData() } })
+        .then((r) => (r.ok ? r.sources : []))
+        .catch(() => [] as ScanSource[])
+        .then((list) => {
+          if (!list.length) sourcesRef.current = null; // try again next time
+          setScanSources(list);
+          return list;
+        });
+    }
+    return sourcesRef.current;
+  }
+  useEffect(() => {
+    void loadSources();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function run() {
     const input = value.trim();
     if (!input) {
@@ -869,16 +1000,27 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     }
     haptic("light");
     setError("");
+    setScanHits(null);
+    setScanId((v) => v + 1);
     setLoading(true);
     setData(null);
     try {
-      // Hold the frog loader for at least 2.5 s so it never just flashes.
-      const [res] = await Promise.all([
+      // Hold the loader for at least 1.5 s so the scan never just flashes.
+      const [res, sources] = await Promise.all([
         checkCounterparty({ data: { input, initData: telegramInitData() } }),
-        new Promise((r) => window.setTimeout(r, 2500)),
+        loadSources(),
+        new Promise((r) => window.setTimeout(r, 1500)),
       ]);
       if (res.ok) {
         const r = res.result as CheckData;
+        if (sources.length) {
+          // Let the rows resolve one by one before the full result opens.
+          await new Promise<void>((resolve) => {
+            scanDone.current = resolve;
+            setScanHits(r.sourceHits ?? fallbackHits(r));
+          });
+          scanDone.current = null;
+        }
         setData(r);
         haptic(r.epb.length || r.channels.length || (r.manual?.length ?? 0) ? "heavy" : "soft");
       } else if (res.error === "captcha") {
@@ -981,13 +1123,20 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
             <img
               src={FROG_ANIM}
               alt=""
-              width={120}
-              height={123}
+              width={scanSources.length ? 92 : 120}
+              height={scanSources.length ? 94 : 123}
               draggable={false}
-              className="h-[123px] w-[120px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
+              className={cn(
+                "select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]",
+                scanSources.length ? "h-[94px] w-[92px]" : "h-[123px] w-[120px]",
+              )}
             />
             <p className="text-sm font-semibold text-muted">{t(locale, "checkChecking")}</p>
-            <div className="epb-progress h-1.5 w-48 max-w-full rounded-full bg-surface" />
+            {scanSources.length ? (
+              <SourceScan key={scanId} sources={scanSources} hits={scanHits} onDone={() => scanDone.current?.()} />
+            ) : (
+              <div className="epb-progress h-1.5 w-48 max-w-full rounded-full bg-surface" />
+            )}
             {slowSearch ? (
               <p className="epb-frog-in max-w-xs text-xs leading-relaxed text-muted/80">{t(locale, "checkSlow")}</p>
             ) : null}

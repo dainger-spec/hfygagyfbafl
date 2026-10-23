@@ -118,6 +118,14 @@ export const checkCounterparty = createServerFn({ method: "POST" })
     return { ok: true as const, result: await bot.checkCounterparty(data.input) };
   });
 
+export const getCheckSources = createServerFn({ method: "POST" })
+  .validator(z.object({ initData: z.string().max(16384) }))
+  .handler(async ({ data }) => {
+    const bot = await import("@/lib/telegram-bot.server");
+    if (!bot.verifyTelegramInitData(data.initData)) return { ok: false as const, sources: [] };
+    return { ok: true as const, sources: bot.checkSources() };
+  });
+
 export const getFeatures = createServerFn({ method: "GET" }).handler(async () => {
   const { featuresEnabled } = await import("@/lib/telegram-bot.server");
   return featuresEnabled();
