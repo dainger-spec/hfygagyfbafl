@@ -361,6 +361,25 @@ function Home({
 
 const SPONSORS_CACHE_KEY = "epb-sponsors";
 
+// Gold-gradient text that leaves emoji in their own colours (a background-clip
+// gradient would otherwise paint emoji glyphs gold too).
+function GoldText({ text }: { text: string }) {
+  const parts = text.split(/(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)/u);
+  return (
+    <span>
+      {parts.map((p, i) =>
+        !p ? null : /\p{Extended_Pictographic}/u.test(p) ? (
+          <span key={i}>{p}</span>
+        ) : (
+          <span key={i} className="epb-gold-text">
+            {p}
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
 // Yellow running line at the bottom of the home screen: the broadcast sponsors.
 // Seeded from a sessionStorage cache so it shows instantly on open (the server
 // fetch resolves the chat titles/avatars, which takes a couple of seconds).
@@ -397,7 +416,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
       </span>
       {items.map((s) => (
         <span key={s.id} className="inline-flex items-center">
-          <span className="epb-gold-text">{s.title}</span>
+          <GoldText text={s.title} />
           <span className="mx-3 text-gold/40">/</span>
         </span>
       ))}
@@ -1068,9 +1087,7 @@ function Done({
   const locale = useBlacklistStore((s) => s.locale);
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto overscroll-contain px-5 py-10 text-center [touch-action:pan-y]">
-      <div className="flex size-16 items-center justify-center rounded-full bg-gold text-gold-fg">
-        <EuStarsLogo size={40} className="text-gold-fg" />
-      </div>
+      <EuStarsLogo size={132} title="Europe Private Blacklist" spin emblem />
       <h2 className="mt-6 font-display text-2xl font-bold">{t(locale, "doneTitle")}</h2>
       <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted">
         {notice || t(locale, "doneText")}
