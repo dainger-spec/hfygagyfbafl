@@ -1766,9 +1766,14 @@ function idOnLine(line: string, id: string): boolean {
 //   "Арбитраж пользователя <заявитель> на пользователя <обвиняемый>".
 // Only the accused — the side after "на [пользователя]" / "против" / "on" /
 // "against" — should be flagged, never the person who filed.
-function arbitrationAccused(line: string): string {
+function arbitrationAccused(line: string, strict = false): string {
+  // Strict (WWH): the accused must follow an explicit "на пользователя" /
+  // "on user" / "@", so ad lines with a stray "на"/"on" never qualify.
+  const marker = strict
+    ? "(?:пользовател\\S*\\s+|юзер\\S*\\s+|user\\s+|@)"
+    : "(?:пользовател\\S*\\s+|юзер\\S*\\s+|человек\\S*\\s+|аккаунт\\S*\\s+|user\\s+|@)?";
   const m = line.match(
-    /(?:^|\s)(?:на|против|on|against)\s+(?:пользовател\S*\s+|юзер\S*\s+|человек\S*\s+|аккаунт\S*\s+|user\s+|@)?(.+)$/i,
+    new RegExp("(?:^|\\s)(?:на|против|on|against)\\s+" + marker + "(.+)$", "i"),
   );
   if (!m) return "";
   // Drop a trailing filer clause ("… от @reporter", "… from @x", "… заявитель …").
@@ -1787,7 +1792,7 @@ export function postMatchesSubject(body: string, username: string, id: string, s
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer (both modes).
     if (/арбитраж|arbitr/i.test(line)) {
-      const accused = arbitrationAccused(line);
+      const accused = arbitrationAccused(line, strict);
       if (accused && ((!ignoredName && usernameOnLine(accused, uname)) || idOnLine(accused, id))) return true;
       if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
@@ -1808,7 +1813,7 @@ export function postMatchesSubject(body: string, username: string, id: string, s
     if (!NON_ACCUSATION_LINE_RE.test(rest)) {
       if (!strict) return true; // pure blacklist channel: a mention is an accusation
       // strict channel: require an accusation signal on the line or the label above it
-      if (ACCUSATION_LINE_RE.test(rest) || labelAbove) return true;
+      if (labelAbove) return true; // strict: arbitrations + "Ответчик:" only
     }
     if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
   }
