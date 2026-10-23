@@ -44,6 +44,9 @@ export const Route = createFileRoute("/api/telegram/evidence")({
       },
       POST: async ({ request }) => {
         try {
+          if (!/multipart\/form-data/i.test(request.headers.get("content-type") || "")) {
+            return Response.json({ ok: false, error: "file required" }, { status: 400 });
+          }
           const declared = Number(request.headers.get("content-length") || 0);
           if (!declared || declared > MAX_POST_BYTES) {
             return Response.json({ ok: false, error: "too large" }, { status: 413 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import http from "node:http";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -19,7 +20,7 @@ function isAbortNoise(args) {
       }
     })
     .join(" ");
-  return /aborted|ECONNRESET|EPIPE|socket hang up|premature close/i.test(text);
+  return /aborted|ECONNRESET|EPIPE|socket hang up|premature close|Invalid server action param for serverFnId/i.test(text);
 }
 
 const origError = console.error.bind(console);
@@ -34,6 +35,27 @@ for (const ev of ["uncaughtException", "unhandledRejection"]) {
     origError("[epb]", err);
   });
 }
+
+// Scanners send paths with broken %-escapes (e.g. "/%E0%A4%A"). The framework
+// throws while decoding them, outside any handler, so the request would hang
+// and log an uncaught exception. Answer those with 400 before they get there.
+const origEmit = http.Server.prototype.emit;
+http.Server.prototype.emit = function (event, req, res, ...rest) {
+  if (event === "request" && req && typeof req.url === "string") {
+    try {
+      decodeURI(req.url.split("?")[0]);
+    } catch {
+      try {
+        res.statusCode = 400;
+        res.end("bad request");
+      } catch {
+        /* ignore */
+      }
+      return true;
+    }
+  }
+  return origEmit.call(this, event, req, res, ...rest);
+};
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
