@@ -1579,8 +1579,12 @@ function mtproto() {
       const { StringSession } = await import("telegram/sessions/index.js");
       const { Api } = await import("telegram/tl/index.js");
       const { Logger } = await import("telegram/extensions/Logger.js");
-      const apiId = Number(process.env.TELEGRAM_API_ID || 2040);
-      const apiHash = process.env.TELEGRAM_API_HASH || "b18441a1ff607e10a989891a5462e627";
+      // Telegram asks every app to use its own api_id. The owner's own keys (the
+      // ones entered for the userbot) are used when set; the public desktop-client
+      // keys are only a fallback.
+      const own = userApiCreds();
+      const apiId = own.apiId && own.apiHash ? own.apiId : 2040;
+      const apiHash = own.apiId && own.apiHash ? own.apiHash : "b18441a1ff607e10a989891a5462e627";
       let saved = "";
       try {
         const [stamp, value] = readFileSync(MT_SESSION_PATH, "utf8").split("\n");
@@ -2041,7 +2045,7 @@ function arbitrationAccused(line: string, strict = false): string {
 // (the garant, who recommended them, a group) only inside the story. When a post
 // has such fields, only the people in them are accused.
 const INVISIBLE_RE = /[\u200B-\u200F\u2060-\u206F\uFE0E\uFE0F]/g;
-const NAME_TOKEN_RE = /@([A-Za-z][A-Za-z0-9_]{3,31})|(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})|(?<![\d/.,])(\d{5,15})(?![\d/.,%$€₽])/gi;
+const NAME_TOKEN_RE = /@([A-Za-z][A-Za-z0-9_]{3,31})|(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})|(?<![\d/.,])(\d{5,15})(?![\d/,%$€₽]|\.\d)/gi;
 // Field labels that are not about the accused (and amounts/dates).
 const FIELD_NOT_ACCUSED_RE =
   /(гарант|заявител|истец|пострадавш|жертв|автор|свидетел|рекоменд|связ|контакт|админ|модер|владел|owner|канал|чат|групп|предложк|вопрос|оспор|обжал|support|поддержк|реклам|менеджер|наш|подпис|сумм|ущерб|amount|цен|дат|обновл|итог|оплат|телефон|карт)/iu;
@@ -2055,12 +2059,29 @@ function nameTokens(line: string): { value: string; index: number }[] {
   return out;
 }
 
+// The last line of a post, after a blank line, holding nothing but one @handle
+// or link: the channel's signature, not a person being reported.
+function signatureLineIndex(lines: string[]): number {
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last]!.trim()) last--;
+  if (last <= 0 || lines[last - 1]!.trim()) return -1;
+  const line = lines[last]!.replace(INVISIBLE_RE, "");
+  if (nameTokens(line).length !== 1) return -1;
+  return line.replace(NAME_TOKEN_RE, "").replace(/[\s\p{P}\p{S}]/gu, "") ? -1 : last;
+}
+
 // Names standing in accused fields of the post (empty: the post has no fields).
-function accusedFields(body: string): Set<string> {
+// The channel's own @handle and a lone signature line at the end of the post
+// ("…\n\n@channel") are not fields.
+function accusedFields(body: string, selfHandle = ""): Set<string> {
   const fields = new Set<string>();
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.replace(INVISIBLE_RE, "");
-    const tokens = nameTokens(line);
+  const self = selfHandle ? `@${selfHandle.replace(/^@/, "").toLowerCase()}` : "";
+  const lines = body.split(/\r?\n/);
+  const sig = signatureLineIndex(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (i === sig) continue;
+    const line = lines[i]!.replace(INVISIBLE_RE, "");
+    const tokens = nameTokens(line).filter((t) => t.value !== self);
     if (!tokens.length) continue;
     const prefix = line
       .slice(0, tokens[0]!.index)
@@ -2072,7 +2093,9 @@ function accusedFields(body: string): Set<string> {
     const hasSep = /[:\-—–]$/u.test(prefix);
     // "@x …" / "👤 123" (nothing before the name) or a short "Label: @x".
     const isField = !label || (hasSep && label.split(" ").length <= 3);
-    if (!isField || (label && FIELD_NOT_ACCUSED_RE.test(label))) continue;
+    // The label's first word decides: "Гарант кидалы:" is the garant, "Кидала из
+    // чата:" is the scammer.
+    if (!isField || (label && FIELD_NOT_ACCUSED_RE.test(label.split(" ")[0]!))) continue;
     for (const t of tokens) fields.add(t.value);
   }
   return fields;
@@ -2081,8 +2104,10 @@ function accusedFields(body: string): Set<string> {
 // `nick` is a forum nickname typed as free text (may contain spaces); it is only
 // ever matched strictly (arbitration accused side or an accused label), since a
 // plain word would otherwise match unrelated posts.
-export function postMatchesSubject(body: string, username: string, id: string, strict = false, nick = ""): boolean {
+export function postMatchesSubject(body: string, username: string, id: string, strict = false, nick = "", selfHandle = ""): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
+  // A channel's own @handle (its signature under every post) is never the accused.
+  if (uname && selfHandle && uname === selfHandle.replace(/^@/, "").toLowerCase()) return false;
   const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
   const nickName = (nick || "").trim();
   if (nickName && !uname && !id) strict = true;
@@ -2093,14 +2118,18 @@ export function postMatchesSubject(body: string, username: string, id: string, s
   // A post with accused fields (plain blacklist channels): the people in the
   // fields are accused; anyone else only by a one-name line with an accusation
   // word (checked in the loop below).
-  const fields = strict ? new Set<string>() : accusedFields(body);
+  const fields = strict ? new Set<string>() : accusedFields(body, selfHandle);
   const structured = fields.size > 0;
   if (structured) {
     const idDigits0 = (id || "").replace(/\D/g, "");
     if ((!ignoredName && fields.has(`@${uname}`)) || (idDigits0.length >= 5 && fields.has(idDigits0))) return true;
   }
   let labelAbove = false;
-  for (const line of body.split(/\r?\n/)) {
+  const allLines = body.split(/\r?\n/);
+  const sigLine = strict ? -1 : signatureLineIndex(allLines);
+  for (let li = 0; li < allLines.length; li++) {
+    const line = allLines[li]!;
+    if (li === sigLine) continue; // the channel's signature
     // Arbitration lines: match only the accused side, never the filer (both modes).
     // In strict channels an explicit "X на пользователя Y" / "X on user Y" line is
     // an arbitration line even without the word "арбитраж" on it.
@@ -2126,7 +2155,10 @@ export function postMatchesSubject(body: string, username: string, id: string, s
           ? nickPattern(nickName)
           : new RegExp("(?<!\\d)" + (id || "").replace(/\D/g, "") + "(?!\\d)");
       const at = re ? line.search(re) : -1;
-      if (at > 0 && ACCUSED_PREFIX_RE.test(line.slice(0, at))) return true;
+      const before = at > 0 ? line.slice(0, at) : "";
+      const firstWord = before.replace(INVISIBLE_RE, "").replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/)[0] || "";
+      // ...unless the label is about someone else ("Гарант кидалы: @x").
+      if (at > 0 && ACCUSED_PREFIX_RE.test(before) && !(firstWord && FIELD_NOT_ACCUSED_RE.test(firstWord))) return true;
     }
     if (hasNick && !hasId && !hasU) {
       // a nickname alone needs the accused label above it (strict rules)
@@ -2144,7 +2176,11 @@ export function postMatchesSubject(body: string, username: string, id: string, s
       // In a post with fields, a name inside the story counts only when it is
       // the only name on the line and the line accuses ("его второй акк @x тоже
       // кинул"), never "по рекомендации @a и @b обратился к @c".
-      const single = nameTokens(line.replace(INVISIBLE_RE, "")).length === 1;
+      // (an id next to the handle on the same line usually is that account's id)
+      const lineTokens = nameTokens(line.replace(INVISIBLE_RE, ""));
+      const own = (v: string) => v === `@${uname}` || v === idDigits;
+      const others = lineTokens.filter((t) => !own(t.value));
+      const single = others.length === 0 || (lineTokens.length <= 2 && others.every((t) => !t.value.startsWith("@")));
       if (single && ACCUSATION_LINE_RE.test(rest) && !NON_ACCUSATION_LINE_RE.test(rest)) return true;
       if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
@@ -2179,7 +2215,7 @@ async function userSearchChannel(
     const out: CheckHit[] = [];
     for (const m of byId.values()) {
       const body = m.message || "";
-      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id, strict, subject.nick)) continue;
+      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id, strict, subject.nick, channel.username)) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
@@ -2488,7 +2524,7 @@ function searchMirror(channel: CheckChannel, m: Mirror, subject: { username: str
   const out: CheckHit[] = [];
   for (const msg of m.msgs.values()) {
     if (!needles.some((n) => msg.low.includes(n))) continue;
-    if (!postMatchesSubject(msg.text, subject.username, subject.id, strict, subject.nick)) continue;
+    if (!postMatchesSubject(msg.text, subject.username, subject.id, strict, subject.nick, channel.username)) continue;
     out.push({
       channelId: channel.id,
       channelTitle: channel.title || "канал",
@@ -2530,7 +2566,7 @@ async function confirmMirrorHits(
         continue;
       }
       putMirrorMsg(m, id, x.date || 0, x.message || "");
-      if (!postMatchesSubject(x.message || "", subject.username, subject.id, strict, subject.nick)) dropped.add(id);
+      if (!postMatchesSubject(x.message || "", subject.username, subject.id, strict, subject.nick, channel.username)) dropped.add(id);
       else mirrorVerified.set(`${m.key}:${id}`, now);
     }
     if (mirrorVerified.size > 50_000) mirrorVerified.clear();
@@ -2663,7 +2699,7 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
         for (const msg of await serverSearch(client, peer, q)) if (msg.id) byId.set(msg.id, msg);
         const msgs = [...byId.values()];
         const mentioned = msgs.filter((x) => x.id && mentions(x.message || ""));
-        const relevant = msgs.filter((x) => x.id && postMatchesSubject(x.message || "", uname, resolvedId, isStrictChannel(ch)));
+        const relevant = msgs.filter((x) => x.id && postMatchesSubject(x.message || "", uname, resolvedId, isStrictChannel(ch), "", ch.username));
         line += `; поиск Telegram: упомянут ${mentioned.length}, в тему ${relevant.length}`;
       } catch (err) {
         line += `; поиск Telegram: ошибка — ${(err as Error)?.message || String(err)}`;
@@ -2691,7 +2727,12 @@ type TgUserRaw = {
   bot?: boolean;
   verified?: boolean;
   deleted?: boolean;
+  status?: { className?: string; wasOnline?: number };
+  photo?: { className?: string };
+  restricted?: boolean;
+  restrictionReason?: { reason?: string; text?: string }[];
 };
+type LastSeen = { kind: "online" | "recently" | "week" | "month" | "time" | "hidden"; at?: number };
 type TgProfile = {
   name: string;
   usernames: string[];
@@ -2700,9 +2741,29 @@ type TgProfile = {
   fake: boolean;
   bot: boolean;
   verified: boolean;
+  lastSeen: LastSeen;
+  hasPhoto: boolean;
+  restricted: string; // Telegram's restriction note, "" if none
   at: number;
+  // from users.getFullUser (one extra request, cached for a day)
+  about?: string;
+  channel?: { title: string; username?: string };
+  fullAt?: number;
 };
 const profileCache = new Map<string, TgProfile>();
+// The raw user object from the last resolve (carries the access hash), kept
+// briefly so the profile request needs no second username lookup.
+const rawUsers = new Map<string, { user: TgUserRaw; at: number }>();
+
+function lastSeenOf(status?: TgUserRaw["status"]): LastSeen {
+  const c = status?.className || "";
+  if (c === "UserStatusOnline") return { kind: "online" };
+  if (c === "UserStatusRecently") return { kind: "recently" };
+  if (c === "UserStatusLastWeek") return { kind: "week" };
+  if (c === "UserStatusLastMonth") return { kind: "month" };
+  if (c === "UserStatusOffline" && status?.wasOnline) return { kind: "time", at: Number(status.wasOnline) };
+  return { kind: "hidden" };
+}
 
 function rememberProfile(id: string, u: TgUserRaw) {
   const usernames = [u.username, ...(u.usernames || []).filter((x) => x.active !== false).map((x) => x.username)]
@@ -2710,6 +2771,7 @@ function rememberProfile(id: string, u: TgUserRaw) {
     .map((x) => x.toLowerCase());
   const unique = [...new Set(usernames)];
   for (const name of unique) noteUsername(id, name);
+  const prev = profileCache.get(id);
   profileCache.set(id, {
     name: [u.firstName, u.lastName].filter(Boolean).join(" ").slice(0, 80),
     usernames: unique,
@@ -2718,9 +2780,52 @@ function rememberProfile(id: string, u: TgUserRaw) {
     fake: Boolean(u.fake),
     bot: Boolean(u.bot),
     verified: Boolean(u.verified),
+    lastSeen: lastSeenOf(u.status),
+    hasPhoto: Boolean(u.photo && u.photo.className !== "UserProfilePhotoEmpty"),
+    restricted: u.restricted ? (u.restrictionReason || []).map((r) => r.text || r.reason || "").filter(Boolean)[0] || "restricted" : "",
     at: Date.now(),
+    about: prev?.about,
+    channel: prev?.channel,
+    fullAt: prev?.fullAt,
   });
+  rawUsers.set(id, { user: u, at: Date.now() });
+  if (rawUsers.size > 500) rawUsers.delete(rawUsers.keys().next().value!);
   if (profileCache.size > 5000) profileCache.delete(profileCache.keys().next().value!);
+}
+
+// Tests put in a profile as Telegram would have returned it.
+export function __setProfileForTests(id: string, u: TgUserRaw, full?: { about?: string; channel?: { title: string; username?: string } }) {
+  rememberProfile(id, u);
+  const p = profileCache.get(id);
+  if (p && full) Object.assign(p, full, { fullAt: Date.now() });
+}
+
+// "About" text and personal channel: one users.getFullUser request, at most once
+// a day per account and within its own small budget, so a burst of checks never
+// pushes the bot towards Telegram's limits. Skipped while Telegram asks to wait.
+async function fetchFullProfile(id: string): Promise<void> {
+  const prof = profileCache.get(id);
+  const raw = rawUsers.get(id);
+  if (!prof || !raw || Date.now() - raw.at > 5 * 60_000) return;
+  if (prof.fullAt && Date.now() - prof.fullAt < 24 * 60 * 60_000) return;
+  if (!botToken() || Date.now() < mtBlockedUntil) return;
+  if (tooMany("mtproto:full", 15, 60_000) || tooMany("mtproto:full:h", 200, 60 * 60_000)) return;
+  try {
+    const { client, Api } = await mtproto();
+    const res = (await withTimeout(client.invoke(new Api.users.GetFullUser({ id: raw.user as never })), 10_000, "full user timeout")) as {
+      fullUser?: { about?: string; personalChannelId?: { toString(): string } };
+      chats?: { id?: { toString(): string }; title?: string; username?: string }[];
+    };
+    prof.fullAt = Date.now();
+    prof.about = (res.fullUser?.about || "").slice(0, 300);
+    const chId = res.fullUser?.personalChannelId?.toString();
+    const ch = chId ? (res.chats || []).find((c) => c.id?.toString() === chId) : undefined;
+    prof.channel = ch?.title ? { title: ch.title.slice(0, 80), username: ch.username || undefined } : undefined;
+  } catch (err) {
+    const wait = floodSeconds(err);
+    if (wait) mtBlockedUntil = Date.now() + (wait + 5) * 1000;
+    prof.fullAt = Date.now(); // don't retry this account for a day either way
+  }
 }
 
 // Telegram never tells when an account was created. Ids are handed out in
@@ -2741,7 +2846,7 @@ const REG_ANCHORS: [number, number][] = [
   [8_600_000_000, 2025.75],
 ];
 
-export function registrationEstimate(id: string): { year: number; part: 0 | 1 | 2; later?: boolean } | null {
+export function registrationEstimate(id: string): { year: number; part: 0 | 1 | 2; later?: boolean; months?: number } | null {
   const n = Number(id);
   if (!Number.isFinite(n) || n < 1) return null;
   let at = REG_ANCHORS[REG_ANCHORS.length - 1]![1];
@@ -2759,7 +2864,10 @@ export function registrationEstimate(id: string): { year: number; part: 0 | 1 | 
   }
   const year = Math.floor(at);
   const month = Math.min(11, Math.floor((at - year) * 12));
-  return { year, part: month < 4 ? 0 : month < 8 ? 1 : 2, later: later || undefined };
+  const now = new Date();
+  const nowYears = now.getUTCFullYear() + now.getUTCMonth() / 12;
+  const months = later ? undefined : Math.max(0, Math.round((nowYears - at) * 12));
+  return { year, part: month < 4 ? 0 : month < 8 ? 1 : 2, later: later || undefined, months };
 }
 
 // "busy" = not looked up because of limits (try again later), null = no such username.
@@ -3679,9 +3787,17 @@ export type AccountCard = {
   fake: boolean;
   bot: boolean;
   verified: boolean;
-  reg: { year: number; part: 0 | 1 | 2; later?: boolean } | null;
+  reg: { year: number; part: 0 | 1 | 2; later?: boolean; months?: number } | null;
   // usernames this account had before (seen in blacklist posts or by the bot)
   previous: { username: string; since: number; source: "post" | "bot"; where?: string }[];
+  lastSeen?: LastSeen;
+  hasPhoto?: boolean;
+  restricted?: string;
+  about?: string;
+  channel?: { title: string; username?: string };
+  // our own data: first time this account showed up in a blacklist, and where
+  firstListed?: number; // unix seconds
+  listedIn?: number; // sources
 };
 
 // id <-> username links found in blacklist posts: a post whose accused fields
@@ -4079,6 +4195,9 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   }
   const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, sourceHits };
   if (effectiveId || known.length) {
+    // Wait for the profile request at most 2.5 s; a slow answer still lands in
+    // the cache for the next check.
+    if (effectiveId && idSource === "telegram") await Promise.race([fetchFullProfile(effectiveId), sleep(2500)]);
     let usernames = profile?.usernames || (idSource === "telegram" && uname ? [uname] : []);
     let name = profile?.name || "";
     if (!uname && effectiveId && !profile) {
@@ -4104,7 +4223,17 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       verified: Boolean(profile?.verified),
       reg: effectiveId ? registrationEstimate(effectiveId) : null,
       previous: known.filter((k) => !usernames.includes(k.username)).slice(0, 8),
+      lastSeen: profile?.lastSeen,
+      hasPhoto: profile ? profile.hasPhoto : undefined,
+      restricted: profile?.restricted || undefined,
+      about: profile?.about || undefined,
+      channel: profile?.channel,
     };
+    // Our own data: when this account first showed up in a blacklist, and in how many sources.
+    const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000))].filter((d) => d > 0);
+    if (dates.length) result.account.firstListed = Math.min(...dates);
+    const srcCount = Object.values(sourceHits).filter((n) => n > 0).length;
+    if (srcCount) result.account.listedIn = srcCount;
   }
   const display = uname ? `@${parsed.username.replace(/^@/, "")}` : id ? `ID ${id}` : "";
   recordFind(uname, id, display, result);
@@ -5546,6 +5675,37 @@ export function regEstimateText(locale: Locale, reg: AccountCard["reg"]): string
   return `${part} ${reg.year}`;
 }
 
+export function ageText(locale: Locale, months?: number): string {
+  if (months == null) return "";
+  const en = locale === "en";
+  const y = Math.floor(months / 12);
+  const m = months % 12;
+  if (en) return [y ? `${y} yr` : "", m ? `${m} mo` : ""].filter(Boolean).join(" ") || "under a month";
+  const yWord = y % 10 === 1 && y % 100 !== 11 ? "год" : [2, 3, 4].includes(y % 10) && ![12, 13, 14].includes(y % 100) ? "года" : "лет";
+  return [y ? `${y} ${yWord}` : "", m ? `${m} мес` : ""].filter(Boolean).join(" ") || "меньше месяца";
+}
+
+export function lastSeenText(locale: Locale, ls?: LastSeen): string {
+  if (!ls) return "";
+  const en = locale === "en";
+  switch (ls.kind) {
+    case "online":
+      return en ? "online now" : "сейчас в сети";
+    case "recently":
+      return en ? "recently" : "недавно";
+    case "week":
+      return en ? "within a week" : "на этой неделе";
+    case "month":
+      return en ? "within a month" : "в этом месяце";
+    case "time": {
+      const d = new Date((ls.at || 0) * 1000);
+      return `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+    }
+    default:
+      return en ? "hidden or long ago" : "скрыто или давно";
+  }
+}
+
 function monthYear(sec: number): string {
   if (!sec) return "";
   const d = new Date(sec * 1000);
@@ -5563,9 +5723,26 @@ function accountLines(locale: Locale, a?: AccountCard): string[] {
   else if (a.idSource === "posts") out.push(en ? "The username belongs to no one now (account deleted or renamed)." : "Ник сейчас никому не принадлежит (аккаунт удалён или сменил ник).");
   if (a.scam) out.push(en ? "⚠️ Telegram marked this account as <b>SCAM</b>" : "⚠️ Telegram пометил аккаунт как <b>SCAM</b>");
   if (a.fake) out.push(en ? "⚠️ Telegram marked this account as <b>FAKE</b>" : "⚠️ Telegram пометил аккаунт как <b>FAKE</b>");
-  const tags = [a.premium ? "⭐ Premium" : "", a.bot ? (en ? "🤖 bot" : "🤖 бот") : "", a.verified ? (en ? "✔️ verified" : "✔️ верифицирован") : ""].filter(Boolean);
+  if (a.restricted) out.push(`⚠️ ${en ? "Restricted by Telegram" : "Ограничен Telegram"}: ${escapeHtml(a.restricted.slice(0, 120))}`);
+  const tags = [
+    a.premium ? "⭐ Premium" : "",
+    a.bot ? (en ? "🤖 bot" : "🤖 бот") : "",
+    a.verified ? (en ? "✔️ verified" : "✔️ верифицирован") : "",
+    a.hasPhoto === false ? (en ? "no profile photo" : "без фото профиля") : "",
+  ].filter(Boolean);
   if (tags.length) out.push(tags.join(" · "));
-  if (a.reg) out.push(`${en ? "Registered" : "Регистрация"}: ≈ ${regEstimateText(locale, a.reg)} ${en ? "(estimate by ID)" : "(оценка по ID)"}`);
+  if (a.lastSeen) out.push(`${en ? "Last seen" : "Был(а) в сети"}: ${lastSeenText(locale, a.lastSeen)}`);
+  if (a.about) out.push(`${en ? "About" : "О себе"}: ${escapeHtml(a.about.replace(/\s+/g, " ").slice(0, 200))}`);
+  if (a.channel) out.push(`${en ? "Channel" : "Канал"}: ${a.channel.username ? `@${escapeHtml(a.channel.username)}` : escapeHtml(a.channel.title)}`);
+  if (a.reg) {
+    const age = ageText(locale, a.reg.months);
+    out.push(`${en ? "Registered" : "Регистрация"}: ≈ ${regEstimateText(locale, a.reg)}${age ? ` (≈ ${age})` : ""} ${en ? "— estimate by ID" : "— оценка по ID"}`);
+  }
+  if (a.firstListed) {
+    out.push(
+      `${en ? "First seen in blacklists" : "Впервые в блеклистах"}: ${monthYear(a.firstListed)}${a.listedIn ? ` · ${en ? "sources" : "источников"}: ${a.listedIn}` : ""}`,
+    );
+  }
   if (a.previous.length) {
     out.push(en ? "Known usernames before:" : "Ранее известные ники:");
     for (const p of a.previous.slice(0, 6)) {

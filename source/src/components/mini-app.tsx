@@ -746,10 +746,39 @@ type CheckData = {
     fake: boolean;
     bot: boolean;
     verified: boolean;
-    reg: { year: number; part: 0 | 1 | 2; later?: boolean } | null;
+    reg: { year: number; part: 0 | 1 | 2; later?: boolean; months?: number } | null;
     previous: { username: string; since: number; source: "post" | "bot"; where?: string }[];
+    lastSeen?: { kind: "online" | "recently" | "week" | "month" | "time" | "hidden"; at?: number };
+    hasPhoto?: boolean;
+    restricted?: string;
+    about?: string;
+    channel?: { title: string; username?: string };
+    firstListed?: number;
+    listedIn?: number;
   };
 };
+
+function ageText(locale: Locale, months?: number): string {
+  if (months == null) return "";
+  const y = Math.floor(months / 12);
+  const m = months % 12;
+  if (locale === "en") return [y ? `${y} yr` : "", m ? `${m} mo` : ""].filter(Boolean).join(" ") || "under a month";
+  const yWord = y % 10 === 1 && y % 100 !== 11 ? "год" : [2, 3, 4].includes(y % 10) && ![12, 13, 14].includes(y % 100) ? "года" : "лет";
+  return [y ? `${y} ${yWord}` : "", m ? `${m} мес` : ""].filter(Boolean).join(" ") || "меньше месяца";
+}
+
+function lastSeenText(locale: Locale, ls: NonNullable<NonNullable<CheckData["account"]>["lastSeen"]>): string {
+  const en = locale === "en";
+  if (ls.kind === "online") return en ? "online now" : "сейчас в сети";
+  if (ls.kind === "recently") return en ? "recently" : "недавно";
+  if (ls.kind === "week") return en ? "within a week" : "на этой неделе";
+  if (ls.kind === "month") return en ? "within a month" : "в этом месяце";
+  if (ls.kind === "time" && ls.at) {
+    const d = new Date(ls.at * 1000);
+    return d.toLocaleDateString(en ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+  }
+  return en ? "hidden or long ago" : "скрыто или давно";
+}
 
 function regText(locale: Locale, reg: NonNullable<CheckData["account"]>["reg"]): string {
   if (!reg) return "";
@@ -767,7 +796,13 @@ function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
     const d = new Date(sec * 1000);
     return `${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
   };
-  const tags = [a.premium ? "⭐ Premium" : "", a.bot ? `🤖 ${t(locale, "accBot")}` : "", a.verified ? `✔️ ${t(locale, "accVerified")}` : ""].filter(Boolean);
+  const tags = [
+    a.premium ? "⭐ Premium" : "",
+    a.bot ? `🤖 ${t(locale, "accBot")}` : "",
+    a.verified ? `✔️ ${t(locale, "accVerified")}` : "",
+    a.hasPhoto === false ? t(locale, "accNoPhoto") : "",
+  ].filter(Boolean);
+  const age = ageText(locale, a.reg?.months);
   return (
     <div className="mb-4 space-y-2 rounded-2xl bg-surface/70 p-4 text-sm shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
       <p className="font-display text-base font-bold">👤 {t(locale, "accCardTitle")}</p>
@@ -795,11 +830,37 @@ function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
       ) : a.idSource === "posts" ? (
         <p className="text-muted">{t(locale, "accGone")}</p>
       ) : null}
+      {a.restricted ? (
+        <p className="text-danger">
+          ⚠️ {t(locale, "accRestricted")}: {a.restricted.slice(0, 120)}
+        </p>
+      ) : null}
       {tags.length ? <p className="text-muted">{tags.join(" · ")}</p> : null}
+      {a.lastSeen ? (
+        <p>
+          <span className="text-muted">{t(locale, "accLastSeen")}:</span> {lastSeenText(locale, a.lastSeen)}
+        </p>
+      ) : null}
+      {a.about ? (
+        <p className="break-words">
+          <span className="text-muted">{t(locale, "accAbout")}:</span> {a.about.replace(/\s+/g, " ").slice(0, 200)}
+        </p>
+      ) : null}
+      {a.channel ? (
+        <p>
+          <span className="text-muted">{t(locale, "accChannel")}:</span> {a.channel.username ? `@${a.channel.username}` : a.channel.title}
+        </p>
+      ) : null}
       {a.reg ? (
         <p>
-          <span className="text-muted">{t(locale, "accReg")}:</span> ≈ {regText(locale, a.reg)}{" "}
-          <span className="text-xs text-muted">({t(locale, "accRegEstimate")})</span>
+          <span className="text-muted">{t(locale, "accReg")}:</span> ≈ {regText(locale, a.reg)}
+          {age ? ` (≈ ${age})` : ""} <span className="text-xs text-muted">— {t(locale, "accRegEstimate")}</span>
+        </p>
+      ) : null}
+      {a.firstListed ? (
+        <p>
+          <span className="text-muted">{t(locale, "accFirstListed")}:</span> {monthYear(a.firstListed)}
+          {a.listedIn ? <span className="text-muted"> · {t(locale, "accSources")}: {a.listedIn}</span> : null}
         </p>
       ) : null}
       {a.previous.length ? (
