@@ -15,7 +15,7 @@ import {
   telegramInitData,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -363,7 +363,7 @@ function BaseCard() {
           alt=""
           aria-hidden
           draggable={false}
-          className="pointer-events-none absolute -right-4 top-1/2 h-[180%] w-auto -translate-y-1/2 select-none opacity-[0.16]"
+          className="pointer-events-none absolute -right-4 top-1/2 h-[180%] w-auto -translate-y-1/2 select-none opacity-[0.3]"
         />
         <div className="relative flex items-center justify-between gap-3">
           <div className="text-[10px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
@@ -879,7 +879,7 @@ type BlEntry = {
 type CheckData = {
   query: { username: string; id: string };
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
-  channels: { channelTitle: string; link: string; date: number; snippet: string }[];
+  channels: { channelId?: string; messageId?: number; channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
   sourceHits?: Record<string, number>;
   account?: {
@@ -1163,6 +1163,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   // refreshed in the background). A tap searches that account.
   const latest = useLatestParsed(true);
   const [detail, setDetail] = useState<BlEntry | null>(null);
+  const [post, setPost] = useState<CheckData["channels"][number] | null>(null);
   const [autoRun, setAutoRun] = useState(false);
 
   // Warm the cache so the frog loader shows instantly on the first search.
@@ -1320,6 +1321,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   });
 
   if (detail) return <BlacklistDetail entry={detail} onBack={() => setDetail(null)} />;
+  if (post) return <PostView hit={post} onBack={() => setPost(null)} />;
 
   const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0);
   const fmtDate = (ms: number) => fmtBlDate(locale, ms);
@@ -1448,34 +1450,26 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                     {/* Only WWH (forum) hits → "Найдено на форуме"; any blacklist channel hit → "Найдено в блеклистах". */}
                     {t(locale, data.channels.every((c) => isWWH(c.channelTitle)) ? "checkOnForum" : "checkInChats")}
                   </div>
-                  {data.channels.map((c, i) => {
-                    const wwh = isWWH(c.channelTitle);
-                    const body = (
-                      <>
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="font-semibold">{forumName(c.channelTitle)}</p>
-                          {/* WWH forum posts are shown without a message link. */}
-                          {!wwh ? (
-                            <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
-                              {t(locale, "checkOpen")} <ExternalLink className="size-3" />
-                            </span>
-                          ) : null}
-                        </div>
-                        {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
-                        {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
-                      </>
-                    );
-                    const cls = "block rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]";
-                    return wwh ? (
-                      <div key={i} className={cls}>
-                        {body}
+                  {data.channels.map((c, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => {
+                        haptic("light");
+                        setPost(c);
+                      }}
+                      className="block w-full rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-semibold">{forumName(c.channelTitle)}</p>
+                        <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
+                          {t(locale, "postOpen")} <ChevronLeft className="size-3 rotate-180" />
+                        </span>
                       </div>
-                    ) : (
-                      <a key={i} href={/^https:\/\//i.test(c.link) ? c.link : undefined} target="_blank" rel="noreferrer" className={cls}>
-                        {body}
-                      </a>
-                    );
-                  })}
+                      {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
+                      {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
+                    </button>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -1511,6 +1505,116 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+// A blacklist post opened inside the app: the whole text (from the server's copy
+// of the channel) and its photos, loaded only now. Works for closed channels too.
+type PostData = { text: string; date: number; source: string; photos: string[]; more: number; photosPending?: boolean };
+function PostView({ hit, onBack }: { hit: CheckData["channels"][number]; onBack: () => void }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [data, setData] = useState<PostData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [zoom, setZoom] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    if (!hit.channelId || !hit.messageId) {
+      setLoading(false);
+      return;
+    }
+    void getPostDetail({ data: { initData: telegramInitData(), channelId: hit.channelId, messageId: hit.messageId } })
+      .then((r) => {
+        if (!alive) return;
+        if (r.ok) setData(r as PostData);
+        else setFailed(true);
+      })
+      .catch(() => alive && setFailed(true))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [hit]);
+
+  const text = data?.text || hit.snippet;
+  const date = fmtBlDate(locale, data?.date || hit.date);
+  const wwh = isWWH(hit.channelTitle);
+  const canLink = !wwh && /^https:\/\/t\.me\//i.test(hit.link);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onBack();
+          }}
+          className="flex items-center gap-1 text-sm font-medium text-muted hover:text-fg"
+        >
+          <ChevronLeft className="size-4" /> {t(locale, "back")}
+        </button>
+        <div className="flex items-center gap-2 text-danger">
+          <ShieldAlert className="size-5 shrink-0" />
+          <h2 className="font-display text-xl font-bold break-words">{data?.source || forumName(hit.channelTitle)}</h2>
+        </div>
+        {date ? <p className="-mt-2 text-xs text-subtle">{date}</p> : null}
+
+        {loading ? (
+          <div className="space-y-2">
+            <div className="h-40 animate-pulse rounded-2xl bg-surface/60" />
+            <div className="h-4 w-3/4 animate-pulse rounded bg-surface/60" />
+            <div className="h-4 w-1/2 animate-pulse rounded bg-surface/60" />
+          </div>
+        ) : null}
+
+        {data?.photos.length ? (
+          <div className={cn("grid gap-2", data.photos.length > 1 && "grid-cols-2")}>
+            {data.photos.map((src, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setZoom(src)}
+                className={cn(
+                  "overflow-hidden rounded-2xl bg-surface shadow-[0_0_0_1px_rgba(243,239,228,0.08)]",
+                  data.photos.length > 1 && data.photos.length % 2 === 1 && i === 0 && "col-span-2",
+                )}
+              >
+                <img src={src} alt="" className="block max-h-[60vh] w-full object-cover" />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {data?.more ? <p className="text-xs text-muted">{t(locale, "postMoreMedia", { n: data.more })}</p> : null}
+        {data?.photosPending ? <p className="text-xs text-muted">{t(locale, "postPhotosLater")}</p> : null}
+
+        {!loading && text ? (
+          <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+            <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">{text}</p>
+          </div>
+        ) : null}
+        {!loading && failed && !text ? <p className="text-sm text-muted">{t(locale, "postGone")}</p> : null}
+
+        {canLink ? (
+          <Button
+            variant="secondary"
+            className="w-full rounded-xl"
+            onClick={() => {
+              haptic("light");
+              openExternal(hit.link);
+            }}
+          >
+            {t(locale, "postInChannel")} <ExternalLink className="ml-1 size-4" />
+          </Button>
+        ) : null}
+      </div>
+      {zoom ? (
+        <button type="button" onClick={() => setZoom(null)} className="fixed inset-0 z-50 grid place-items-center bg-black/90 p-3">
+          <img src={zoom} alt="" className="max-h-full max-w-full rounded-xl object-contain" />
+        </button>
+      ) : null}
     </div>
   );
 }

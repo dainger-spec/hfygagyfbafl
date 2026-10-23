@@ -275,12 +275,25 @@
 
 /* The blacklist base card on the home screen (in place of banners). */
 .epb-base-card {
-  background:
-    radial-gradient(120% 140% at 88% 0%, rgba(241, 187, 76, 0.2), transparent 55%),
-    #121212;
-  box-shadow:
-    0 0 0 1px rgba(241, 187, 76, 0.2),
-    0 12px 32px -18px rgba(241, 187, 76, 0.35);
+  background: #0b0b0b;
+  box-shadow: 0 0 0 1px rgba(243, 239, 228, 0.06);
+}
+/* The engraved lines from the medallion's background, carried across the card
+   (strongest next to the medallion, fading out to the left). */
+.epb-base-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(222, 196, 120, 0.2) 0,
+    rgba(222, 196, 120, 0.2) 0.75px,
+    transparent 0.75px,
+    transparent 2px
+  );
+  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 80%);
+  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 80%);
 }
 
 /* "Latest blacklists" rows on the check page. */

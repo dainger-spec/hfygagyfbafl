@@ -6459,6 +6459,136 @@ export function publicBaseStats(): { accounts: number; sources: number; updatedA
   return { accounts, sources: checkSources().length, updatedAt };
 }
 
+// ---- Full post on tap (app): text from the channel copy, photos fetched once ----
+// The text is already in the local copy (no Telegram request). Photos are
+// downloaded by the search account only when someone opens the post, at a
+// medium size, and kept in data/post-media (oldest dropped past a size cap), so
+// the next open costs nothing. Rate-limited per user and overall, never while
+// Telegram asked the account to wait.
+const POST_MEDIA_DIR = join(DATA_DIR, "post-media");
+const POST_MEDIA_MAX_BYTES = 40 * 1024 * 1024;
+const POST_PHOTOS_MAX = 6;
+const POST_PHOTO_MAX_BYTES = 600 * 1024;
+export type PostDetail = { ok: true; text: string; date: number; source: string; photos: string[]; more: number; photosPending?: boolean } | { ok: false; error: string };
+type PostMeta = { text: string; date: number; photos: number; more: number; at: number };
+const postInflight = new Map<string, Promise<{ text: string; date: number; photos: Buffer[]; more: number } | null>>();
+
+type UserClientMedia = UserClientSearch & { downloadMedia: (msg: unknown, opts?: { thumb?: unknown }) => Promise<Buffer | string | undefined> };
+type TgMediaMsg = TgMsgLite & { groupedId?: unknown; photo?: { sizes?: { className?: string; type?: string; w?: number; h?: number }[] }; media?: { className?: string } };
+
+function postMediaPath(key: string, name: string) {
+  return join(POST_MEDIA_DIR, `${key}${name}`);
+}
+
+function prunePostMedia() {
+  try {
+    const files = readdirSync(POST_MEDIA_DIR).map((f) => {
+      const st = statSync(join(POST_MEDIA_DIR, f));
+      return { f, size: st.size, at: st.mtimeMs };
+    });
+    let total = files.reduce((n, x) => n + x.size, 0);
+    if (total <= POST_MEDIA_MAX_BYTES) return;
+    // whole posts go together: drop the oldest post's files first
+    files.sort((x, y) => x.at - y.at);
+    for (const x of files) {
+      if (total <= POST_MEDIA_MAX_BYTES * 0.8) break;
+      try {
+        unlinkSync(join(POST_MEDIA_DIR, x.f));
+        total -= x.size;
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+async function fetchPostMedia(ch: CheckChannel, messageId: number) {
+  const { client } = await userbot();
+  const c = client as unknown as UserClientMedia;
+  const peer = await userInputPeer(client, channelRef(ch));
+  // the post and its neighbours in one request (an album is several messages)
+  const ids: number[] = [];
+  for (let id = Math.max(1, messageId - 9); id <= messageId + 9; id++) ids.push(id);
+  const page = ((await paced(() => withTimeout(c.getMessages(peer, { ids }), 20_000, "post timeout"))) || []) as (TgMediaMsg | undefined)[];
+  const target = page.find((x) => x?.id === messageId);
+  if (!target) return null;
+  const group = target.groupedId
+    ? page.filter((x): x is TgMediaMsg => Boolean(x && x.groupedId && String(x.groupedId) === String(target.groupedId))).sort((x, y) => x.id! - y.id!)
+    : [target];
+  const text = group.map((x) => x.message || "").find(Boolean) || "";
+  const photos: Buffer[] = [];
+  let more = 0;
+  for (const x of group) {
+    if (!x.photo) {
+      if (x.media && x.media.className !== "MessageMediaWebPage") more++;
+      continue;
+    }
+    if (photos.length >= POST_PHOTOS_MAX) {
+      more++;
+      continue;
+    }
+    // a medium size (~800 px) rather than the original
+    const sizes = (x.photo.sizes || []).filter((z) => z.w && z.h);
+    const pick = sizes.filter((z) => (z.w || 0) <= 1000).sort((p, q) => (q.w || 0) - (p.w || 0))[0] || sizes[0];
+    const buf = await paced(() => withTimeout(c.downloadMedia(x, pick ? { thumb: pick } : {}), 20_000, "photo timeout"));
+    if (Buffer.isBuffer(buf) && buf.length && buf.length <= POST_PHOTO_MAX_BYTES) photos.push(buf);
+  }
+  return { text, date: (target.date || 0) * 1000, photos, more };
+}
+
+export async function postDetail(userId: string, channelId: string, messageId: number): Promise<PostDetail> {
+  const ch = mirrorChannels().find((c) => sameChat(c.id, channelId));
+  if (!ch || !Number.isInteger(messageId) || messageId <= 0) return { ok: false, error: "not found" };
+  const key = `${chatIdKey(ch.id)}_${messageId}`;
+  const source = checkSourceName(ch.title || ch.username || "");
+  const dataUrl = (b: Buffer) => `data:image/jpeg;base64,${b.toString("base64")}`;
+  // already fetched once
+  const meta = readJson<PostMeta>(postMediaPath(key, ".json"));
+  if (meta) {
+    const photos: string[] = [];
+    for (let i = 0; i < meta.photos; i++) {
+      try {
+        photos.push(dataUrl(readFileSync(postMediaPath(key, `_${i}.jpg`))));
+      } catch {
+        /* pruned */
+      }
+    }
+    if (photos.length === meta.photos) return { ok: true, text: meta.text, date: meta.date, source, photos, more: meta.more };
+  }
+  const copy = (mirrors.get(chatIdKey(ch.id)) || loadMirror(ch)).msgs.get(messageId);
+  const base = { text: copy?.text || "", date: (copy?.date || 0) * 1000 };
+  const canFetch =
+    hasUserbot() && Date.now() >= userBlockedUntil && userbotQueued < 10 && !tooMany(`post:${userId}`, 8, 60_000) && !tooMany("post:global", 40, 60_000);
+  if (!canFetch) return { ok: true, ...base, source, photos: [], more: 0, photosPending: hasUserbot() };
+  let job = postInflight.get(key);
+  if (!job) {
+    job = fetchPostMedia(ch, messageId)
+      .catch((err) => {
+        const wait = floodSeconds(err);
+        if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
+        console.warn("[epb] post media:", err instanceof Error ? err.message : err);
+        return undefined as never;
+      })
+      .finally(() => postInflight.delete(key));
+    postInflight.set(key, job);
+  }
+  const got = await job;
+  if (got === undefined) return { ok: true, ...base, source, photos: [], more: 0, photosPending: true };
+  if (got === null) return base.text ? { ok: true, ...base, source, photos: [], more: 0 } : { ok: false, error: "deleted" };
+  try {
+    mkdirSync(POST_MEDIA_DIR, { recursive: true });
+    got.photos.forEach((b, i) => writeFileSync(postMediaPath(key, `_${i}.jpg`), b));
+    const value: PostMeta = { text: got.text || base.text, date: got.date || base.date, photos: got.photos.length, more: got.more, at: Date.now() };
+    writeFileSync(postMediaPath(key, ".json"), JSON.stringify(value));
+    prunePostMedia();
+  } catch {
+    /* cache is optional */
+  }
+  return { ok: true, text: got.text || base.text, date: got.date || base.date, source, photos: got.photos.map(dataUrl), more: got.more };
+}
+
 // The newest posts copied from the blacklist channels, for the list at the bottom
 // of the app's home screen: the accused account, where and when, and the damage
 // when the post has a "Сумма/Ущерб" field. One row per account, cached a minute.
