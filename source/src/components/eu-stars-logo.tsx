@@ -76,9 +76,9 @@ export function EuStarsLogo({
       {ring}
       {/* Fits inside the ring of stars, like the brand artwork. */}
       <picture>
-        <source srcSet="/brand/emblem.webp" type="image/webp" />
+        <source srcSet="/brand/emblem-v2.webp" type="image/webp" />
         <img
-          src="/brand/emblem.png"
+          src="/brand/emblem-v2.png"
           alt=""
           aria-hidden
           draggable={false}
