@@ -1689,7 +1689,7 @@ function escapeRe(s: string): string {
 // subject line, not a contact/ad line. Words are a starting lexicon — easy to
 // extend. The owner can always open the exact post via the link we return.
 const SCAM_WORDS_RE =
-  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|арбитраж|arbitr|жалоб|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑)/iu;
+  /(скам|scam|кидал|кинул|кидок|кидалов|мошен|обман|развод|развёл|развел|афер|швыр|непорядочн|на[её]б|обул|обуть|не\s*верн|не\s*отда|невозврат|должник|кардер|арбитраж|arbitr|жалоб|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|cheat|ч[её]рн\w*\s*списк|бл[еэ]к|blacklist|осторожн|внимани|alert|🚫|❌|🤡|⚠|🔴|🛑|📛)/iu;
 // A line that is clearly contact/ad context rather than the accused subject.
 const CONTACT_LINE_RE =
   /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|\bгарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|заказ|отзыв|подписку|канал\b)/iu;
@@ -1697,7 +1697,11 @@ const CONTACT_LINE_RE =
 // an ad line like "продам аккаунты @seller" is NOT treated as an accusation;
 // handle labels ("тг:", "ник:", "юзер:", "username") are included.
 const SUBJECT_LINE_RE =
-  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|🚫|❌|🤡|⚠|🔴|🛑|id\s*[:#]|айди|ник[:\s]|тг[:\s]|телеграм|телега|юзернейм|юзер[:\s]|username)/iu;
+  /(скам|scam|кидал|кинул|мошен|обман|развод|афер|швыр|непорядочн|должник|ответчик|обвиняем|виновник|respondent|defendant|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди|ник[:\s]|тг[:\s]|телеграм|телега|юзернейм|юзер[:\s]|username)/iu;
+// A line that is JUST an accused label (e.g. "Ответчик:", "📛Ответчик:",
+// "Скамер"), whose handles are listed on the following line.
+const SUBJECT_LABEL_RE =
+  /^(?:[📛🚫❌🤡⚠🔴🛑\s])*(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant)\s*:?\s*$/iu;
 // Known arbiter / service / off-limits handles that are never the accused party
 // and never shown in search results.
 const IGNORE_USERNAMES = new Set(["europepromo", "ctoroot", "sbepbank", BOT_USERNAME.toLowerCase()]);
@@ -1742,25 +1746,35 @@ export function postMatchesSubject(body: string, username: string, id: string): 
   // A scam/alert keyword anywhere makes the whole post a report; otherwise a
   // single occurrence still counts if it sits on a clear subject line.
   const hasScamWord = SCAM_WORDS_RE.test(body);
+  // True when the previous non-empty line was an accused label ("Ответчик:"),
+  // so handles listed on the next line count as the subject.
+  let labelAbove = false;
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer.
     if (/арбитраж|arbitr/i.test(line)) {
       const accused = arbitrationAccused(line);
-      if (!accused) continue;
-      if (!ignoredName && usernameOnLine(accused, uname)) return true;
-      if (idOnLine(accused, id)) return true;
+      if (accused) {
+        if (!ignoredName && usernameOnLine(accused, uname)) return true;
+        if (idOnLine(accused, id)) return true;
+      }
+      if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
       continue;
     }
     const hasId = idOnLine(line, id);
     const hasU = !ignoredName && usernameOnLine(line, uname);
-    if (!hasId && !hasU) continue;
-    const subjectLine = SUBJECT_LINE_RE.test(line);
+    if (!hasId && !hasU) {
+      if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
+      continue;
+    }
+    const subjectLine = SUBJECT_LINE_RE.test(line) || labelAbove;
     // A pure contact/ad line (dispute footer, "по рекламе", "менеджер") is not
     // an accusation.
-    if (CONTACT_LINE_RE.test(line) && !subjectLine) continue;
-    // Count it when the post reads like a report, or this very line marks a
-    // subject (❌, "id:", "тг:", "ник:", a scam word, …).
-    if (hasScamWord || subjectLine) return true;
+    if (!(CONTACT_LINE_RE.test(line) && !subjectLine)) {
+      // Count it when the post reads like a report, or the line (or the label
+      // above it) marks a subject.
+      if (hasScamWord || subjectLine) return true;
+    }
+    if (line.trim()) labelAbove = SUBJECT_LABEL_RE.test(line);
   }
   return false;
 }

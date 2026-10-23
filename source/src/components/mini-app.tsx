@@ -48,8 +48,6 @@ export function MiniApp({
   const openCheck = useCallback(() => onPage("check"), [onPage]);
   const openSponsors = useCallback(() => onPage("sponsors"), [onPage]);
   const [checkOn, setCheckOn] = useState(false);
-  const [introDone, setIntroDone] = useState(false);
-  const onIntroDone = useCallback(() => setIntroDone(true), []);
   useEffect(() => {
     void getFeatures()
       .then((f) => setCheckOn(Boolean(f?.check)))
@@ -143,8 +141,6 @@ export function MiniApp({
           />
         ) : null}
       </div>
-
-      {!introDone ? <IntroSplash ready={ready} onDone={onIntroDone} /> : null}
     </div>
   );
 }
@@ -209,69 +205,6 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
 
 // Opening splash: the medallion fills the screen, then the overlay zooms and
 // fades to reveal the app. Shown once per app open, over the loading app.
-function IntroSplash({ ready, onDone }: { ready: boolean; onDone: () => void }) {
-  const [leaving, setLeaving] = useState(false);
-  const [size, setSize] = useState(280);
-  const startedAt = useRef(Date.now());
-
-  useEffect(() => {
-    try {
-      setSize(Math.round(Math.min(window.innerWidth * 0.68, 320)));
-    } catch {
-      /* keep default */
-    }
-    // Never let the splash stick if the account never resolves.
-    const hard = setTimeout(() => setLeaving(true), 2800);
-    return () => clearTimeout(hard);
-  }, []);
-
-  // Hold a minimum time so it never just flashes, then start the exit.
-  useEffect(() => {
-    if (!ready) return;
-    const wait = Math.max(0, 1100 - (Date.now() - startedAt.current));
-    const t = setTimeout(() => setLeaving(true), wait);
-    return () => clearTimeout(t);
-  }, [ready]);
-
-  useEffect(() => {
-    if (!leaving) return;
-    try {
-      haptic("soft");
-    } catch {
-      /* ignore */
-    }
-    const t = setTimeout(onDone, 480);
-    return () => clearTimeout(t);
-  }, [leaving, onDone]);
-
-  return (
-    <div
-      className={cn("epb-intro-overlay", leaving && "epb-intro-overlay--leaving")}
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 60,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "var(--color-bg)",
-        paddingTop: "var(--tg-safe-top, 0px)",
-      }}
-      aria-hidden
-    >
-      <div className="epb-intro-emblem relative flex items-center justify-center">
-        <span className="epb-intro-glow" />
-        <EuStarsLogo size={size} spin emblem />
-      </div>
-      <h1 className="epb-intro-title mt-9 text-center font-display text-4xl font-extrabold leading-tight tracking-tight">
-        Europe Private
-        <span className="block text-gold">Blacklist</span>
-      </h1>
-    </div>
-  );
-}
-
 function AccountLoading({ locale }: { locale: Locale }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
@@ -702,6 +635,10 @@ function forumName(title: string): string {
   for (const a of FORUM_ALIASES) if (a.re.test(t)) return a.name;
   return t || "форум";
 }
+// WWH is a forum: its hits are shown without a message link.
+function isWWH(title: string): boolean {
+  return /wwh/i.test(title || "");
+}
 
 const fmtBlDate = (locale: Locale, ms: number) =>
   ms ? new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "";
@@ -863,26 +800,37 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm font-bold text-gold">
                     <ShieldAlert className="size-4" />
-                    {t(locale, "checkInChannels")}
+                    {/* Only WWH (forum) hits → "Найдено на форуме"; any chat hit → "Найдено в чатах". */}
+                    {t(locale, data.channels.every((c) => isWWH(c.channelTitle)) ? "checkOnForum" : "checkInChats")}
                   </div>
-                  {data.channels.map((c, i) => (
-                    <a
-                      key={i}
-                      href={c.link}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-semibold">{forumName(c.channelTitle)}</p>
-                        <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
-                          {t(locale, "checkOpen")} <ExternalLink className="size-3" />
-                        </span>
+                  {data.channels.map((c, i) => {
+                    const wwh = isWWH(c.channelTitle);
+                    const body = (
+                      <>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-semibold">{forumName(c.channelTitle)}</p>
+                          {/* WWH forum posts are shown without a message link. */}
+                          {!wwh ? (
+                            <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
+                              {t(locale, "checkOpen")} <ExternalLink className="size-3" />
+                            </span>
+                          ) : null}
+                        </div>
+                        {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
+                        {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
+                      </>
+                    );
+                    const cls = "block rounded-2xl bg-surface/70 p-3 text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)]";
+                    return wwh ? (
+                      <div key={i} className={cls}>
+                        {body}
                       </div>
-                      {c.snippet ? <p className="mt-1 text-xs leading-relaxed text-muted">{c.snippet}</p> : null}
-                      {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
-                    </a>
-                  ))}
+                    ) : (
+                      <a key={i} href={c.link} target="_blank" rel="noreferrer" className={cls}>
+                        {body}
+                      </a>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
