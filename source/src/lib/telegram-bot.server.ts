@@ -1841,7 +1841,10 @@ async function channelPostDeleted(rec: PendingPost): Promise<boolean> {
 
 // Full-history search of one channel for a query, via the user account.
 type UserClientSearch = UserClient & {
-  getMessages: (entity: unknown, opts: { search?: string; limit?: number; ids?: number[] }) => Promise<{ id?: number; message?: string; date?: number }[]>;
+  getMessages: (
+    entity: unknown,
+    opts: { search?: string; limit?: number; ids?: number[]; offsetId?: number; minId?: number },
+  ) => Promise<{ id?: number; message?: string; date?: number }[]>;
 };
 
 // A public channel resolves by @username; a private one by its numeric id.
@@ -1953,6 +1956,24 @@ function usernameOnLine(line: string, uname: string): boolean {
   return new RegExp("@?(?<!\\w)" + escapeRe(uname) + "(?!\\w)", "iu").test(line);
 }
 
+// A forum nickname (WWH nicknames may contain spaces): case-insensitive, whole
+// words, and a space, "_", "." or "-" between its words all count as the same.
+function nickPattern(nick: string): RegExp | null {
+  const words = (nick || "").toLowerCase().split(/[\s_.\-]+/u).filter(Boolean);
+  if (!words.length) return null;
+  return new RegExp("(?<![\\p{L}\\p{N}_])@?" + words.map(escapeRe).join("[\\s_.\\-]+") + "(?![\\p{L}\\p{N}_])", "iu");
+}
+
+function nickOnLine(line: string, nick: string): boolean {
+  const re = nickPattern(nick);
+  return Boolean(re && re.test(line));
+}
+
+// "Ответчик: X", "Скамер — X", "Respondent: X": an accused label right before
+// the name on the same line.
+const ACCUSED_PREFIX_RE =
+  /(?:ответчик|обвиняем\w*|скамер|кидал\w*|мошенник|виновник|respondent|defendant|scammer)\s*[:\-—–]\s*@?\s*$/iu;
+
 function idOnLine(line: string, id: string): boolean {
   const digits = (id || "").replace(/\D/g, "");
   if (digits.length < 5) return false;
@@ -1980,23 +2001,50 @@ function arbitrationAccused(line: string, strict = false): string {
 // Does this post accuse `username`/`id`? In a pure blacklist channel any mention
 // counts (loose); in a strict channel only a structured accusation does.
 // Exported for tests.
-export function postMatchesSubject(body: string, username: string, id: string, strict = false): boolean {
+// `nick` is a forum nickname typed as free text (may contain spaces); it is only
+// ever matched strictly (arbitration accused side or an accused label), since a
+// plain word would otherwise match unrelated posts.
+export function postMatchesSubject(body: string, username: string, id: string, strict = false, nick = ""): boolean {
   const uname = (username || "").replace(/^@/, "").toLowerCase();
   const ignoredName = !uname || IGNORE_USERNAMES.has(uname);
+  const nickName = (nick || "").trim();
+  if (nickName && !uname && !id) strict = true;
   // Nothing to match on (handle is an off-limits/service handle and no id given).
-  if (ignoredName && !id) return false;
+  if (ignoredName && !id && !nickName) return false;
+  const named = (text: string) =>
+    (!ignoredName && usernameOnLine(text, uname)) || idOnLine(text, id) || (Boolean(nickName) && nickOnLine(text, nickName));
   let labelAbove = false;
   for (const line of body.split(/\r?\n/)) {
     // Arbitration lines: match only the accused side, never the filer (both modes).
-    if (/арбитраж|arbitr/i.test(line)) {
+    // In strict channels an explicit "X на пользователя Y" / "X on user Y" line is
+    // an arbitration line even without the word "арбитраж" on it.
+    const strictArb = strict && Boolean(arbitrationAccused(line, true));
+    if (strictArb || /арбитраж|arbitr/i.test(line)) {
       const accused = arbitrationAccused(line, strict);
-      if (accused && ((!ignoredName && usernameOnLine(accused, uname)) || idOnLine(accused, id))) return true;
+      if (accused && named(accused)) return true;
       if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
     }
     const hasId = idOnLine(line, id);
     const hasU = !ignoredName && usernameOnLine(line, uname);
-    if (!hasId && !hasU) {
+    const hasNick = Boolean(nickName) && nickOnLine(line, nickName);
+    if (!hasId && !hasU && !hasNick) {
+      if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
+      continue;
+    }
+    // "Ответчик: X" on one line: the label right before the name is enough.
+    {
+      const re = hasU
+        ? new RegExp("@?(?<!\\w)" + escapeRe(uname) + "(?!\\w)", "iu")
+        : hasNick
+          ? nickPattern(nickName)
+          : new RegExp("(?<!\\d)" + (id || "").replace(/\D/g, "") + "(?!\\d)");
+      const at = re ? line.search(re) : -1;
+      if (at > 0 && ACCUSED_PREFIX_RE.test(line.slice(0, at))) return true;
+    }
+    if (hasNick && !hasId && !hasU) {
+      // a nickname alone needs the accused label above it (strict rules)
+      if (labelAbove) return true;
       if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
     }
@@ -2020,7 +2068,8 @@ export function postMatchesSubject(body: string, username: string, id: string, s
 async function userSearchChannel(
   channel: CheckChannel,
   query: string,
-  subject: { username: string; id: string },
+  subject: { username: string; id: string; nick?: string },
+  skipScan = false,
 ): Promise<CheckHit[]> {
   if (Date.now() < userBlockedUntil) return [];
   try {
@@ -2031,18 +2080,18 @@ async function userSearchChannel(
     // recent history (covers what Telegram's FTS misses). Dedup by message id.
     const byId = new Map<number, TgMsgLite>();
     for (const m of await serverSearch(client, peer, query)) if (m.id) byId.set(m.id, m);
-    for (const m of await scanRecentCached(client, peer, chatIdKey(channel.id))) if (m.id) byId.set(m.id, m);
+    if (!skipScan) for (const m of await scanRecentCached(client, peer, chatIdKey(channel.id))) if (m.id) byId.set(m.id, m);
     const out: CheckHit[] = [];
     for (const m of byId.values()) {
       const body = m.message || "";
-      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id, strict)) continue;
+      if (!m.id || !body || !postMatchesSubject(body, subject.username, subject.id, strict, subject.nick)) continue;
       out.push({
         channelId: channel.id,
         channelTitle: channel.title || "канал",
         messageId: m.id,
         link: messageLink(channel, m.id),
         date: (m.date || 0) * 1000,
-        snippet: snippetAround(body, subject.username || subject.id),
+        snippet: snippetAround(body, subject.username || subject.id || subject.nick || ""),
       });
     }
     return out;
@@ -2056,6 +2105,339 @@ async function userSearchChannel(
     }
     return [];
   }
+}
+
+// ---- Local copy ("mirror") of the check channels ----
+// Live search per check was slow (two Telegram searches plus an 800-post scan
+// per channel, all queued to stay under Telegram's limits: up to ~30 s) and
+// missed old posts (Telegram's own search skips many, the scan only reached the
+// latest 800). Instead the userbot copies each check channel's whole history
+// once, in the background, keeps it current (new posts every minute, the latest
+// posts re-read every few hours for edits and deletions), and a check searches
+// that copy locally in milliseconds. Hits are confirmed with one request before
+// they are shown, so a deleted post never shows up.
+const MIRROR_DIR = join(DATA_DIR, "check-mirror");
+const MIRROR_MAX_MSGS = 80_000; // per channel
+const MIRROR_TEXT_MAX = 4096;
+const MIRROR_UPDATE_MS = 60_000;
+const MIRROR_REFRESH_MS = 6 * 60 * 60_000;
+const MIRROR_REFRESH_PAGES = 3; // x100 latest posts re-read
+const MIRROR_VERIFY_MS = 30 * 60_000;
+
+type MirrorMsg = { id: number; date: number; text: string; low: string };
+type Mirror = {
+  key: string;
+  complete: boolean;
+  msgs: Map<number, MirrorMsg>;
+  oldest: number;
+  newest: number;
+  updatedAt: number;
+  refreshedAt: number;
+  dirty: boolean;
+  savedAt: number;
+};
+type MirrorFile = {
+  v: 1;
+  complete: boolean;
+  oldest: number;
+  newest: number;
+  updatedAt: number;
+  refreshedAt: number;
+  msgs: [number, number, string][];
+};
+type MirrorFetchOpts = { limit?: number; offsetId?: number; minId?: number; ids?: number[] };
+
+const mirrors = new Map<string, Mirror>();
+const mirrorVerified = new Map<string, number>();
+const mirrorErrorUntil = new Map<string, number>();
+
+function mirrorPath(key: string) {
+  return join(MIRROR_DIR, `${key.replace(/[^0-9A-Za-z_-]/g, "")}.json`);
+}
+
+function putMirrorMsg(m: Mirror, id: number, date: number, text: string) {
+  if (!id) return;
+  m.oldest = m.oldest ? Math.min(m.oldest, id) : id;
+  m.newest = Math.max(m.newest, id);
+  const body = (text || "").slice(0, MIRROR_TEXT_MAX);
+  if (!body.trim()) {
+    if (m.msgs.delete(id)) m.dirty = true;
+    return;
+  }
+  const prev = m.msgs.get(id);
+  if (prev && prev.text === body) return;
+  m.msgs.set(id, { id, date: date || prev?.date || 0, text: body, low: body.toLowerCase() });
+  m.dirty = true;
+}
+
+function loadMirror(channel: CheckChannel): Mirror {
+  const key = chatIdKey(channel.id);
+  const have = mirrors.get(key);
+  if (have) return have;
+  const m: Mirror = { key, complete: false, msgs: new Map(), oldest: 0, newest: 0, updatedAt: 0, refreshedAt: 0, dirty: false, savedAt: 0 };
+  const file = readJson<MirrorFile>(mirrorPath(key));
+  if (file?.v === 1 && Array.isArray(file.msgs)) {
+    for (const [id, date, text] of file.msgs) putMirrorMsg(m, id, date, text);
+    m.complete = Boolean(file.complete);
+    m.oldest = file.oldest || m.oldest;
+    m.newest = Math.max(file.newest || 0, m.newest);
+    m.updatedAt = file.updatedAt || 0;
+    m.refreshedAt = file.refreshedAt || 0;
+    m.dirty = false;
+  }
+  mirrors.set(key, m);
+  return m;
+}
+
+function saveMirror(m: Mirror, force = false) {
+  if (!m.dirty && !force) return;
+  if (!force && Date.now() - m.savedAt < 20_000) return;
+  // Keep the newest posts if a channel is huge.
+  if (m.msgs.size > MIRROR_MAX_MSGS) {
+    const ids = [...m.msgs.keys()].sort((a, b) => b - a);
+    for (const id of ids.slice(MIRROR_MAX_MSGS)) m.msgs.delete(id);
+    m.oldest = ids[MIRROR_MAX_MSGS - 1] || m.oldest;
+    m.complete = true;
+  }
+  try {
+    const msgs = [...m.msgs.values()].sort((a, b) => b.id - a.id).map((x) => [x.id, x.date, x.text] as [number, number, string]);
+    const file: MirrorFile = { v: 1, complete: m.complete, oldest: m.oldest, newest: m.newest, updatedAt: m.updatedAt, refreshedAt: m.refreshedAt, msgs };
+    writeJsonAtomic(mirrorPath(m.key), file);
+    m.dirty = false;
+    m.savedAt = Date.now();
+  } catch {
+    /* disk trouble: keep it in memory, try again next time */
+  }
+}
+
+function dropMirror(channelId: string) {
+  const key = chatIdKey(channelId);
+  mirrors.delete(key);
+  try {
+    if (existsSync(mirrorPath(key))) unlinkSync(mirrorPath(key));
+  } catch {
+    /* ignore */
+  }
+}
+
+let mirrorFetch = async (channel: CheckChannel, opts: MirrorFetchOpts): Promise<(TgMsgLite & { className?: string } | undefined)[]> => {
+  const { client } = await userbot();
+  const peer = await userInputPeer(client, channelRef(channel));
+  const c = client as unknown as UserClientSearch;
+  return ((await paced(() => withTimeout(c.getMessages(peer, opts), 30_000, "mirror timeout"))) || []) as TgMsgLite[];
+};
+// Tests swap in a fake channel history.
+export function __setMirrorFetchForTests(fn: typeof mirrorFetch) {
+  mirrorFetch = fn;
+}
+
+function realMessages(page: (TgMsgLite & { className?: string } | undefined)[]) {
+  return page.filter((x): x is TgMsgLite => Boolean(x && x.id && (x as { className?: string }).className !== "MessageEmpty"));
+}
+
+// Older history, 100 posts per request, newest first.
+async function mirrorBackfill(channel: CheckChannel, m: Mirror) {
+  const page = realMessages(await mirrorFetch(channel, { limit: 100, offsetId: m.oldest || 0 }));
+  if (!m.newest && page.length) m.updatedAt = Date.now();
+  for (const x of page) putMirrorMsg(m, x.id!, x.date || 0, x.message || "");
+  if (!page.length || m.msgs.size >= MIRROR_MAX_MSGS) m.complete = true;
+  if (page.length) invalidateCheckCache();
+  saveMirror(m, m.complete);
+}
+
+// Posts newer than the newest one we have.
+async function mirrorUpdate(channel: CheckChannel, m: Mirror) {
+  const minId = m.newest;
+  let offsetId = 0;
+  let added = 0;
+  for (let i = 0; i < 10; i++) {
+    const page = realMessages(await mirrorFetch(channel, { limit: 100, minId, offsetId }));
+    for (const x of page) putMirrorMsg(m, x.id!, x.date || 0, x.message || "");
+    added += page.length;
+    if (page.length < 100) break;
+    offsetId = Math.min(...page.map((x) => x.id!));
+  }
+  m.updatedAt = Date.now();
+  if (added) invalidateCheckCache();
+  saveMirror(m);
+}
+
+// Re-read the latest posts: picks up edits, and drops posts deleted since.
+async function mirrorRefresh(channel: CheckChannel, m: Mirror) {
+  const seen = new Set<number>();
+  let offsetId = 0;
+  let low = Infinity;
+  for (let i = 0; i < MIRROR_REFRESH_PAGES; i++) {
+    const page = realMessages(await mirrorFetch(channel, { limit: 100, offsetId }));
+    for (const x of page) {
+      seen.add(x.id!);
+      putMirrorMsg(m, x.id!, x.date || 0, x.message || "");
+      low = Math.min(low, x.id!);
+    }
+    if (page.length < 100) break;
+    offsetId = low;
+  }
+  if (seen.size) {
+    for (const id of [...m.msgs.keys()]) {
+      if (id >= low && !seen.has(id)) {
+        m.msgs.delete(id);
+        m.dirty = true;
+      }
+    }
+  }
+  m.refreshedAt = Date.now();
+  invalidateCheckCache();
+  saveMirror(m, true);
+}
+
+function mirrorWork(channel: CheckChannel): "update" | "backfill" | "refresh" | null {
+  if (Date.now() < (mirrorErrorUntil.get(chatIdKey(channel.id)) || 0)) return null;
+  const m = loadMirror(channel);
+  if (m.newest && Date.now() - m.updatedAt > MIRROR_UPDATE_MS) return "update";
+  if (!m.complete) return "backfill";
+  if (Date.now() - m.refreshedAt > MIRROR_REFRESH_MS) return "refresh";
+  return null;
+}
+
+// One small step at a time, only while no check is waiting for the userbot, so
+// the copy never slows a real search down.
+let mirrorBusy = false;
+export async function mirrorTick(maxSteps = 3): Promise<number> {
+  if (mirrorBusy || !hasUserbot() || !checkEnabled()) return 0;
+  mirrorBusy = true;
+  let steps = 0;
+  try {
+    const channels = checkChannels();
+    const keep = new Set(channels.map((c) => chatIdKey(c.id)));
+    for (const key of [...mirrors.keys()]) if (!keep.has(key)) dropMirror(key);
+    for (; steps < maxSteps; steps++) {
+      if (Date.now() < userBlockedUntil || userbotQueued > 0) break;
+      // updates first (freshness), then history, then the periodic re-read
+      let pick: { ch: CheckChannel; work: "update" | "backfill" | "refresh" } | null = null;
+      for (const want of ["update", "backfill", "refresh"] as const) {
+        const ch = channels.find((c) => mirrorWork(c) === want);
+        if (ch) {
+          pick = { ch, work: want };
+          break;
+        }
+      }
+      if (!pick) break;
+      const m = loadMirror(pick.ch);
+      try {
+        if (pick.work === "update") await mirrorUpdate(pick.ch, m);
+        else if (pick.work === "backfill") await mirrorBackfill(pick.ch, m);
+        else await mirrorRefresh(pick.ch, m);
+      } catch (err) {
+        const wait = floodSeconds(err);
+        if (wait) {
+          userBlockedUntil = Date.now() + (wait + 5) * 1000;
+          console.warn(`[epb] userbot FLOOD_WAIT ${wait}s (channel copy)`);
+          break;
+        }
+        // This channel can't be read right now (left, private, timeout): retry later.
+        mirrorErrorUntil.set(m.key, Date.now() + 15 * 60_000);
+        if (!(err as { errorMessage?: string })?.errorMessage && /timeout|no user session|connect/i.test(String((err as Error)?.message))) {
+          dropUserbot();
+          break;
+        }
+      }
+    }
+  } finally {
+    mirrorBusy = false;
+  }
+  return steps;
+}
+
+// A post the bot itself received (it is a member of the channel): into the copy
+// right away, without waiting for the next update.
+function mirrorAddPost(channel: CheckChannel, messageId: number, text: string, date: number) {
+  const m = mirrors.get(chatIdKey(channel.id)) || (existsSync(mirrorPath(chatIdKey(channel.id))) ? loadMirror(channel) : null);
+  if (!m) return;
+  putMirrorMsg(m, messageId, date, text);
+  saveMirror(m);
+}
+
+// Search one channel's copy.
+function searchMirror(channel: CheckChannel, m: Mirror, subject: { username: string; id: string; nick: string }): CheckHit[] {
+  const strict = isStrictChannel(channel);
+  const needles: string[] = [];
+  if (subject.username) needles.push(subject.username.toLowerCase());
+  const digits = (subject.id || "").replace(/\D/g, "");
+  if (digits.length >= 5) needles.push(digits);
+  if (subject.nick) {
+    const words = subject.nick.toLowerCase().split(/[\s_.\-]+/u).filter(Boolean);
+    const longest = words.sort((a, b) => b.length - a.length)[0];
+    if (longest) needles.push(longest);
+  }
+  if (!needles.length) return [];
+  const out: CheckHit[] = [];
+  for (const msg of m.msgs.values()) {
+    if (!needles.some((n) => msg.low.includes(n))) continue;
+    if (!postMatchesSubject(msg.text, subject.username, subject.id, strict, subject.nick)) continue;
+    out.push({
+      channelId: channel.id,
+      channelTitle: channel.title || "канал",
+      messageId: msg.id,
+      link: messageLink(channel, msg.id),
+      date: (msg.date || 0) * 1000,
+      snippet: snippetAround(msg.text, subject.username || subject.id || subject.nick),
+    });
+  }
+  return out;
+}
+
+// Confirm hits from the copy with one request: deleted posts are dropped (and
+// removed from the copy), edited ones re-checked. If Telegram can't be asked
+// right now, the copy is trusted.
+async function confirmMirrorHits(
+  channel: CheckChannel,
+  m: Mirror,
+  hits: CheckHit[],
+  subject: { username: string; id: string; nick: string },
+): Promise<CheckHit[]> {
+  const now = Date.now();
+  const need = hits
+    .map((h) => h.messageId)
+    .filter((id) => now - (mirrorVerified.get(`${m.key}:${id}`) || 0) > MIRROR_VERIFY_MS)
+    .slice(0, 100);
+  if (!need.length || now < userBlockedUntil) return hits;
+  try {
+    const got = realMessages(await mirrorFetch(channel, { ids: need }));
+    const alive = new Map(got.map((x) => [x.id!, x]));
+    const strict = isStrictChannel(channel);
+    const dropped = new Set<number>();
+    for (const id of need) {
+      const x = alive.get(id);
+      if (!x) {
+        m.msgs.delete(id);
+        m.dirty = true;
+        dropped.add(id);
+        continue;
+      }
+      putMirrorMsg(m, id, x.date || 0, x.message || "");
+      if (!postMatchesSubject(x.message || "", subject.username, subject.id, strict, subject.nick)) dropped.add(id);
+      else mirrorVerified.set(`${m.key}:${id}`, now);
+    }
+    if (mirrorVerified.size > 50_000) mirrorVerified.clear();
+    saveMirror(m);
+    return hits.filter((h) => !dropped.has(h.messageId));
+  } catch (err) {
+    const wait = floodSeconds(err);
+    if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
+    return hits;
+  }
+}
+
+// Owner diagnostics: how far each channel's copy has got.
+export function mirrorStatus(): { title: string; posts: number; complete: boolean; updatedAt: number }[] {
+  return checkChannels().map((c) => {
+    const m = loadMirror(c);
+    return { title: c.title || c.username || c.id, posts: m.msgs.size, complete: m.complete, updatedAt: m.updatedAt };
+  });
+}
+
+if (botToken() && process.env.NODE_ENV !== "test" && (process.env.PUBLIC_URL || process.env.NODE_ENV === "production")) {
+  setInterval(() => void mirrorTick().catch(() => {}), 8_000).unref?.();
 }
 
 // Diagnostic for the owner: runs a real username search across the configured
@@ -2108,6 +2490,10 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
     }
   }
   lines.push(`Итого по делу: ${total}.`);
+  lines.push("", "Локальная копия каналов (по ней идёт быстрый поиск):");
+  for (const st of mirrorStatus()) {
+    lines.push(`• ${st.title}: ${st.posts.toLocaleString("ru-RU")} постов — ${st.complete ? "вся история" : "докачивается"}`);
+  }
   return lines.join("\n");
 }
 
@@ -3204,16 +3590,26 @@ function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] 
 const checkCache = new Map<string, { at: number; res: CheckResult }>();
 const CHECK_CACHE_TTL = 5 * 60_000;
 
+// A forum nickname typed as plain text (WWH nicknames can contain spaces):
+// used only when the input is neither a @username, a link nor an id.
+export function nicknameFromInput(input: string): string {
+  const t = (input || "").replace(/^@/, "").replace(/\s+/g, " ").trim();
+  if (t.length < 3 || t.length > 40) return "";
+  if (!/\p{L}/u.test(t) || /[<>{}\[\]\\/|]/.test(t) || /t\.me|https?:/i.test(t)) return "";
+  return t;
+}
+
 export async function checkCounterparty(input: string): Promise<CheckResult> {
   if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
   const cacheKey = (() => {
     const p = parseTelegramInput(input);
-    return `${p.username.replace(/^@/, "").toLowerCase()}|${p.id}`;
+    const nick = p.username || p.id ? "" : nicknameFromInput(input).toLowerCase().replace(/[\s_.\-]+/g, " ");
+    return `${p.username.replace(/^@/, "").toLowerCase()}|${p.id}|${nick}`;
   })();
   const hit = checkCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < CHECK_CACHE_TTL && cacheKey !== "|") return hit.res;
+  if (hit && Date.now() - hit.at < CHECK_CACHE_TTL && cacheKey !== "||") return hit.res;
   const res = await checkCounterpartyUncached(input);
-  if (cacheKey !== "|") {
+  if (cacheKey !== "||") {
     checkCache.set(cacheKey, { at: Date.now(), res });
     if (checkCache.size > 2000) checkCache.delete(checkCache.keys().next().value!);
   }
@@ -3226,6 +3622,8 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   // never searched or shown; an id in the same input is still honoured.
   const uname = isIgnoredHandle(parsed.username) ? "" : parsed.username.replace(/^@/, "").toLowerCase();
   const id = parsed.id;
+  // "Dark Money": a forum nickname with a space, searched in the channels only.
+  const nick = !parsed.username && !id ? nicknameFromInput(input) : "";
   const matched: { key: string; rec: PendingPost }[] = [];
   for (const [key, rec] of Object.entries(pendingPosts)) {
     // Only approved complaints that actually went out to the EPB channel and were not removed.
@@ -3267,8 +3665,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   };
 
   const channels = checkChannels();
-  if (hasUserbot() && channels.length) {
-    // Live full-history search in every configured channel (old posts included).
+  if (hasUserbot() && channels.length && (uname || id || nick)) {
     let effectiveId = id;
     if (uname && !effectiveId) {
       // Resolve the username to its id so we can also match on the numeric id,
@@ -3276,16 +3673,27 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       const r = await resolveUsernameMtproto(uname, "");
       if (r && r !== "busy" && r.id) effectiveId = r.id;
     }
-    // Search terms find candidate posts; postMatchesSubject then decides whether
-    // the post actually accuses this username/id (vs mentions it as a contact/ad).
-    const subject = { username: uname, id: effectiveId };
-    const searchTerms = [uname, effectiveId].filter(Boolean) as string[];
+    // postMatchesSubject then decides whether a post actually accuses this
+    // username/id/nickname (vs mentions it as a contact/ad).
+    // A handle like "dark_money" is often written "Dark Money" on the forum: also
+    // look for it as a nickname (strict rules only, see postMatchesSubject).
+    const subject = { username: uname, id: effectiveId, nick: nick || (/[_.]/.test(uname) ? uname : "") };
+    const searchTerms = [uname, effectiveId, nick].filter(Boolean) as string[];
     for (const channel of channels) {
-      for (const term of searchTerms) {
-        push(await userSearchChannel(channel, term, subject));
+      const m = loadMirror(channel);
+      if (m.msgs.size) {
+        // The local copy: instant, whole history.
+        const found = searchMirror(channel, m, subject);
+        push(found.length ? await confirmMirrorHits(channel, m, found, subject) : []);
+      }
+      if (!m.complete) {
+        // Copy not finished yet: older posts may be missing from it, so also ask
+        // Telegram's search (the recent posts are already in the copy, so the
+        // slow history scan is skipped once the copy has started).
+        for (const term of searchTerms) push(await userSearchChannel(channel, term, subject, m.msgs.size > 0));
       }
     }
-  } else {
+  } else if (uname || id) {
     // Fallback: posts indexed by the bot since each channel was connected.
     for (const token of [uname ? `@${uname}` : "", id].filter(Boolean)) push(checkIndex[token] || []);
   }
@@ -7211,6 +7619,7 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     bindings.checkChannels = checkChannels().filter((c) => !sameChat(c.id, target));
     saveBindings();
     removeCheckChannelFromIndex(target);
+    dropMirror(target);
     await answer("Канал убран");
     await renderAdmin(cb, adminCheck());
     return;
@@ -7437,6 +7846,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
         saveBindings();
       }
       indexCheckPost(ch, post.message_id, post.text || post.caption || "", post.date || 0);
+      mirrorAddPost(ch, post.message_id, post.text || post.caption || "", post.date || 0);
     }
     return;
   }
