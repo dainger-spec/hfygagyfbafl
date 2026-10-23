@@ -277,10 +277,10 @@ export function ApplyForm({
           <img
             src={SENDING_ANIM}
             alt=""
-            width={168}
-            height={172}
+            width={136}
+            height={140}
             draggable={false}
-            className="h-[172px] w-[168px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
+            className="h-[140px] w-[136px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
           />
           <div className="space-y-1.5">
             <p className="font-display text-lg font-bold">{t(locale, "sendingTitle")}</p>

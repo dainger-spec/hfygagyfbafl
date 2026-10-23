@@ -968,10 +968,10 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
             <img
               src={FROG_ANIM}
               alt=""
-              width={150}
-              height={154}
+              width={120}
+              height={123}
               draggable={false}
-              className="h-[154px] w-[150px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
+              className="h-[123px] w-[120px] select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]"
             />
             <p className="text-sm font-semibold text-muted">{t(locale, "checkChecking")}</p>
             <div className="epb-progress h-1.5 w-48 max-w-full rounded-full bg-surface" />
