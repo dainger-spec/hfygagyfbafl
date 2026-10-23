@@ -1264,9 +1264,76 @@ function publicSiteUrl(): string | undefined {
   return publicMiniAppUrl();
 }
 
+// How the bot receives updates. "polling" (default): the server asks Telegram
+// for updates itself, so the bot keeps working even when the mini-app domain is
+// unreachable (DDoS on the domain, proxy or DNS trouble) — it needs no incoming
+// traffic at all. "webhook": Telegram pushes updates to /api/telegram/webhook.
+// Set TELEGRAM_UPDATES=webhook to switch back.
+function updatesMode(): "polling" | "webhook" {
+  return (process.env.TELEGRAM_UPDATES || "").trim().toLowerCase() === "webhook" ? "webhook" : "polling";
+}
+
+let pollingStarted = false;
+const POLL_ALLOWED = ["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"];
+
+function startUpdatePolling() {
+  if (pollingStarted || !botToken()) return;
+  pollingStarted = true;
+  void pollUpdatesForever();
+}
+
+async function pollUpdatesForever() {
+  // A webhook and getUpdates can't both be active: remove the webhook first,
+  // keeping any updates that are still waiting.
+  await tgSoft("deleteWebhook", { drop_pending_updates: false });
+  let offset = 0;
+  let failures = 0;
+  for (;;) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 65_000);
+      let data: { ok: boolean; result?: TgUpdate[]; error_code?: number; description?: string };
+      try {
+        const res = await fetch(`${botApi()}/getUpdates`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ offset, timeout: 50, allowed_updates: POLL_ALLOWED }),
+          signal: ctrl.signal,
+        });
+        data = (await res.json()) as typeof data;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!data.ok) {
+        // 409: a webhook got set again (or another copy of the bot is polling).
+        if (data.error_code === 409) await tgSoft("deleteWebhook", { drop_pending_updates: false });
+        throw new Error(data.description || "getUpdates failed");
+      }
+      failures = 0;
+      for (const update of data.result || []) {
+        offset = Math.max(offset, update.update_id + 1);
+        void handleUpdate(update).catch((err) => console.error("[epb] update", err));
+      }
+    } catch (err) {
+      failures += 1;
+      if (failures === 1 || failures % 20 === 0) console.error("[epb] polling:", err instanceof Error ? err.message : err);
+      await sleep(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)));
+    }
+  }
+}
+
 async function ensureProductionWebhook() {
   const site = publicSiteUrl();
   if (!site) return;
+  if (updatesMode() === "polling") {
+    if (bindings.miniAppUrl !== site) {
+      await registerMiniAppUrl(site);
+    } else {
+      await applyMenuButton();
+      startUpdatePolling();
+    }
+    return;
+  }
   const hook = `${site}/api/telegram/webhook`;
   const info = await tgSoft<{ url?: string }>("getWebhookInfo");
   // The secret is derived from the token: after a token change the URL is the same
@@ -7803,6 +7870,11 @@ export async function registerMiniAppUrl(url: string) {
   saveBindings();
   lastMenuUrl = "";
   await applyMenuButton();
+  // In polling mode the bot pulls updates itself; a webhook would block that.
+  if (updatesMode() === "polling") {
+    startUpdatePolling();
+    return { ok: true as const, url: clean };
+  }
   const set = await tgSoft("setWebhook", {
     url: `${clean}/api/telegram/webhook`,
     secret_token: webhookSecret(),
@@ -7838,6 +7910,9 @@ export async function deleteWebhook() {
 // with a wrong secret no update would ever arrive.
 if (botToken() && (process.env.PUBLIC_URL || process.env.NODE_ENV === "production")) {
   setTimeout(() => void ensureBotProfile().catch(() => {}), 3000);
+  // Start pulling updates even if the profile setup above fails (network hiccup
+  // at boot): the poll loop retries on its own.
+  if (updatesMode() === "polling" && process.env.NODE_ENV !== "test") setTimeout(startUpdatePolling, 4000);
 }
 if (botToken() && broadcastJobs.length) setTimeout(resumeBroadcasts, 5000);
 if (botToken() && dmJobs.length) setTimeout(resumeDmJobs, 6000);

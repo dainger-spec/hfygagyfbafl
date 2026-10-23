@@ -39,9 +39,60 @@ for (const ev of ["uncaughtException", "unhandledRejection"]) {
 // Scanners send paths with broken %-escapes (e.g. "/%E0%A4%A"). The framework
 // throws while decoding them, outside any handler, so the request would hang
 // and log an uncaught exception. Answer those with 400 before they get there.
+// Per-IP flood guard: more than FLOOD_MAX requests in FLOOD_WINDOW from one
+// address gets 429 for FLOOD_BLOCK, before any page is rendered. A normal visit
+// is a few dozen requests. Telegram's webhook calls are never limited.
+const FLOOD_WINDOW = 10_000;
+const FLOOD_MAX = 300;
+const FLOOD_BLOCK = 60_000;
+const floodHits = new Map();
+
+function clientIp(req) {
+  const real = String(req.headers["x-real-ip"] || "").trim();
+  if (real) return real;
+  const xff = String(req.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // The right-most entry is the one our own proxy added (the others can be forged).
+  if (xff.length) return xff[xff.length - 1];
+  return req.socket?.remoteAddress || "";
+}
+
+function floodBlocked(req) {
+  if ((req.url || "").startsWith("/api/telegram/webhook")) return false;
+  const ip = clientIp(req);
+  if (!ip) return false;
+  const now = Date.now();
+  let h = floodHits.get(ip);
+  if (!h || now - h.start > FLOOD_WINDOW) {
+    if (h && h.blockedUntil > now) return true;
+    h = { start: now, n: 0, blockedUntil: h?.blockedUntil || 0 };
+    floodHits.set(ip, h);
+  }
+  if (h.blockedUntil > now) return true;
+  h.n += 1;
+  if (h.n > FLOOD_MAX) {
+    h.blockedUntil = now + FLOOD_BLOCK;
+    return true;
+  }
+  if (floodHits.size > 50_000) floodHits.clear();
+  return false;
+}
+
 const origEmit = http.Server.prototype.emit;
 http.Server.prototype.emit = function (event, req, res, ...rest) {
   if (event === "request" && req && typeof req.url === "string") {
+    if (floodBlocked(req)) {
+      try {
+        res.statusCode = 429;
+        res.setHeader("retry-after", "60");
+        res.end("too many requests");
+      } catch {
+        /* ignore */
+      }
+      return true;
+    }
     try {
       decodeURI(req.url.split("?")[0]);
     } catch {
