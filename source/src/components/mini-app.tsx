@@ -395,6 +395,8 @@ const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number }[] = [
   { src: "/partners/pi.png", alt: "π", r: 107 / 128 },
   { src: "/partners/ws-blacklist.png", alt: "WS Blacklist", r: 1 },
   { src: "/partners/cookie.png", alt: "Cookie Blacklist", r: 1 },
+  { src: "/partners/illidan.png", alt: "Illidan Blacklist Community", r: 129 / 128 },
+  { src: "/partners/imperial.png", alt: "Imperial Black List", r: 89 / 128 },
 ];
 
 function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
@@ -432,7 +434,7 @@ function PartnerMarquee() {
   return (
     <div
       className="relative overflow-hidden rounded-xl bg-surface/60 py-1.5 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
-      style={{ "--epb-marquee-dur": "9s" } as CSSProperties}
+      style={{ "--epb-marquee-dur": "11s" } as CSSProperties}
     >
       <div className="epb-marquee-track">
         <PartnerLogos size={30} gap />
