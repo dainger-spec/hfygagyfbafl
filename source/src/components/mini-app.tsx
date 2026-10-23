@@ -392,12 +392,12 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   const Seq = () => (
     <>
       <span className="inline-flex items-center">
-        <span className="text-gold/70">{t(locale, "sponsorsTitle")}</span>
+        <span className="epb-gold-text opacity-80">{t(locale, "sponsorsTitle")}</span>
         <span className="mx-3 text-gold/40">·</span>
       </span>
       {items.map((s) => (
         <span key={s.id} className="inline-flex items-center">
-          <span>{s.title}</span>
+          <span className="epb-gold-text">{s.title}</span>
           <span className="mx-3 text-gold/40">/</span>
         </span>
       ))}
