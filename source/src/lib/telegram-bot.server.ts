@@ -6604,12 +6604,42 @@ const POST_MEDIA_DIR = join(DATA_DIR, "post-media");
 const POST_MEDIA_MAX_BYTES = 40 * 1024 * 1024;
 const POST_PHOTOS_MAX = 6;
 const POST_PHOTO_MAX_BYTES = 300 * 1024; // ~800 px photos are 60–150 KB
-export type PostDetail = { ok: true; text: string; date: number; source: string; photos: string[]; more: number; photosPending?: boolean } | { ok: false; error: string };
-type PostMeta = { text: string; date: number; photos: number; more: number; at: number };
-const postInflight = new Map<string, Promise<{ text: string; date: number; photos: Buffer[]; more: number } | null>>();
+// links: the post's links by position in the text (o = offset, l = length,
+// u = url) — also the ones hidden behind words, which the text alone loses.
+type PostLink = { o: number; l: number; u: string };
+export type PostDetail =
+  | { ok: true; text: string; date: number; source: string; photos: string[]; more: number; links?: PostLink[]; photosPending?: boolean }
+  | { ok: false; error: string };
+type PostMeta = { text: string; date: number; photos: number; more: number; at: number; links?: PostLink[] };
+const postInflight = new Map<string, Promise<{ text: string; date: number; photos: Buffer[]; more: number; links: PostLink[] } | null>>();
+
+type MtEntity = { className?: string; offset?: number; length?: number; url?: string };
+// Only web and t.me links are kept (no tg://, javascript: and the like).
+function postLinksFrom(text: string, entities: MtEntity[] | undefined): PostLink[] {
+  const out: PostLink[] = [];
+  for (const e of entities || []) {
+    const o = Number(e.offset);
+    const l = Number(e.length);
+    if (!Number.isInteger(o) || !Number.isInteger(l) || o < 0 || l <= 0 || o + l > text.length) continue;
+    const piece = text.slice(o, o + l);
+    let u = "";
+    if (e.className === "MessageEntityTextUrl") u = String(e.url || "");
+    else if (e.className === "MessageEntityUrl") u = /^https?:\/\//i.test(piece) ? piece : `https://${piece}`;
+    else if (e.className === "MessageEntityMention" && /^@[a-z0-9_]{4,32}$/i.test(piece)) u = `https://t.me/${piece.slice(1)}`;
+    if (!/^https?:\/\/[^\s]+$/i.test(u) || u.length > 600) continue;
+    out.push({ o, l, u });
+    if (out.length >= 60) break;
+  }
+  return out;
+}
 
 type UserClientMedia = UserClientSearch & { downloadMedia: (msg: unknown, opts?: { thumb?: unknown }) => Promise<Buffer | string | undefined> };
-type TgMediaMsg = TgMsgLite & { groupedId?: unknown; photo?: { sizes?: { className?: string; type?: string; w?: number; h?: number }[] }; media?: { className?: string } };
+type TgMediaMsg = TgMsgLite & {
+  groupedId?: unknown;
+  photo?: { sizes?: { className?: string; type?: string; w?: number; h?: number }[] };
+  media?: { className?: string };
+  entities?: MtEntity[];
+};
 
 function postMediaPath(key: string, name: string) {
   return join(POST_MEDIA_DIR, `${key}${name}`);
@@ -6652,7 +6682,9 @@ async function fetchPostMedia(ch: CheckChannel, messageId: number) {
   const group = target.groupedId
     ? page.filter((x): x is TgMediaMsg => Boolean(x && x.groupedId && String(x.groupedId) === String(target.groupedId))).sort((x, y) => x.id! - y.id!)
     : [target];
-  const text = group.map((x) => x.message || "").find(Boolean) || "";
+  const withText = group.find((x) => x.message) || target;
+  const text = withText.message || "";
+  const links = postLinksFrom(text, withText.entities);
   const photos: Buffer[] = [];
   let more = 0;
   for (const x of group) {
@@ -6670,7 +6702,7 @@ async function fetchPostMedia(ch: CheckChannel, messageId: number) {
     const buf = await paced(() => withTimeout(c.downloadMedia(x, pick ? { thumb: pick } : {}), 20_000, "photo timeout"));
     if (Buffer.isBuffer(buf) && buf.length && buf.length <= POST_PHOTO_MAX_BYTES) photos.push(buf);
   }
-  return { text, date: (target.date || 0) * 1000, photos, more };
+  return { text, date: (target.date || 0) * 1000, photos, more, links };
 }
 
 export async function postDetail(userId: string, channelId: string, messageId: number): Promise<PostDetail> {
@@ -6690,7 +6722,10 @@ export async function postDetail(userId: string, channelId: string, messageId: n
         /* pruned */
       }
     }
-    if (photos.length === meta.photos) return { ok: true, text: meta.text, date: meta.date, source, photos, more: meta.more };
+    // (an entry saved before links were kept is fetched once more)
+    if (photos.length === meta.photos && (meta.links || !hasUserbot())) {
+      return { ok: true, text: meta.text, date: meta.date, source, photos, more: meta.more, links: meta.links || [] };
+    }
   }
   const copy = (mirrors.get(chatIdKey(ch.id)) || loadMirror(ch)).msgs.get(messageId);
   const base = { text: copy?.text || "", date: (copy?.date || 0) * 1000 };
@@ -6715,13 +6750,13 @@ export async function postDetail(userId: string, channelId: string, messageId: n
   try {
     mkdirSync(POST_MEDIA_DIR, { recursive: true });
     got.photos.forEach((b, i) => writeFileSync(postMediaPath(key, `_${i}.jpg`), b));
-    const value: PostMeta = { text: got.text || base.text, date: got.date || base.date, photos: got.photos.length, more: got.more, at: Date.now() };
+    const value: PostMeta = { text: got.text || base.text, date: got.date || base.date, photos: got.photos.length, more: got.more, at: Date.now(), links: got.text ? got.links : [] };
     writeFileSync(postMediaPath(key, ".json"), JSON.stringify(value));
     prunePostMedia();
   } catch {
     /* cache is optional */
   }
-  return { ok: true, text: got.text || base.text, date: got.date || base.date, source, photos: got.photos.map(dataUrl), more: got.more };
+  return { ok: true, text: got.text || base.text, date: got.date || base.date, source, photos: got.photos.map(dataUrl), more: got.more, links: got.text ? got.links : [] };
 }
 
 // The newest posts copied from the blacklist channels, for the list at the bottom

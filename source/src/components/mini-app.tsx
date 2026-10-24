@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
@@ -1583,7 +1583,61 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
 
 // A blacklist post opened inside the app: the whole text (from the server's copy
 // of the channel) and its photos, loaded only now. Works for closed channels too.
-type PostData = { text: string; date: number; source: string; photos: string[]; more: number; photosPending?: boolean };
+type PostData = { text: string; date: number; source: string; photos: string[]; more: number; links?: { o: number; l: number; u: string }[]; photosPending?: boolean };
+
+// Post text with working links: the post's own links (also those hidden behind
+// words) where known, plus any plain https://, t.me/… and @username in the rest.
+// (no lookbehind: older iPhones' Safari can't parse it)
+const AUTO_LINK_RE = /(https?:\/\/[^\s<>"]+|\bt\.me\/[A-Za-z0-9_+/?=&%-]+|@[A-Za-z0-9_]{4,32})/g;
+function autoLinks(text: string, from = 0, to = text.length): { o: number; l: number; u: string }[] {
+  const out: { o: number; l: number; u: string }[] = [];
+  const part = text.slice(from, to);
+  for (const m of part.matchAll(AUTO_LINK_RE)) {
+    const at = from + (m.index ?? 0);
+    const raw = m[0].replace(/[.,;:!?)»"']+$/, "");
+    if (!raw) continue;
+    // "@" inside an e-mail or a word is not a username
+    if (raw.startsWith("@") && at > 0 && /[A-Za-z0-9_.]/.test(text[at - 1]!)) continue;
+    const u = raw.startsWith("@") ? `https://t.me/${raw.slice(1)}` : raw.startsWith("t.me/") ? `https://${raw}` : raw;
+    out.push({ o: at, l: raw.length, u });
+  }
+  return out;
+}
+function LinkedText({ text, links }: { text: string; links?: { o: number; l: number; u: string }[] }) {
+  const own = (links || []).filter((x) => x.o >= 0 && x.l > 0 && x.o + x.l <= text.length).sort((a, b) => a.o - b.o);
+  // the gaps between the post's own links get plain-text detection
+  const all: { o: number; l: number; u: string }[] = [];
+  let pos = 0;
+  for (const x of own) {
+    if (x.o < pos) continue;
+    all.push(...autoLinks(text, pos, x.o), x);
+    pos = x.o + x.l;
+  }
+  all.push(...autoLinks(text, pos));
+  const parts: ReactNode[] = [];
+  let at = 0;
+  all.forEach((x, i) => {
+    if (x.o < at) return;
+    if (x.o > at) parts.push(text.slice(at, x.o));
+    parts.push(
+      <a
+        key={i}
+        href={x.u}
+        onClick={(e) => {
+          e.preventDefault();
+          haptic("light");
+          openExternal(x.u);
+        }}
+        className="font-medium text-gold underline decoration-gold/40 underline-offset-2 break-all"
+      >
+        {text.slice(x.o, x.o + x.l)}
+      </a>,
+    );
+    at = x.o + x.l;
+  });
+  if (at < text.length) parts.push(text.slice(at));
+  return <>{parts}</>;
+}
 function PostView({ hit, onBack }: { hit: CheckData["channels"][number]; onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const [data, setData] = useState<PostData | null>(null);
@@ -1664,7 +1718,9 @@ function PostView({ hit, onBack }: { hit: CheckData["channels"][number]; onBack:
 
         {!loading && text ? (
           <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
-            <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">{text}</p>
+            <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+              <LinkedText text={text} links={data?.text ? data.links : undefined} />
+            </p>
           </div>
         ) : null}
         {!loading && failed && !text ? <p className="text-sm text-muted">{t(locale, "postGone")}</p> : null}
@@ -1786,7 +1842,9 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
             {situation ? (
               <div className="space-y-1.5">
                 <p className="text-sm font-bold">{t(locale, "checkSituation")}</p>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted">{situation}</p>
+                <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted">
+                  <LinkedText text={situation} />
+                </p>
               </div>
             ) : loadingFull ? (
               <p className="flex items-center gap-2 py-4 text-sm text-muted">
