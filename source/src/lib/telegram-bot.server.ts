@@ -2057,6 +2057,15 @@ const NON_ACCUSATION_LINE_RE =
 // the line (or the accused label just above it), plus arbitration lines.
 const ACCUSATION_LINE_RE =
   /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди)/iu;
+// Does the post read like a blacklist entry at all? A post without accused
+// fields only counts when it has some sign of a complaint somewhere: ads (a
+// casino's "@rainbetcom", a shop promo) mention handles too, but none of this.
+const SCAM_CONTEXT_RE =
+  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|блек|black\s*list|blacklist|арбитраж|arbitra|жалоб|доказ|пруф|proof|ущерб|сумм[аы]|не\s+верн|не\s+отда|заблокировал|пропал|🚫|❌|🤡|📛|🛑)/iu;
+export function postHasScamContext(body: string): boolean {
+  return SCAM_CONTEXT_RE.test(body || "");
+}
+
 // Russian word endings use \p{L}: in JS regexps \w matches Latin letters only.
 const ACCUSED_LABEL_RE =
   /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer)\s*:?\s*$/iu;
@@ -2270,7 +2279,9 @@ export function postMatchesSubject(body: string, username: string, id: string, s
     }
     // A contact/dispute/ad footer line is never an accusation (both modes).
     if (!NON_ACCUSATION_LINE_RE.test(rest)) {
-      if (!strict) return true; // pure blacklist channel: a mention is an accusation
+      // pure blacklist channel: a mention is an accusation — in a post that is a
+      // complaint at all (not an ad that happens to sit in the channel)
+      if (!strict && postHasScamContext(body)) return true;
       // strict channel: require an accusation signal on the line or the label above it
       if (labelAbove) return true; // strict: arbitrations + "Ответчик:" only
     }
@@ -2809,7 +2820,7 @@ function accusedInPost(text: string, strict: boolean, channelUsername: string | 
       const tokens = nameTokens(line);
       if (tokens.length && ACCUSED_PREFIX_RE.test(line.slice(0, tokens[0]!.index))) names.push(...tokens.map((t) => t.value));
     }
-  } else if (!names.length) {
+  } else if (!names.length && postHasScamContext(text)) {
     const lines = text.split(/\r?\n/);
     const sig = signatureLineIndex(lines);
     names = lines.flatMap((l, i) => (i === sig ? [] : nameTokens(l.replace(INVISIBLE_RE, "")).map((t) => t.value)));
