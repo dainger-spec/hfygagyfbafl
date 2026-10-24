@@ -5,6 +5,7 @@ the words (EUROPE PRIVATE, BLACK LIST, the ribbon and the base count) are laid
 over it in the page so they stay sharp and the count stays live.
 
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card.webp
+    python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-silver.webp silver
 """
 import math
 import os
@@ -14,6 +15,17 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 EMBLEM, OUT = sys.argv[1], sys.argv[2]
+METAL = sys.argv[3] if len(sys.argv) > 3 else "gold"
+PAL = {
+    "gold": {
+        "base": (214, 186, 108), "ink": (118, 90, 34), "band": (22, 18, 12), "lace": (206, 176, 100),
+        "micro": (30, 24, 14), "chip": ((236, 238, 240), (150, 154, 160)), "chip_line": (110, 104, 92),
+    },
+    "silver": {
+        "base": (196, 199, 204), "ink": (78, 84, 94), "band": (20, 21, 24), "lace": (200, 204, 210),
+        "micro": (24, 26, 30), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
+    },
+}[METAL]
 W, H, SS = 1200, 756, 2  # card units; drawn at SS times the size, then reduced
 FONT_DIR = os.environ.get("FONT_DIR", "/usr/share/fonts/opentype/inter")
 
@@ -221,7 +233,7 @@ def chip(img):
     w, h = S(x1 - x0), S(y1 - y0)
     gy, gx = np.mgrid[0:h, 0:w].astype(np.float32)
     t = gx / w * 0.45 + gy / h * 0.55
-    top, bot = np.array([236, 238, 240]), np.array([150, 154, 160])
+    top, bot = np.array(PAL["chip"][0]), np.array(PAL["chip"][1])
     col = top + (bot - top) * t[..., None]
     col += (10 * np.sin(gx / S(5) + gy / S(17)) + 6 * np.sin(gx / S(2.3) - gy / S(9)))[..., None]
     m = Image.new("L", (w, h), 0)
@@ -238,7 +250,7 @@ def chip(img):
     d.line((w * 0.43, S(14), w * 0.62, S(14)), fill=255, width=lwc)
     d.line((w * 0.43, h - S(14), w * 0.62, h - S(14)), fill=255, width=lwc)
     la = np.asarray(lines).astype(np.float32)[..., None] / 255
-    col = col * (1 - la) + np.array([110, 104, 92]) * la
+    col = col * (1 - la) + np.array(PAL["chip_line"]) * la
     rgba = np.dstack([np.clip(col, 0, 255), np.asarray(m)]).astype(np.uint8)
     img.alpha_composite(Image.fromarray(rgba, "RGBA"), (S(x0), S(y0)))
 
@@ -248,14 +260,14 @@ def main():
     gy, gx = np.mgrid[0:H * SS, 0:W * SS].astype(np.float32)
     u, v = gx / (W * SS), gy / (H * SS)
     # brushed metallic gold, a touch lighter at the top left
-    base = np.array([214, 186, 108], np.float32)
+    base = np.array(PAL["base"], np.float32)
     shade = (1.06 - 0.12 * (u * 0.6 + v * 0.4))[..., None]
     rng = np.random.default_rng(7)
     brush = np.repeat(rng.normal(0, 1, (H * SS, 1)).astype(np.float32), W * SS, axis=1)
     noise = (rng.normal(0, 1, (H * SS, W * SS)).astype(np.float32) * 1.6 + brush * 2.2)[..., None]
     col = base * shade + noise
 
-    ink = np.array([118, 90, 34], np.float32)
+    ink = np.array(PAL["ink"], np.float32)
     g = np.asarray(ground()).astype(np.float32)[..., None] / 255
     # the engraving fills the inside of the frame only; the margin stays plain
     g[: S(TOP1)], g[S(BOT):] = 0, 0
@@ -264,15 +276,15 @@ def main():
 
     band, lace, micro = frame()
     b = np.asarray(band).astype(np.float32)[..., None] / 255
-    col = col * (1 - b) + np.array([22, 18, 12], np.float32) * b
+    col = col * (1 - b) + np.array(PAL["band"], np.float32) * b
     la = np.asarray(lace).astype(np.float32)[..., None] / 255
-    col = col * (1 - la) + np.array([206, 176, 100], np.float32) * la
+    col = col * (1 - la) + np.array(PAL["lace"], np.float32) * la
     mi = np.asarray(micro).astype(np.float32)[..., None] / 255
-    col = col * (1 - 0.85 * mi) + np.array([30, 24, 14], np.float32) * 0.85 * mi
+    col = col * (1 - 0.85 * mi) + np.array(PAL["micro"], np.float32) * 0.85 * mi
     # hairline outlines of the frame
     img = Image.fromarray(np.clip(col, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
     d = ImageDraw.Draw(img)
-    dark = (22, 18, 12, 255)
+    dark = (*PAL["band"], 255)
     d.line((S(FX0), S(TOP0), S(W - FX0), S(TOP0)), fill=dark, width=S(2))
     d.line((S(FX1), S(TOP1), S(W - FX1), S(TOP1)), fill=dark, width=3)
     d.line((S(FX0), S(BOT), S(W - FX0), S(BOT)), fill=dark, width=S(2))
@@ -280,6 +292,11 @@ def main():
     chip(img)
 
     em = Image.open(EMBLEM).convert("RGBA")
+    if METAL == "silver":
+        # a steel medallion on the silver card
+        r, g, b_, a = em.split()
+        grey = Image.merge("RGB", (r, g, b_)).convert("L")
+        em = Image.merge("RGBA", (grey.point(lambda v: min(255, int(v * 1.04))), grey.point(lambda v: min(255, int(v * 1.06))), grey.point(lambda v: min(255, int(v * 1.12))), a))
     eh = 342
     em = em.resize((round(em.width * S(eh) / em.height), S(eh)), Image.LANCZOS)
     img.alpha_composite(em, (S(600) - em.width // 2, S(388) - em.height // 2))

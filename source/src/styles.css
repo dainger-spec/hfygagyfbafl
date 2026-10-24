@@ -585,6 +585,36 @@
   background: radial-gradient(circle at 50% 50%, rgba(255, 252, 235, 0.32), rgba(255, 252, 235, 0) 26%);
 }
 
+/* the silver card */
+.epb-card-stage[data-metal="silver"]::before {
+  background: radial-gradient(closest-side, rgba(200, 210, 225, 0.2), rgba(200, 210, 225, 0));
+}
+[data-metal="silver"] .epb-card-edge {
+  background: linear-gradient(135deg, #f4f6f9 0%, #8e939b 35%, #dfe2e7 55%, #5c6068 100%);
+}
+[data-metal="silver"] .epb-card-face {
+  background: #c4c7cc;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -1px 0 rgba(60, 64, 72, 0.6),
+    inset 0 0 0 1px rgba(80, 86, 96, 0.35);
+}
+[data-metal="silver"] .epb-card-shade-l {
+  background: linear-gradient(90deg, rgba(14, 18, 26, 0.42), rgba(14, 18, 26, 0) 60%);
+}
+[data-metal="silver"] .epb-card-shade-r {
+  background: linear-gradient(270deg, rgba(14, 18, 26, 0.42), rgba(14, 18, 26, 0) 60%);
+}
+[data-metal="silver"] .epb-card-shade-t {
+  background: linear-gradient(180deg, rgba(14, 18, 26, 0.36), rgba(14, 18, 26, 0) 60%);
+}
+[data-metal="silver"] .epb-card-shade-b {
+  background: linear-gradient(0deg, rgba(14, 18, 26, 0.36), rgba(14, 18, 26, 0) 60%);
+}
+[data-metal="silver"] .epb-card-glare {
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0) 26%);
+}
+
 /* one search step replacing the previous one */
 .epb-step-in {
   animation: epb-step-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;

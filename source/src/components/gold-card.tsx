@@ -1,5 +1,4 @@
-import { useEffect, useRef } from "react";
-import { haptic, hapticTick } from "@/lib/telegram";
+import { useEffect, useRef, useState } from "react";
 
 // The gold card on the home screen. The art (public/brand/card.webp, drawn by
 // scripts/gen-card.py) carries the engraving, frame, chip and medallion; the
@@ -7,9 +6,19 @@ import { haptic, hapticTick } from "@/lib/telegram";
 // built like a thin metal plate: edge layers shifted against the tilt show its
 // rim, a shadow under it follows the tilt, a metallic sheen slides over the
 // face and the side turned away darkens. It sways on its own, tilts under a
-// finger and a tap opens `onOpen`. (No preserve-3d: browsers rasterise such
+// finger and a tap opens `onOpen`. Each time the app opens it comes either in
+// gold or in silver, at random. (No preserve-3d: browsers rasterise such
 // layers at low resolution and the small print goes blurry.)
-const DARK = "#1d1810";
+type Metal = "gold" | "silver";
+const METALS: Record<Metal, { art: string; ink: string; ribbon: string }> = {
+  gold: { art: "/brand/card.webp", ink: "#1d1810", ribbon: "#d2b468" },
+  silver: { art: "/brand/card-silver.webp", ink: "#1b1d21", ribbon: "#c6c9ce" },
+};
+// chosen once per app launch, so going back to the home screen keeps the same card
+let launchMetal: Metal | null = null;
+function pickMetal(): Metal {
+  return (launchMetal ??= Math.random() < 0.5 ? "gold" : "silver");
+}
 const VB_W = 1200;
 const VB_H = 756;
 
@@ -56,6 +65,8 @@ export function GoldCard({
   locale: "ru" | "en";
   onOpen?: () => void;
 }) {
+  const [metal] = useState(pickMetal);
+  const look = METALS[metal];
   const cardRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
   const glareRef = useRef<HTMLDivElement>(null);
@@ -138,18 +149,7 @@ export function GoldCard({
     };
     run();
 
-    // haptics while turning: a click every few degrees like a dial, a firmer
-    // knock when the card hits the end of its swing, a soft one when let go
-    const STEP = 5;
-    let stepX = 0;
-    let stepY = 0;
-    let atEdge = false;
-    let lastTick = 0;
     const down = (e: PointerEvent) => {
-      haptic("light");
-      stepX = Math.round(rx / STEP);
-      stepY = Math.round(ry / STEP);
-      atEdge = false;
       dragging = true;
       moved = 0;
       sx = e.clientX;
@@ -171,28 +171,10 @@ export function GoldCard({
       moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
       ty = clamp(by + dx * 0.35, 32);
       tx = clamp(bx - dy * 0.35, 24);
-      const edge = Math.abs(ty) >= 32 || Math.abs(tx) >= 24;
-      if (edge && !atEdge) {
-        haptic("rigid");
-        lastTick = performance.now();
-      }
-      atEdge = edge;
-      const sX = Math.round(tx / STEP);
-      const sY = Math.round(ty / STEP);
-      if (sX !== stepX || sY !== stepY) {
-        stepX = sX;
-        stepY = sY;
-        const now = performance.now();
-        if (!edge && now - lastTick > 40) {
-          lastTick = now;
-          hapticTick();
-        }
-      }
     };
     const up = () => {
       if (!dragging) return;
       dragging = false;
-      if (moved >= 6) haptic("soft");
       if (moved < 6) onOpenRef.current?.();
     };
     el.addEventListener("pointerdown", down);
@@ -213,7 +195,7 @@ export function GoldCard({
   const shown = count == null ? "—" : count.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
 
   return (
-    <div className="epb-card-stage">
+    <div className="epb-card-stage" data-metal={metal}>
       <div ref={shadowRef} className="epb-card-shadow" aria-hidden />
       <div
         ref={cardRef}
@@ -233,7 +215,7 @@ export function GoldCard({
           />
         ))}
         <div className="epb-card-face">
-          <img src="/brand/card.webp" alt="" draggable={false} className="epb-card-art" />
+          <img src={look.art} alt="" draggable={false} className="epb-card-art" />
           <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
             <defs>
               {/* raised lettering: a light edge above, a soft dark one below */}
@@ -262,7 +244,7 @@ export function GoldCard({
                 fontWeight={800}
                 fontSize={60}
                 letterSpacing={2}
-                fill={DARK}
+                fill={look.ink}
               >
                 EUROPE PRIVATE
               </text>
@@ -273,12 +255,12 @@ export function GoldCard({
                 fontWeight={500}
                 fontSize={56}
                 letterSpacing={1}
-                fill={DARK}
+                fill={look.ink}
               >
                 BLACK LIST
               </text>
             </g>
-            <g fill="#d2b468" stroke={DARK} strokeWidth={3.2} strokeLinejoin="round">
+            <g fill={look.ribbon} stroke={look.ink} strokeWidth={3.2} strokeLinejoin="round">
               {RIBBON.tails.map((d) => (
                 <path key={d} d={d} />
               ))}
@@ -290,7 +272,7 @@ export function GoldCard({
               fontWeight={700}
               fontSize={20}
               letterSpacing={3}
-              fill={DARK}
+              fill={look.ink}
             >
               <textPath href="#epb-ribbon-line" startOffset="50%" textAnchor="middle">
                 {ribbon}
@@ -304,7 +286,7 @@ export function GoldCard({
               fontWeight={500}
               fontSize={46}
               letterSpacing={2}
-              fill={DARK}
+              fill={look.ink}
               filter="url(#epb-emboss)"
             >
               {shown}
@@ -316,7 +298,7 @@ export function GoldCard({
               fontFamily="Manrope, sans-serif"
               fontWeight={800}
               fontSize={15}
-              fill={DARK}
+              fill={look.ink}
             >
               © EPB
             </text>

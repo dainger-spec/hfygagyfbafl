@@ -450,24 +450,6 @@ export function hapticNotify(type: "success" | "warning" | "error") {
   }
 }
 
-// The light "click" of a picker wheel, for things that move in small steps.
-export function hapticTick() {
-  try {
-    const hf = window.Telegram?.WebApp?.HapticFeedback;
-    if (hf?.selectionChanged && window.Telegram?.WebApp?.isVersionAtLeast?.("6.1")) {
-      hf.selectionChanged();
-      return;
-    }
-  } catch {
-    /* fall through */
-  }
-  try {
-    navigator.vibrate?.(5);
-  } catch {
-    /* no vibration */
-  }
-}
-
 export function haptic(style: "light" | "medium" | "heavy" | "rigid" | "soft") {
   try {
     const hf = window.Telegram?.WebApp?.HapticFeedback;
