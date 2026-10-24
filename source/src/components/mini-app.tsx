@@ -522,35 +522,14 @@ function Home({
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
-          {/* styled like the base card: engraved lines, a soft light on the right */}
-          <button
-            type="button"
-            disabled={!canUse}
-            onClick={() => {
-              haptic("light");
-              onComplaint();
-            }}
-            className="epb-act epb-act-scam"
-          >
-            <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
-            {/* big, see-through, cut by the edge — like the medallion on the base card */}
-            <span className="epb-act-scam-word" aria-hidden>
-              SCAM
-            </span>
-          </button>
+          {/* solid gold, no gradient */}
+          <Button size="lg" className="w-full rounded-xl bg-none" onClick={onComplaint} disabled={!canUse}>
+            {t(locale, "fileComplaint")}
+          </Button>
           {checkOn ? (
-            <button
-              type="button"
-              disabled={!canUse}
-              onClick={() => {
-                haptic("light");
-                onCheck();
-              }}
-              className="epb-act epb-act-gray"
-            >
-              <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "checkBtn")}</span>
-              <Search className="epb-act-loupe" strokeWidth={2.2} aria-hidden />
-            </button>
+            <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
+              {t(locale, "checkBtn")}
+            </Button>
           ) : null}
         </div>
         <a
