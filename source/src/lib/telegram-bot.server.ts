@@ -1364,6 +1364,17 @@ function loadPackEmoji(force = false): Promise<void> {
 }
 if (process.env.NODE_ENV !== "test") setTimeout(() => void loadPackEmoji(), 5_000).unref?.();
 
+// The member card's renderer is made ready shortly after the start (and again
+// when someone opens the menu, if it was stopped for being idle), so a card
+// never waits for it.
+let cardWarmAt = 0;
+function warmCards() {
+  if (process.env.NODE_ENV === "test" || Date.now() - cardWarmAt < 60_000) return;
+  cardWarmAt = Date.now();
+  void import("@/lib/member-gif.server").then((m) => m.warmUpCardRenderer()).catch((err) => console.error("[epb] card warm-up", err));
+}
+setTimeout(warmCards, 15_000).unref?.();
+
 // First of the candidates that has a Premium icon (else the first one, plain).
 function pickEmoji(...candidates: string[]): string {
   return candidates.find((e) => hasEmojiId(e)) || candidates[0]!;
@@ -3991,15 +4002,11 @@ function memberMarkup(uid: string, side: "front" | "back", menu = false) {
 // The animation of one side: Telegram file id when it was sent recently,
 // otherwise drawn now (one at a time). The front is the same for everyone with
 // that name and metal; the back is the person's own.
-async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { video: Buffer } | null> {
-  const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
-  const cached = imCache.get(key);
-  if (cached && Date.now() - cached.at < IM_FRESH_MS) return { fileId: cached.fileId };
-  // a few drawings per person, and for the whole bot: a burst of /im in many
-  // chats waits instead of piling up; meanwhile the last card is sent again
-  if (imWaiting >= 10 || tooMany(`im-draw:${info.uid}`, 3, 5 * 60_000) || tooMany("im-render", 30, 60_000)) {
-    return cached ? { fileId: cached.fileId } : null;
-  }
+function animationKey(info: MemberInfo, side: "front" | "back") {
+  return side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
+}
+
+function drawMemberVideo(info: MemberInfo, side: "front" | "back"): Promise<Buffer> {
   imWaiting++;
   const job = imQueue.then(async () => {
     try {
@@ -4015,7 +4022,40 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
     }
   });
   imQueue = job.catch(() => {});
-  return { video: await job };
+  return job;
+}
+
+async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { video: Buffer } | null> {
+  const key = animationKey(info, side);
+  const cached = imCache.get(key);
+  if (cached && Date.now() - cached.at < IM_FRESH_MS) return { fileId: cached.fileId };
+  // drawn ahead (or still being drawn): only the upload is left
+  const ahead = imAhead.get(key);
+  if (ahead) {
+    imAhead.delete(key);
+    const video = Date.now() - ahead.at < IM_AHEAD_MS ? await ahead.video : null;
+    if (video) return { video };
+  }
+  // a few drawings per person, and for the whole bot: a burst of /im in many
+  // chats waits instead of piling up; meanwhile the last card is sent again
+  if (imWaiting >= 10 || tooMany(`im-draw:${info.uid}`, 3, 5 * 60_000) || tooMany("im-render", 30, 60_000)) {
+    return cached ? { fileId: cached.fileId } : null;
+  }
+  return { video: await drawMemberVideo(info, side) };
+}
+
+// The other side is drawn while the person looks at this one, so that
+// "Перевернуть" only has to upload it. Only when the queue is quiet.
+const imAhead = new Map<string, { at: number; video: Promise<Buffer | null> }>();
+const IM_AHEAD_MS = 5 * 60_000;
+function drawAhead(info: MemberInfo, side: "front" | "back") {
+  const key = animationKey(info, side);
+  const cached = imCache.get(key);
+  if ((cached && Date.now() - cached.at < IM_FRESH_MS) || imAhead.has(key)) return;
+  if (imWaiting >= 3 || tooMany("im-ahead", 15, 60_000)) return;
+  for (const [k, v] of imAhead) if (Date.now() - v.at > IM_AHEAD_MS) imAhead.delete(k);
+  if (imAhead.size >= 40) imAhead.delete(imAhead.keys().next().value!);
+  imAhead.set(key, { at: Date.now(), video: drawMemberVideo(info, side).catch(() => null) });
 }
 
 // Card captions carry the owner's Premium emoji (in groups too); if Telegram
@@ -4074,7 +4114,10 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
       const sent = await withCardCaption(chatId, info.caption, (caption) =>
         tg("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption, parse_mode: "HTML", ...reply, reply_markup: markup }),
       ).catch(() => null);
-      if (sent) return "sent";
+      if (sent) {
+        drawAhead(info, "back");
+        return "sent";
+      }
       // the saved file stopped working: draw it again
       imCache.delete(`${info.metal}|${info.holder}`);
       const again = await memberAnimation(info, "front");
@@ -4094,6 +4137,7 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
       return tgForm<{ animation?: { file_id: string } }>("sendAnimation", form);
     });
     rememberAnimation(info, "front", sent);
+    drawAhead(info, "back");
   } catch (err) {
     console.error("[epb] im", err);
     // without the picture the words still reach the chat
@@ -4145,7 +4189,10 @@ async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
       const ok = await withCardCaption(chatId, text, (caption) =>
         tg("editMessageMedia", { chat_id: chatId, message_id: messageId, media: { type: "animation", caption, parse_mode: "HTML", media: anim.fileId }, reply_markup: markup }),
       ).catch(() => null);
-      if (ok) return;
+      if (ok) {
+        drawAhead(info, side === "back" ? "front" : "back");
+        return;
+      }
     }
     const video = "video" in anim ? anim.video : null;
     if (!video) return;
@@ -4159,6 +4206,7 @@ async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
       return tgForm<{ animation?: { file_id: string } }>("editMessageMedia", form);
     });
     rememberAnimation(info, side, sent);
+    drawAhead(info, side === "back" ? "front" : "back");
   } catch (err) {
     console.error("[epb] im flip", err);
   }
@@ -8286,6 +8334,7 @@ async function warmAccused() {
 if (botToken() && process.env.NODE_ENV !== "test") setTimeout(() => void blacklistBaseStats(), 4_000).unref?.();
 
 async function replyStart(chatId: number, userId?: string | number) {
+  warmCards();
   const locale = langOf(userId ?? chatId);
   await sendCard(chatId, "welcome", await startCaption(locale), { reply_markup: applyKeyboard(locale) });
 }

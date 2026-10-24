@@ -18,11 +18,11 @@ import { BACK_GRID, CARD_BACKS, CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS
 const U = CARD_FACE_W / 600;
 const W = Math.round(320 * U) * 2;
 const H = Math.round(220 * U) * 2;
-// one loop of 2.8 s at 25 frames a second
-const FPS = 25;
-const FRAMES = 70;
-// H.264 quality (lower is finer; 51 is the coarsest)
-const QP = 26;
+// one loop of 2.8 s at 20 frames a second
+const FPS = 20;
+const FRAMES = 56;
+// H.264 quality (lower is finer; 51 is the coarsest): ~1.4 MB a card
+const QP = 28;
 const PERSPECTIVE = 900 * U;
 const SCALE = 0.9; // the face shown at 90 % (in a 640-px frame for a 600-px face)
 const THICK = 5 * U; // rim depth, face pixels
@@ -494,12 +494,23 @@ async function drawHere(job: FrameJob, take: (out: Uint8Array) => void): Promise
   return true;
 }
 
+// Gets everything ready before the first card is asked for: the workers with
+// their tables and faces, and the encoder's WebAssembly. Called when the bot starts.
+export async function warmUpCardRenderer(): Promise<void> {
+  for (const w of workers() || []) w.postMessage({ warm: true });
+  try {
+    (await encoder()).delete();
+  } catch (err) {
+    console.error("[epb] card encoder", err);
+  }
+}
+
 // A small pool of worker threads running this same module. They are started
 // on the first card, shared by the cards that follow (one card at a time) and
-// stopped after a few idle minutes, so they cost no memory when nobody asks.
+// stopped after half an hour without cards, so they cost no memory when nobody asks.
 const WORKER_TAG = "epb-card-worker";
 const POOL_SIZE = Math.max(1, Math.min(3, availableParallelism() - 1));
-const POOL_IDLE_MS = 3 * 60_000;
+const POOL_IDLE_MS = 30 * 60_000;
 let pool: Worker[] | null = null;
 let poolBroken = false;
 let poolTimer: ReturnType<typeof setTimeout> | null = null;
@@ -580,8 +591,16 @@ async function drawInWorkers(job: FrameJob, take: (out: Uint8Array) => void): Pr
 // Inside a worker: draw the frames asked for and send each back (moved, not copied).
 if (!isMainThread && parentPort && (workerData as Record<string, unknown> | null)?.[WORKER_TAG]) {
   const port = parentPort;
-  port.on("message", async (job: FrameJob & { frames: number[] }) => {
+  port.on("message", async (job: (FrameJob & { frames: number[] }) | { warm: true }) => {
     const L = await bgLayers();
+    if ("warm" in job) {
+      // get the faces ready too, so the first card does not wait for them
+      for (const metal of Object.keys(CARD_FACES)) {
+        baseFace(metal, "front");
+        baseFace(metal, "back");
+      }
+      return;
+    }
     for (const i of job.frames) {
       const out = new Uint8Array(W * H * 4);
       drawFrame(L, job, i, out);
