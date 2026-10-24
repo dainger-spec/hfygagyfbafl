@@ -97,6 +97,16 @@ export const getMyComplaints = createServerFn({ method: "POST" })
     return listComplaintsForUser(authed.id);
   });
 
+// How many of the user's complaints became blacklists: picks their member card.
+export const getMyCard = createServerFn({ method: "POST" })
+  .validator(z.object({ initData: z.string().max(16384) }))
+  .handler(async ({ data }) => {
+    const { publishedCountFor, verifyTelegramInitData } = await import("@/lib/telegram-bot.server");
+    const authed = verifyTelegramInitData(data.initData);
+    if (!authed) return { ok: false as const };
+    return { ok: true as const, published: publishedCountFor(authed.id) };
+  });
+
 export const saveUserLocale = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384), locale: z.enum(["ru", "en"]) }))
   .handler(async ({ data }) => {

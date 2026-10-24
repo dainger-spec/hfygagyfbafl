@@ -378,6 +378,49 @@ try {
 } catch {
   pendingPosts = {};
 }
+// ---------- Member cards: how many of a user's complaints became blacklists ----------
+// Kept apart from the complaint records, which get pruned when there are many,
+// so a user's card level never drops because old records were cleaned up.
+const TIERS_PATH = join(DATA_DIR, "telegram-user-tiers.json");
+let publishedByUser: Record<string, string[]> = readJson<Record<string, string[]>>(TIERS_PATH) || {};
+let tiersTimer: ReturnType<typeof setTimeout> | null = null;
+function saveTiers() {
+  if (tiersTimer) return;
+  tiersTimer = setTimeout(() => {
+    tiersTimer = null;
+    try {
+      writeJsonAtomic(TIERS_PATH, publishedByUser);
+    } catch {
+      /* ignore */
+    }
+  }, 1000);
+}
+function rememberPublished(key: string) {
+  const uid = pendingPosts[key]?.victimId;
+  if (!uid) return;
+  const list = (publishedByUser[uid] ||= []);
+  if (!list.includes(key)) {
+    list.push(key);
+    saveTiers();
+  }
+}
+// Published blacklists filed by this user. A record deleted everywhere by the
+// admins stops counting; one pruned from the complaint list still counts.
+export function publishedCountFor(telegramId: string): number {
+  const uid = String(telegramId || "").trim();
+  if (!uid) return 0;
+  const keys = new Set(publishedByUser[uid] || []);
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    if (rec.victimId === uid && rec.status === "published") keys.add(key);
+  }
+  let n = 0;
+  for (const key of keys) {
+    const rec = pendingPosts[key];
+    if (!rec || (rec.status === "published" && !rec.deletedEverywhere)) n++;
+  }
+  return n;
+}
+
 // Before the channelPosted marker existed, "published" already meant "posted to channel".
 for (const rec of Object.values(pendingPosts)) {
   if (rec.status === "published" && rec.channelPosted === undefined) rec.channelPosted = true;
@@ -5881,6 +5924,7 @@ async function publishFromMessage(
     pendingPosts[key]!.channelPosted = true;
     pendingPosts[key]!.channelChatId = channelPost.chatId;
     pendingPosts[key]!.channelMsgIds = channelPost.messageIds;
+    rememberPublished(key);
   } else {
     // Old message without a stored record: remember it so it can't be posted again.
     pendingPosts[lock] = {
@@ -9966,6 +10010,7 @@ function offsiteFiles(): string[] {
     DM_JOBS_PATH,
     join(DATA_DIR, "telegram-ids.json"),
     UNAME_HISTORY_PATH,
+    TIERS_PATH,
   ];
 }
 

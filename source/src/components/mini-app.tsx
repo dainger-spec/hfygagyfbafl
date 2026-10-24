@@ -1,7 +1,8 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Lock, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
-import { GoldCard } from "@/components/gold-card";
+import { CARD_LOOKS, MemberCard } from "@/components/member-card";
+import { TIERS, nextTier, tierFor } from "@/lib/tiers";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,13 +18,13 @@ import {
   telegramPlatform,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseDetails, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseDetails, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyCard, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { hasSavedLocale, t, type Locale, type Msg } from "@/lib/i18n";
 
-export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors" | "base";
+export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors" | "base" | "tiers";
 
 export function MiniApp({
   page,
@@ -138,7 +139,7 @@ export function MiniApp({
         <i className="epb-bg-a" />
         <i className="epb-bg-b" />
       </div>
-      {showApp && !["home", "sponsors", "check", "apply", "base"].includes(page) ? (
+      {showApp && !["home", "sponsors", "check", "apply", "base", "tiers"].includes(page) ? (
         <button
           type="button"
           className="absolute left-2 z-10 flex size-11 items-center justify-center rounded-xl text-fg hover:bg-surface"
@@ -150,7 +151,7 @@ export function MiniApp({
         </button>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply", "base"].includes(page) && "pt-10")}>
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply", "base", "tiers"].includes(page) && "pt-10")}>
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {ready && banned ? (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
@@ -161,7 +162,7 @@ export function MiniApp({
         ) : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
-          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} onBase={() => onPage("base")} checkOn={checkOn} />
+          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} onBase={() => onPage("base")} onTiers={() => onPage("tiers")} checkOn={checkOn} />
         ) : null}
         {showApp && page === "apply" ? (
           <ApplyForm
@@ -177,6 +178,7 @@ export function MiniApp({
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "sponsors" ? <SponsorsPage onBack={() => onPage("home")} /> : null}
         {showApp && page === "base" ? <BasePage onBack={() => onPage("home")} /> : null}
+        {showApp && page === "tiers" ? <TiersPage onBack={() => onPage("home")} /> : null}
         {showApp && page === "done" ? (
           <Done
             onPage={onPage}
@@ -316,6 +318,46 @@ function fetchBase(): Promise<BaseStats | null> {
     .finally(() => setTimeout(() => (baseReq = null), 30_000));
   return baseReq;
 }
+// How many of the user's complaints became blacklists (picks the member card).
+const CARD_KEY = "epb-card-published";
+let cardMem: number | null = null;
+let cardReq: Promise<number | null> | null = null;
+function cachedPublished(): number | null {
+  if (cardMem == null) {
+    const v = readCache<number>(CARD_KEY);
+    cardMem = typeof v === "number" ? v : null;
+  }
+  return cardMem;
+}
+function fetchPublished(): Promise<number | null> {
+  const initData = telegramInitData();
+  if (!initData) return Promise.resolve(cachedPublished());
+  cardReq ??= getMyCard({ data: { initData } })
+    .then((r) => {
+      if (!r?.ok) return cachedPublished();
+      cardMem = r.published;
+      writeCache(CARD_KEY, r.published);
+      return r.published;
+    })
+    .catch(() => cachedPublished())
+    .finally(() => setTimeout(() => (cardReq = null), 30_000));
+  return cardReq;
+}
+function usePublished(ready = true): number | null {
+  const [value, setValue] = useState<number | null>(() => cachedPublished());
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    void fetchPublished().then((v) => {
+      if (alive && v != null) setValue(v);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [ready]);
+  return value;
+}
+
 if (typeof window !== "undefined") {
   // start both requests while the app is still booting
   queueMicrotask(() => {
@@ -487,6 +529,7 @@ function Home({
   onCheck,
   onSponsors,
   onBase,
+  onTiers,
   checkOn,
 }: {
   identity: { username: string; firstName?: string; telegramId: string };
@@ -496,6 +539,7 @@ function Home({
   onCheck: () => void;
   onSponsors: () => void;
   onBase?: () => void;
+  onTiers?: () => void;
   checkOn: boolean;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
@@ -506,6 +550,9 @@ function Home({
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
   const [base, setBase] = useState<BaseStats | null>(() => cachedBase());
+  const published = usePublished(Boolean(identity.telegramId));
+  const tier = tierFor(published ?? 0);
+  const holder = identity.username || identity.firstName || "EPB Member";
   useEffect(() => {
     let alive = true;
     void fetchBase().then((value) => {
@@ -526,8 +573,30 @@ function Home({
       {noBanners ? <BaseCard onOpen={onBase} /> : null}
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <div className="mt-5 w-full">
-          <GoldCard count={base?.accounts ?? null} ribbon={t(locale, "cardRibbon")} locale={locale} onOpen={onBase} />
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onTiers?.();
+          }}
+          className="mt-5 inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm font-semibold text-muted transition-colors hover:text-fg"
+        >
+          <span>
+            {t(locale, "tierYou")}
+            <span className={cn("font-bold", TIER_TEXT[tier.metal])}>{tier.name}</span>
+            {t(locale, "tierYouTail")}
+          </span>
+          <ChevronRight className="size-4" />
+        </button>
+        <div className="mt-3 w-full">
+          <MemberCard
+            metal={tier.metal}
+            holder={holder}
+            count={base?.accounts ?? null}
+            ribbon={t(locale, "cardRibbon")}
+            locale={locale}
+            onOpen={onBase}
+          />
         </div>
         <h1 className="epb-title-heavy mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
@@ -892,6 +961,113 @@ type BaseDetailsData = {
 };
 
 // "Blacklist base": the totals and what each source adds (opened from the base card).
+// text colour of each tier's name
+const TIER_TEXT: Record<string, string> = {
+  bronze: "text-[#d6935f]",
+  silver: "text-[#d9dce1]",
+  gold: "text-gold",
+  platinum: "text-[#aeb9c9]",
+  black: "text-fg",
+};
+
+function ruBlacklists(n: number) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return "блеклист";
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return "блеклиста";
+  return "блеклистов";
+}
+
+// What each member card takes, with the user's own progress.
+function TiersPage({ onBack }: { onBack: () => void }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const published = usePublished();
+  const n = published ?? 0;
+  const current = tierFor(n);
+  const next = nextTier(n);
+  const prevMin = current.min;
+  const progress = next ? Math.min(1, (n - prevMin) / (next.min - prevMin)) : 1;
+  const need = (min: number) =>
+    min === 0
+      ? t(locale, "tierAtStart")
+      : locale === "en"
+        ? `From ${min} blacklist${min === 1 ? "" : "s"}`
+        : `От ${min} ${min === 1 ? "блеклиста" : "блеклистов"}`;
+  const left = next ? next.min - n : 0;
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onBack();
+          }}
+          className="-ml-2 flex h-9 shrink-0 items-center gap-1 rounded-xl pr-2 font-display text-xl font-bold text-fg hover:bg-surface"
+        >
+          <ChevronLeft className="size-5" />
+          {t(locale, "tiersTitle")}
+        </button>
+        <p className="text-sm leading-relaxed text-muted">{t(locale, "tiersIntro")}</p>
+        <div className="rounded-2xl bg-surface/70 px-4 py-3.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-sm text-muted">{t(locale, "tiersYours")}</span>
+            <span className={cn("font-display text-lg font-extrabold", TIER_TEXT[current.metal])}>{current.name}</span>
+          </div>
+          <div className="mt-1 text-sm text-fg">
+            {published == null
+              ? "…"
+              : locale === "en"
+                ? `${n} published blacklist${n === 1 ? "" : "s"}`
+                : `${n} ${ruBlacklists(n)} опубликовано`}
+          </div>
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div className="h-full rounded-full bg-gold transition-[width] duration-500" style={{ width: `${Math.round(progress * 100)}%` }} />
+          </div>
+          <div className="mt-2 text-xs text-muted">
+            {next
+              ? locale === "en"
+                ? `${left} more to ${next.name}`
+                : `До ${next.name} — ещё ${left} ${ruBlacklists(left)}`
+              : t(locale, "tiersTop")}
+          </div>
+        </div>
+        <div className="space-y-2">
+          {TIERS.map((tier) => {
+            const reached = n >= tier.min;
+            const isCurrent = tier.metal === current.metal;
+            return (
+              <div
+                key={tier.metal}
+                className={cn(
+                  "flex items-center gap-3 rounded-2xl bg-surface/60 p-2.5 pr-3.5",
+                  isCurrent && "shadow-[0_0_0_1px_rgba(242,190,85,0.55)]",
+                )}
+              >
+                <img
+                  src={CARD_LOOKS[tier.metal].art}
+                  alt=""
+                  draggable={false}
+                  className={cn("h-[52px] w-[82px] shrink-0 rounded-[6px] object-cover shadow-[0_4px_10px_rgba(0,0,0,0.5)]", !reached && "opacity-45 grayscale-[35%]")}
+                />
+                <div className="min-w-0 flex-1 text-left">
+                  <div className={cn("font-display text-base font-bold", TIER_TEXT[tier.metal])}>{tier.name}</div>
+                  <div className="text-xs text-muted">{need(tier.min)}</div>
+                </div>
+                {isCurrent ? (
+                  <span className="shrink-0 rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold">{t(locale, "tiersCurrent")}</span>
+                ) : !reached ? (
+                  <Lock className="size-4 shrink-0 text-subtle" />
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BasePage({ onBack }: { onBack: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const [data, setData] = useState<BaseDetailsData | null | undefined>(undefined);

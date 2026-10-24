@@ -615,6 +615,92 @@
   background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0) 26%);
 }
 
+/* the bronze, platinum and black cards */
+.epb-card-stage[data-metal="bronze"]::before {
+  background: radial-gradient(closest-side, rgba(214, 140, 80, 0.22), rgba(0, 0, 0, 0));
+}
+[data-metal="bronze"] .epb-card-edge {
+  background: linear-gradient(135deg, #f2c8a2 0%, #94582e 35%, #dba57a 55%, #5e3216 100%);
+}
+[data-metal="bronze"] .epb-card-face {
+  background: #b4774e;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 226, 200, 0.7),
+    inset 0 -1px 0 rgba(70, 34, 10, 0.6),
+    inset 0 0 0 1px rgba(90, 46, 16, 0.35);
+}
+[data-metal="bronze"] .epb-card-shade-l {
+  background: linear-gradient(90deg, rgba(40, 18, 4, 0.42), rgba(40, 18, 4, 0) 60%);
+}
+[data-metal="bronze"] .epb-card-shade-r {
+  background: linear-gradient(270deg, rgba(40, 18, 4, 0.42), rgba(40, 18, 4, 0) 60%);
+}
+[data-metal="bronze"] .epb-card-shade-t {
+  background: linear-gradient(180deg, rgba(40, 18, 4, 0.36), rgba(40, 18, 4, 0) 60%);
+}
+[data-metal="bronze"] .epb-card-shade-b {
+  background: linear-gradient(0deg, rgba(40, 18, 4, 0.36), rgba(40, 18, 4, 0) 60%);
+}
+[data-metal="bronze"] .epb-card-glare {
+  background: radial-gradient(circle at 50% 50%, rgba(255, 236, 214, 0.32), rgba(255, 255, 255, 0) 26%);
+}
+.epb-card-stage[data-metal="platinum"]::before {
+  background: radial-gradient(closest-side, rgba(170, 190, 220, 0.2), rgba(0, 0, 0, 0));
+}
+[data-metal="platinum"] .epb-card-edge {
+  background: linear-gradient(135deg, #e6ecf4 0%, #6c7888 35%, #c5cfdb 55%, #3c4452 100%);
+}
+[data-metal="platinum"] .epb-card-face {
+  background: #96a0ae;
+  box-shadow:
+    inset 0 1px 0 rgba(236, 242, 250, 0.7),
+    inset 0 -1px 0 rgba(30, 36, 48, 0.6),
+    inset 0 0 0 1px rgba(40, 48, 62, 0.35);
+}
+[data-metal="platinum"] .epb-card-shade-l {
+  background: linear-gradient(90deg, rgba(10, 14, 22, 0.42), rgba(10, 14, 22, 0) 60%);
+}
+[data-metal="platinum"] .epb-card-shade-r {
+  background: linear-gradient(270deg, rgba(10, 14, 22, 0.42), rgba(10, 14, 22, 0) 60%);
+}
+[data-metal="platinum"] .epb-card-shade-t {
+  background: linear-gradient(180deg, rgba(10, 14, 22, 0.36), rgba(10, 14, 22, 0) 60%);
+}
+[data-metal="platinum"] .epb-card-shade-b {
+  background: linear-gradient(0deg, rgba(10, 14, 22, 0.36), rgba(10, 14, 22, 0) 60%);
+}
+[data-metal="platinum"] .epb-card-glare {
+  background: radial-gradient(circle at 50% 50%, rgba(240, 246, 255, 0.34), rgba(255, 255, 255, 0) 26%);
+}
+.epb-card-stage[data-metal="black"]::before {
+  background: radial-gradient(closest-side, rgba(150, 150, 160, 0.16), rgba(0, 0, 0, 0));
+}
+[data-metal="black"] .epb-card-edge {
+  background: linear-gradient(135deg, #8a8a90 0%, #232326 35%, #6a6a70 55%, #0d0d0e 100%);
+}
+[data-metal="black"] .epb-card-face {
+  background: #1d1d20;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.8),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+[data-metal="black"] .epb-card-shade-l {
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0) 60%);
+}
+[data-metal="black"] .epb-card-shade-r {
+  background: linear-gradient(270deg, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0) 60%);
+}
+[data-metal="black"] .epb-card-shade-t {
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.36), rgba(0, 0, 0, 0) 60%);
+}
+[data-metal="black"] .epb-card-shade-b {
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.36), rgba(0, 0, 0, 0) 60%);
+}
+[data-metal="black"] .epb-card-glare {
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 26%);
+}
+
 /* one search step replacing the previous one */
 .epb-step-in {
   animation: epb-step-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;

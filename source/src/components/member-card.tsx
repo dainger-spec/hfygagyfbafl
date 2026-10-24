@@ -1,24 +1,34 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
+import type { Metal } from "@/lib/tiers";
 
-// The gold card on the home screen. The art (public/brand/card.webp, drawn by
-// scripts/gen-card.py) carries the engraving, frame, chip and medallion; the
-// words are SVG on top so they stay sharp and the count stays live. It is
-// built like a thin metal plate: edge layers shifted against the tilt show its
-// rim, a shadow under it follows the tilt, a metallic sheen slides over the
-// face and the side turned away darkens. It sways on its own, tilts under a
-// finger and a tap opens `onOpen`. Each time the app opens it comes either in
-// gold or in silver, at random. (No preserve-3d: browsers rasterise such
-// layers at low resolution and the small print goes blurry.)
-type Metal = "gold" | "silver";
-const METALS: Record<Metal, { art: string; ink: string; ribbon: string }> = {
-  gold: { art: "/brand/card.webp", ink: "#1d1810", ribbon: "#d2b468" },
-  silver: { art: "/brand/card-silver.webp", ink: "#1b1d21", ribbon: "#c6c9ce" },
+// The member card on the home screen. The art (public/brand/card-*.webp, drawn
+// by scripts/gen-card.py) carries the engraving, frame, chip and medallion; the
+// words are SVG on top so they stay sharp: the holder's name and the live base
+// count. It is built like a thin metal plate: edge layers shifted against the
+// tilt show its rim, a shadow under it follows the tilt, a metallic sheen
+// slides over the face and the side turned away darkens. It sways on its own,
+// tilts under a finger and a tap opens `onOpen`. The metal (bronze to black)
+// comes from the user's tier, see lib/tiers.ts. (No preserve-3d: browsers
+// rasterise such layers at low resolution and the small print goes blurry.)
+type Look = {
+  art: string;
+  ink: string;
+  ribbon: string;
+  // raised lettering: a light edge above, a dark one below
+  hi: string;
+  hiOpacity: number;
+  lo: string;
+  loOpacity: number;
 };
-// chosen once per app launch, so going back to the home screen keeps the same card
-let launchMetal: Metal | null = null;
-function pickMetal(): Metal {
-  return (launchMetal ??= Math.random() < 0.5 ? "gold" : "silver");
-}
+export const CARD_LOOKS: Record<Metal, Look> = {
+  bronze: { art: "/brand/card-bronze.webp", ink: "#1e1006", ribbon: "#b47950", hi: "#ffd9b8", hiOpacity: 0.6, lo: "#2a1204", loOpacity: 0.5 },
+  silver: { art: "/brand/card-silver.webp", ink: "#1b1d21", ribbon: "#c6c9ce", hi: "#ffffff", hiOpacity: 0.85, lo: "#1a1f28", loOpacity: 0.45 },
+  gold: { art: "/brand/card.webp", ink: "#1d1810", ribbon: "#d2b468", hi: "#fff4d2", hiOpacity: 0.8, lo: "#3b2a06", loOpacity: 0.45 },
+  platinum: { art: "/brand/card-platinum.webp", ink: "#0e131b", ribbon: "#98a2b0", hi: "#eef3fa", hiOpacity: 0.6, lo: "#0b0f16", loOpacity: 0.5 },
+  black: { art: "/brand/card-black.webp", ink: "#d6d6dc", ribbon: "#1e1e21", hi: "#000000", hiOpacity: 0.9, lo: "#ffffff", loOpacity: 0.12 },
+};
+// the wide, flat-topped face of a charge card
+const CARD_FONT = "Archivo, Manrope, sans-serif";
 const VB_W = 1200;
 const VB_H = 756;
 
@@ -54,19 +64,25 @@ const EDGES = [0.34, 0.67, 1];
 // how thick the plate looks, px
 const THICK = 4;
 
-export function GoldCard({
+export function MemberCard({
+  metal,
+  holder,
   count,
   ribbon,
   locale,
   onOpen,
 }: {
+  metal: Metal;
+  holder: string;
   count: number | null;
   ribbon: string;
   locale: "ru" | "en";
   onOpen?: () => void;
 }) {
-  const [metal] = useState(pickMetal);
-  const look = METALS[metal];
+  const look = CARD_LOOKS[metal];
+  // long names get a smaller size so they stay inside the frame
+  const name = holder.toUpperCase();
+  const nameSize = Math.max(28, Math.min(54, (54 * 14) / Math.max(14, name.length)));
   const cardRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
   const glareRef = useRef<HTMLDivElement>(null);
@@ -221,10 +237,10 @@ export function GoldCard({
               {/* raised lettering: a light edge above, a soft dark one below */}
               <filter id="epb-emboss" x="-5%" y="-30%" width="110%" height="160%">
                 <feOffset in="SourceAlpha" dx="-2" dy="-2.5" result="up" />
-                <feFlood floodColor="#fff4d2" floodOpacity="0.8" />
+                <feFlood floodColor={look.hi} floodOpacity={look.hiOpacity} />
                 <feComposite in2="up" operator="in" result="hi" />
                 <feOffset in="SourceAlpha" dx="2" dy="3.5" result="down" />
-                <feFlood floodColor="#3b2a06" floodOpacity="0.45" />
+                <feFlood floodColor={look.lo} floodOpacity={look.loOpacity} />
                 <feComposite in2="down" operator="in" result="lo" />
                 <feMerge>
                   <feMergeNode in="lo" />
@@ -240,10 +256,11 @@ export function GoldCard({
                 textAnchor="middle"
                 textLength={680}
                 lengthAdjust="spacingAndGlyphs"
-                fontFamily="Manrope, sans-serif"
-                fontWeight={800}
+                fontFamily={CARD_FONT}
+                fontWeight={700}
                 fontSize={60}
-                letterSpacing={2}
+                letterSpacing={1}
+                style={{ fontStretch: "125%" }}
                 fill={look.ink}
               >
                 EUROPE PRIVATE
@@ -251,13 +268,14 @@ export function GoldCard({
               <text
                 x={122}
                 y={704}
-                fontFamily="Manrope, sans-serif"
-                fontWeight={500}
-                fontSize={56}
+                fontFamily={CARD_FONT}
+                fontWeight={400}
+                fontSize={nameSize}
                 letterSpacing={1}
+                style={{ fontStretch: "105%" }}
                 fill={look.ink}
               >
-                BLACK LIST
+                {name}
               </text>
             </g>
             <g fill={look.ribbon} stroke={look.ink} strokeWidth={3.2} strokeLinejoin="round">
@@ -268,10 +286,11 @@ export function GoldCard({
             </g>
             <path id="epb-ribbon-line" d={RIBBON.text} fill="none" />
             <text
-              fontFamily="Manrope, sans-serif"
-              fontWeight={700}
+              fontFamily={CARD_FONT}
+              fontWeight={600}
               fontSize={20}
               letterSpacing={3}
+              style={{ fontStretch: "110%" }}
               fill={look.ink}
             >
               <textPath href="#epb-ribbon-line" startOffset="50%" textAnchor="middle">
@@ -282,10 +301,11 @@ export function GoldCard({
               x={RX + 6}
               y={604}
               textAnchor="middle"
-              fontFamily="Manrope, sans-serif"
-              fontWeight={500}
+              fontFamily={CARD_FONT}
+              fontWeight={400}
               fontSize={46}
               letterSpacing={2}
+              style={{ fontStretch: "105%" }}
               fill={look.ink}
               filter="url(#epb-emboss)"
             >
@@ -295,8 +315,8 @@ export function GoldCard({
               x={RX + 6}
               y={746}
               textAnchor="middle"
-              fontFamily="Manrope, sans-serif"
-              fontWeight={800}
+              fontFamily={CARD_FONT}
+              fontWeight={700}
               fontSize={15}
               fill={look.ink}
             >

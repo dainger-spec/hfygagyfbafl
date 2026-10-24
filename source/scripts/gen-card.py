@@ -6,6 +6,7 @@ over it in the page so they stay sharp and the count stays live.
 
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card.webp
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-silver.webp silver
+    (metals: bronze, silver, gold, platinum, black)
 """
 import math
 import os
@@ -25,7 +26,20 @@ PAL = {
         "base": (196, 199, 204), "ink": (78, 84, 94), "band": (20, 21, 24), "lace": (200, 204, 210),
         "micro": (24, 26, 30), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
     },
+    "bronze": {
+        "base": (178, 118, 76), "ink": (86, 46, 20), "band": (26, 15, 8), "lace": (214, 156, 108),
+        "micro": (34, 18, 8), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
+    },
+    "platinum": {
+        "base": (150, 160, 174), "ink": (44, 52, 66), "band": (18, 22, 30), "lace": (206, 214, 226),
+        "micro": (18, 22, 30), "chip": ((236, 238, 240), (150, 154, 160)), "chip_line": (96, 100, 108),
+    },
+    "black": {
+        "base": (30, 30, 32), "ink": (92, 92, 98), "band": (8, 8, 9), "lace": (150, 150, 158),
+        "micro": (150, 150, 158), "chip": ((236, 238, 240), (150, 154, 160)), "chip_line": (96, 100, 108),
+    },
 }[METAL]
+GREY_EMBLEM = METAL in ("silver", "platinum", "black")
 W, H, SS = 1200, 756, 2  # card units; drawn at SS times the size, then reduced
 FONT_DIR = os.environ.get("FONT_DIR", "/usr/share/fonts/opentype/inter")
 
@@ -292,7 +306,7 @@ def main():
     chip(img)
 
     em = Image.open(EMBLEM).convert("RGBA")
-    if METAL == "silver":
+    if GREY_EMBLEM:
         # a steel medallion on the silver card
         r, g, b_, a = em.split()
         grey = Image.merge("RGB", (r, g, b_)).convert("L")
