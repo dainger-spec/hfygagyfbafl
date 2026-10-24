@@ -3823,7 +3823,9 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
 // Drawing one takes ~1 s of CPU, so cards are drawn one at a time and a
 // finished one is reused (by Telegram file id): as it is for 10 minutes, after
 // that it is drawn anew, unless the person had cards drawn just now (repeated
-// /im): then the last one is sent again. The bot draws at most 12 a minute.
+// /im): then the last one is sent again. The bot draws at most 30 a minute
+// (about half of one core at the most); sending a saved card is not limited by
+// that.
 const imCache = new Map<string, { fileId: string; at: number }>();
 let imQueue: Promise<unknown> = Promise.resolve();
 let imWaiting = 0;
@@ -3974,7 +3976,7 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
   if (cached && Date.now() - cached.at < IM_FRESH_MS) return { fileId: cached.fileId };
   // a few drawings per person, and for the whole bot: a burst of /im in many
   // chats waits instead of piling up; meanwhile the last card is sent again
-  if (imWaiting >= 4 || tooMany(`im-draw:${info.uid}`, 3, 5 * 60_000) || tooMany("im-render", 12, 60_000)) {
+  if (imWaiting >= 10 || tooMany(`im-draw:${info.uid}`, 3, 5 * 60_000) || tooMany("im-render", 30, 60_000)) {
     return cached ? { fileId: cached.fileId } : null;
   }
   imWaiting++;
@@ -4006,7 +4008,7 @@ function rememberAnimation(info: MemberInfo, side: "front" | "back", sent: { ani
 async function replyMemberCard(msg: TgMessage) {
   const from = msg.from!;
   const chatId = msg.chat.id;
-  if (tooMany(`im:${from.id}`, 1, 5000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+  if (tooMany(`im:${from.id}`, 1, 3000) || tooMany(`im-chat:${chatId}`, 30, 60_000)) return;
   if ((await sendMemberCard(chatId, from, { replyTo: msg.message_id })) === "busy") {
     await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
   }
@@ -4053,7 +4055,7 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
 async function openMemberProfile(cb: NonNullable<TgUpdate["callback_query"]>) {
   const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
   if (!cb.message || !cb.from || cb.message.chat.type !== "private") return answer();
-  if (tooMany(`im:${cb.from.id}`, 1, 5000)) return answer("Секунду…");
+  if (tooMany(`im:${cb.from.id}`, 1, 3000)) return answer("Секунду…");
   const result = await sendMemberCard(cb.message.chat.id, cb.from, { menu: true });
   if (result === "busy") return answer("Сейчас рисую карты для других — попробуйте через минуту.", true);
   await answer();
