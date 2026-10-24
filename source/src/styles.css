@@ -448,3 +448,15 @@
     0 0 10px rgba(255, 42, 42, 0.55);
   margin-right: 0.02em;
 }
+
+/* "Europe Private Blacklist": heavier than the font's boldest weight (800) —
+   an outline in the letters' own colour thickens every stroke a little. */
+.epb-title-heavy,
+.epb-title-heavy * {
+  -webkit-text-stroke: 0.035em currentColor;
+  paint-order: stroke fill;
+}
+/* the thicker letters need a little more room between them */
+.epb-title-heavy {
+  letter-spacing: 0.012em;
+}
