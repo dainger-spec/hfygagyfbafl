@@ -581,7 +581,7 @@ function Home({
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
       <Banners onLoaded={(count) => setNoBanners(count === 0)} />
       <div className="mx-auto w-full max-w-md">
         <SponsorsTicker onOpen={onSponsors} />
@@ -1054,7 +1054,7 @@ function TiersPage({
         : `От ${min} ${min === 1 ? "блеклиста" : "блеклистов"}`;
   const left = next ? next.min - n : 0;
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
       <div className="mx-auto w-full max-w-md space-y-4">
         <button
           type="button"
@@ -1192,7 +1192,7 @@ function TierSheet({
         </button>
       </div>
       {/* a tap outside the card and the text closes it */}
-      <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-5 pb-8" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="flex min-h-0 flex-1 flex-col items-center overflow-x-hidden overflow-y-auto px-5 pb-8" onClick={(e) => e.target === e.currentTarget && onClose()}>
         <div className="epb-card-sheet-card mt-6 w-full">
           <MemberCard
             metal={tier.metal}
