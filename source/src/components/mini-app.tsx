@@ -522,14 +522,36 @@ function Home({
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
-          {/* solid gold, no gradient */}
-          <Button size="lg" className="w-full rounded-xl bg-none" onClick={onComplaint} disabled={!canUse}>
-            {t(locale, "fileComplaint")}
-          </Button>
+          {/* styled like the base card: engraved lines, a soft light on the right */}
+          <button
+            type="button"
+            disabled={!canUse}
+            onClick={() => {
+              haptic("light");
+              onComplaint();
+            }}
+            className="epb-act epb-act-scam"
+          >
+            <span className="epb-act-scam-word" aria-hidden>
+              SCAM
+            </span>
+            <span className="relative flex-1 text-left font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
+            <ChevronLeft className="relative size-5 shrink-0 rotate-180 text-gold/80" />
+          </button>
           {checkOn ? (
-            <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
-              {t(locale, "checkBtn")}
-            </Button>
+            <button
+              type="button"
+              disabled={!canUse}
+              onClick={() => {
+                haptic("light");
+                onCheck();
+              }}
+              className="epb-act epb-act-gray"
+            >
+              <Search className="relative size-7 shrink-0 text-fg/80" strokeWidth={2.4} aria-hidden />
+              <span className="relative flex-1 text-left font-display text-[17px] font-bold">{t(locale, "checkBtn")}</span>
+              <ChevronLeft className="relative size-5 shrink-0 rotate-180 text-fg/50" />
+            </button>
           ) : null}
         </div>
         <a

@@ -460,3 +460,65 @@
 .epb-title-heavy {
   letter-spacing: 0.012em;
 }
+
+/* Home actions in the style of the base card: dark, engraved lines, a soft
+   light on the right. "Подать жалобу" carries a bold red SCAM, "Проверка
+   контрагента" is grey with a magnifier. */
+.epb-act {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 62px;
+  padding: 10px 16px;
+  border-radius: 16px;
+  color: var(--color-fg);
+  transition: transform 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.epb-act:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.epb-act:disabled {
+  opacity: 0.45;
+}
+.epb-act::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-linear-gradient(180deg, var(--act-line) 0, var(--act-line) 0.75px, transparent 0.75px, transparent 2px);
+  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 85%);
+  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 85%);
+}
+.epb-act-scam {
+  --act-line: rgba(222, 196, 120, 0.2);
+  background:
+    radial-gradient(90% 160% at 100% 50%, rgba(241, 187, 76, 0.22), transparent 60%),
+    #0b0b0b;
+  box-shadow: 0 0 0 1px rgba(241, 187, 76, 0.28);
+}
+.epb-act-gray {
+  --act-line: rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(90% 160% at 100% 50%, rgba(255, 255, 255, 0.12), transparent 60%),
+    #1a1a1a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.epb-act-scam-word {
+  position: relative;
+  flex: none;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: #ff3b30;
+  -webkit-text-stroke: 0.04em currentColor;
+  paint-order: stroke fill;
+  text-shadow: 0 0 12px rgba(255, 59, 48, 0.35);
+}
