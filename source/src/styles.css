@@ -321,22 +321,22 @@
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  /* the colour of the lines: pale gold at the top right, bronze, dimming down */
+  /* the colour of the lines: dark bronze at the top, warming to yellow-gold at the bottom */
   background: linear-gradient(
-    165deg,
-    rgba(253, 228, 160, 0.42) 0%,
-    rgba(241, 187, 76, 0.28) 22%,
-    rgba(176, 128, 52, 0.1) 52%,
-    rgba(120, 86, 34, 0.05) 72%,
-    rgba(217, 154, 53, 0.18) 100%
+    180deg,
+    rgba(110, 80, 32, 0.06) 0%,
+    rgba(150, 108, 42, 0.1) 30%,
+    rgba(214, 160, 60, 0.2) 62%,
+    rgba(246, 200, 90, 0.3) 85%,
+    rgba(255, 216, 110, 0.36) 100%
   );
-  /* cut into thin horizontal lines, with a soft glow from the top right */
+  /* thin lines, slightly tilted, with a soft glow rising from the bottom */
   -webkit-mask-image:
-    repeating-linear-gradient(180deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
-    radial-gradient(140% 80% at 78% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.3) 100%);
+    repeating-linear-gradient(174deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
+    radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   -webkit-mask-composite: source-in;
   mask-image:
-    repeating-linear-gradient(180deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
-    radial-gradient(140% 80% at 78% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.3) 100%);
+    repeating-linear-gradient(174deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
+    radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   mask-composite: intersect;
 }
