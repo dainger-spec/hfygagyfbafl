@@ -334,10 +334,10 @@
   background: linear-gradient(
     180deg,
     rgba(110, 80, 32, 0.06) 0%,
-    rgba(150, 108, 42, 0.1) 30%,
-    rgba(214, 160, 60, 0.2) 62%,
-    rgba(246, 200, 90, 0.3) 85%,
-    rgba(255, 216, 110, 0.36) 100%
+    rgba(150, 108, 42, 0.08) 30%,
+    rgba(214, 160, 60, 0.14) 62%,
+    rgba(246, 200, 90, 0.21) 85%,
+    rgba(255, 216, 110, 0.25) 100%
   );
   -webkit-mask-image:
     url("./assets/engrave.svg"),
@@ -398,8 +398,8 @@
   width: 180%;
   height: 140%;
   background:
-    radial-gradient(35% 28% at 30% 70%, rgba(255, 205, 100, 0.16), transparent 70%),
-    radial-gradient(30% 22% at 72% 35%, rgba(241, 187, 76, 0.1), transparent 70%);
+    radial-gradient(35% 28% at 30% 70%, rgba(255, 205, 100, 0.1), transparent 70%),
+    radial-gradient(30% 22% at 72% 35%, rgba(241, 187, 76, 0.06), transparent 70%);
   mix-blend-mode: screen;
   will-change: transform;
   animation: epb-glow-drift 26s ease-in-out infinite alternate;
