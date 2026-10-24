@@ -91,18 +91,23 @@ export function MiniApp({
           }
         });
       }
-      // A banned user gets a "closed" screen instead of the app.
+      // The app opens at once; the ban check runs in the background (a slow
+      // server must not keep everyone on the loading screen). A banned user gets
+      // a "closed" screen as soon as the answer comes; the server refuses banned
+      // users' requests either way.
+      setReady(true);
       try {
         const init = telegramInitData();
         if (init) {
-          const acc = await getAccess({ data: { initData: init } });
-          if (!cancelled && acc?.banned) setBanned(true);
+          void getAccess({ data: { initData: init } })
+            .then((acc) => {
+              if (!cancelled && acc?.banned) setBanned(true);
+            })
+            .catch(() => {});
         }
       } catch {
-        /* access check is best-effort; the server still refuses banned users */
+        /* best-effort */
       }
-      if (cancelled) return;
-      setReady(true);
     })();
     return () => {
       cancelled = true;
