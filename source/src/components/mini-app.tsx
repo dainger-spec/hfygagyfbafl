@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, Gavel, LoaderCircle, Search, ShieldAlert, ShieldCheck, UserSearch, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
@@ -471,17 +471,6 @@ function Home({
   const canUse = Boolean(identity.telegramId);
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
-  // how many blacklists a check searches (for the button's subtitle)
-  const [srcCount, setSrcCount] = useState(() => cachedBase()?.sources || 0);
-  useEffect(() => {
-    let alive = true;
-    void fetchBase().then((v) => {
-      if (alive && v?.sources) setSrcCount(v.sources);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
@@ -500,20 +489,13 @@ function Home({
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
-          <HomeAction tone="gold" icon={Gavel} title={t(locale, "fileComplaint")} sub={t(locale, "fileComplaintSub")} onClick={onComplaint} disabled={!canUse} />
+          <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
+            {t(locale, "fileComplaint")}
+          </Button>
           {checkOn ? (
-            <HomeAction
-              tone="dark"
-              icon={UserSearch}
-              title={t(locale, "checkBtn")}
-              sub={
-                srcCount
-                  ? t(locale, "checkBtnSub", { n: srcCount, bl: t(locale, srcCount % 10 === 1 && srcCount % 100 !== 11 ? "blOne" : "blMany") })
-                  : t(locale, "checkBtnSubAll")
-              }
-              onClick={onCheck}
-              disabled={!canUse}
-            />
+            <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
+              {t(locale, "checkBtn")}
+            </Button>
           ) : null}
         </div>
         <a
@@ -533,45 +515,6 @@ function Home({
         {t(locale, "ownersLink")}
       </button>
     </div>
-  );
-}
-
-// The two main actions on the home screen, styled after the medallion: a gold
-// "coin" with engraved lines and a passing glint, and a dark one with a gold rim.
-function HomeAction({
-  tone,
-  icon: Icon,
-  title,
-  sub,
-  onClick,
-  disabled,
-}: {
-  tone: "gold" | "dark";
-  icon: LucideIcon;
-  title: string;
-  sub?: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => {
-        haptic("light");
-        onClick();
-      }}
-      className={cn("epb-cta", tone === "gold" ? "epb-cta-gold" : "epb-cta-dark")}
-    >
-      <span className="epb-cta-badge">
-        <Icon className="size-[22px]" strokeWidth={2.1} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block font-display text-[16px] leading-tight font-extrabold tracking-tight">{title}</span>
-        {sub ? <span className="epb-cta-sub mt-0.5 block truncate text-[12px] font-medium">{sub}</span> : null}
-      </span>
-      <ChevronRight className="epb-cta-arrow size-5 shrink-0" strokeWidth={2.4} />
-    </button>
   );
 }
 
