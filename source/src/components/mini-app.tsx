@@ -532,7 +532,7 @@ function Home({
             }}
             className="epb-act epb-act-scam"
           >
-            <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
+            <span className="relative flex-1 text-center font-display text-[17px] font-extrabold [-webkit-text-stroke:0.022em_currentColor] [paint-order:stroke_fill]">{t(locale, "fileComplaint")}</span>
             {/* big, see-through, cut by the edge — like the medallion on the base card */}
             <span className="epb-act-scam-word" aria-hidden>
               SCAM
@@ -548,7 +548,7 @@ function Home({
               }}
               className="epb-act epb-act-gray"
             >
-              <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "checkBtn")}</span>
+              <span className="relative flex-1 text-center font-display text-[17px] font-extrabold [-webkit-text-stroke:0.022em_currentColor] [paint-order:stroke_fill]">{t(locale, "checkBtn")}</span>
               <Search className="epb-act-loupe" strokeWidth={2.2} aria-hidden />
             </button>
           ) : null}
@@ -1448,6 +1448,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   const latest = useLatestParsed(true);
   const [detail, setDetail] = useState<BlEntry | null>(null);
   const [post, setPost] = useState<CheckData["channels"][number] | null>(null);
+  const [showBase, setShowBase] = useState(false);
 
   // Warm the cache so the frog loader shows instantly on the first search.
   useEffect(() => {
@@ -1599,6 +1600,8 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
 
   if (detail) return <BlacklistDetail entry={detail} onBack={() => setDetail(null)} />;
   if (post) return <PostView hit={post} onBack={() => setPost(null)} />;
+  // the search stays as it was when the user comes back from the base page
+  if (showBase) return <BasePage onBack={() => setShowBase(false)} />;
 
   const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0);
   const fmtDate = (ms: number) => fmtBlDate(locale, ms);
@@ -1623,7 +1626,17 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           </div>
           <p className="text-sm text-muted">{t(locale, "checkHint")}</p>
         </div>
-        <PartnerMarquee />
+        <button
+          type="button"
+          className="block w-full text-left"
+          aria-label={t(locale, "baseTitle")}
+          onClick={() => {
+            haptic("light");
+            setShowBase(true);
+          }}
+        >
+          <PartnerMarquee />
+        </button>
         <div className="flex gap-2">
           <Input
             value={value}
