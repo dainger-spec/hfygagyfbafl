@@ -473,7 +473,7 @@
   gap: 14px;
   width: 100%;
   min-height: 62px;
-  padding: 10px 16px;
+  padding: 10px 18px;
   border-radius: 16px;
   color: var(--color-fg);
   transition: transform 0.15s ease;
@@ -510,15 +510,27 @@
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 .epb-act-scam-word {
-  position: relative;
-  flex: none;
+  position: absolute;
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%) rotate(-8deg);
+  pointer-events: none;
   font-family: var(--font-display);
-  font-size: 24px;
+  font-size: 64px;
   font-weight: 800;
   line-height: 1;
-  letter-spacing: 0.02em;
-  color: #ff3b30;
-  -webkit-text-stroke: 0.04em currentColor;
-  paint-order: stroke fill;
-  text-shadow: 0 0 12px rgba(255, 59, 48, 0.35);
+  letter-spacing: 0.01em;
+  color: #f2be55;
+  opacity: 0.3;
+}
+.epb-act-loupe {
+  position: absolute;
+  right: -14px;
+  top: 50%;
+  width: 92px;
+  height: 92px;
+  transform: translateY(-50%) rotate(-8deg);
+  pointer-events: none;
+  color: #ffffff;
+  opacity: 0.2;
 }

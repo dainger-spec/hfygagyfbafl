@@ -532,11 +532,11 @@ function Home({
             }}
             className="epb-act epb-act-scam"
           >
+            <span className="relative flex-1 text-left font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
+            {/* big, see-through, cut by the edge — like the medallion on the base card */}
             <span className="epb-act-scam-word" aria-hidden>
               SCAM
             </span>
-            <span className="relative flex-1 text-left font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
-            <ChevronLeft className="relative size-5 shrink-0 rotate-180 text-gold/80" />
           </button>
           {checkOn ? (
             <button
@@ -548,9 +548,8 @@ function Home({
               }}
               className="epb-act epb-act-gray"
             >
-              <Search className="relative size-7 shrink-0 text-fg/80" strokeWidth={2.4} aria-hidden />
               <span className="relative flex-1 text-left font-display text-[17px] font-bold">{t(locale, "checkBtn")}</span>
-              <ChevronLeft className="relative size-5 shrink-0 rotate-180 text-fg/50" />
+              <Search className="epb-act-loupe" strokeWidth={2.2} aria-hidden />
             </button>
           ) : null}
         </div>
