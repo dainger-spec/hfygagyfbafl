@@ -6,7 +6,7 @@ over it in the page so they stay sharp and the count stays live.
 
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card.webp
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-silver.webp silver
-    (metals: bronze, silver, gold, platinum, black)
+    (metals: green, gold, platinum, black — the American Express ladder)
 """
 import math
 import os
@@ -22,13 +22,9 @@ PAL = {
         "base": (214, 186, 108), "ink": (118, 90, 34), "band": (22, 18, 12), "lace": (206, 176, 100),
         "micro": (30, 24, 14), "chip": ((236, 238, 240), (150, 154, 160)), "chip_line": (110, 104, 92),
     },
-    "silver": {
-        "base": (196, 199, 204), "ink": (78, 84, 94), "band": (20, 21, 24), "lace": (200, 204, 210),
-        "micro": (24, 26, 30), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
-    },
-    "bronze": {
-        "base": (178, 118, 76), "ink": (86, 46, 20), "band": (26, 15, 8), "lace": (214, 156, 108),
-        "micro": (34, 18, 8), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
+    "green": {
+        "base": (138, 168, 134), "ink": (34, 62, 40), "band": (12, 24, 14), "lace": (196, 222, 190),
+        "micro": (14, 28, 16), "chip": ((246, 222, 150), (170, 124, 48)), "chip_line": (120, 92, 40),
     },
     "platinum": {
         "base": (150, 160, 174), "ink": (44, 52, 66), "band": (18, 22, 30), "lace": (206, 214, 226),
@@ -39,7 +35,9 @@ PAL = {
         "micro": (150, 150, 158), "chip": ((236, 238, 240), (150, 154, 160)), "chip_line": (96, 100, 108),
     },
 }[METAL]
-GREY_EMBLEM = METAL in ("silver", "platinum", "black")
+GREY_EMBLEM = METAL in ("green", "platinum", "black")
+# the green card gets a green-tinted medallion, like the classic green charge card
+EMBLEM_TINT = {"green": (0.86, 1.0, 0.86)}.get(METAL, (1.04, 1.06, 1.12))
 W, H, SS = 1200, 756, 2  # card units; drawn at SS times the size, then reduced
 FONT_DIR = os.environ.get("FONT_DIR", "/usr/share/fonts/opentype/inter")
 
@@ -310,7 +308,8 @@ def main():
         # a steel medallion on the silver card
         r, g, b_, a = em.split()
         grey = Image.merge("RGB", (r, g, b_)).convert("L")
-        em = Image.merge("RGBA", (grey.point(lambda v: min(255, int(v * 1.04))), grey.point(lambda v: min(255, int(v * 1.06))), grey.point(lambda v: min(255, int(v * 1.12))), a))
+        tr, tg, tb = EMBLEM_TINT
+        em = Image.merge("RGBA", (grey.point(lambda v: min(255, int(v * tr))), grey.point(lambda v: min(255, int(v * tg))), grey.point(lambda v: min(255, int(v * tb))), a))
     eh = 342
     em = em.resize((round(em.width * S(eh) / em.height), S(eh)), Image.LANCZOS)
     img.alpha_composite(em, (S(600) - em.width // 2, S(388) - em.height // 2))

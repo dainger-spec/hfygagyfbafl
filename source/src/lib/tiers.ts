@@ -1,16 +1,15 @@
 // Member cards: the card on the home screen depends on how many of the user's
 // complaints became blacklists (published in the channel). Lowest to highest,
-// the usual order of premium card tiers: Bronze, Silver, Gold, Platinum, Black.
-export type Metal = "bronze" | "silver" | "gold" | "platinum" | "black";
+// the American Express ladder: Green, Gold, Platinum, Black (Centurion).
+export type Metal = "green" | "gold" | "platinum" | "black";
 
 export type Tier = { metal: Metal; name: string; min: number };
 
 export const TIERS: Tier[] = [
-  { metal: "bronze", name: "Bronze", min: 0 },
-  { metal: "silver", name: "Silver", min: 1 },
-  { metal: "gold", name: "Gold", min: 3 },
-  { metal: "platinum", name: "Platinum", min: 10 },
-  { metal: "black", name: "Black", min: 25 },
+  { metal: "green", name: "Green", min: 0 },
+  { metal: "gold", name: "Gold", min: 1 },
+  { metal: "platinum", name: "Platinum", min: 3 },
+  { metal: "black", name: "Black", min: 10 },
 ];
 
 export function tierFor(published: number): Tier {

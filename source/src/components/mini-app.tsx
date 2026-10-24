@@ -970,8 +970,7 @@ type BaseDetailsData = {
 // "Blacklist base": the totals and what each source adds (opened from the base card).
 // text colour of each tier's name
 const TIER_TEXT: Record<string, string> = {
-  bronze: "text-[#d6935f]",
-  silver: "text-[#d9dce1]",
+  green: "text-[#9cc79a]",
   gold: "text-gold",
   platinum: "text-[#aeb9c9]",
   black: "text-fg",
@@ -988,25 +987,21 @@ function ruBlacklists(n: number) {
 // What each member card takes, with the user's own progress.
 // What each card means and how to get it (shown when a card is opened).
 const TIER_INFO: Record<Metal, Record<Locale, string>> = {
-  bronze: {
-    ru: "Стартовая карта участника — выдаётся сразу, как только вы открыли приложение.",
-    en: "The starter card — yours as soon as you open the app.",
-  },
-  silver: {
-    ru: "Ваш первый блеклист: подайте жалобу с доказательствами, и после публикации в канале карта станет серебряной.",
-    en: "Your first blacklist: file a complaint with proof, and once it is published the card turns silver.",
+  green: {
+    ru: "Стартовая карта участника — выдаётся сразу, как только вы открыли приложение. Как зелёная карта American Express, с неё всё начинается.",
+    en: "The starter card — yours as soon as you open the app. Like the American Express Green card, this is where it starts.",
   },
   gold: {
-    ru: "Три опубликованных блеклиста. Вы уже помогли нескольким людям не попасть на скамера.",
-    en: "Three published blacklists. You have already kept several people away from scammers.",
+    ru: "Ваш первый блеклист: подайте жалобу с доказательствами, и после публикации в канале карта станет золотой.",
+    en: "Your first blacklist: file a complaint with proof, and once it is published the card turns gold.",
   },
   platinum: {
-    ru: "Десять опубликованных блеклистов — карта для тех, кто регулярно выводит скамеров на чистую воду.",
-    en: "Ten published blacklists — for those who expose scammers regularly.",
+    ru: "Три опубликованных блеклиста — вы уже помогли нескольким людям не попасть на скамера.",
+    en: "Three published blacklists — you have already kept several people away from scammers.",
   },
   black: {
-    ru: "Высшая карта: двадцать пять опубликованных блеклистов. Для самых активных участников сообщества.",
-    en: "The highest card: twenty-five published blacklists. For the most active members of the community.",
+    ru: "Высшая карта, как Centurion у American Express: десять опубликованных блеклистов. Для самых активных участников сообщества.",
+    en: "The highest card, like the American Express Centurion: ten published blacklists. For the most active members of the community.",
   },
 };
 

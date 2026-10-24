@@ -7,7 +7,7 @@ import type { Metal } from "@/lib/tiers";
 // count. It is built like a thin metal plate: edge layers shifted against the
 // tilt show its rim, a shadow under it follows the tilt, a metallic sheen
 // slides over the face and the side turned away darkens. It sways on its own,
-// tilts under a finger and a tap opens `onOpen`. The metal (bronze to black)
+// tilts under a finger and a tap opens `onOpen`. The metal (green to black)
 // comes from the user's tier, see lib/tiers.ts. (No preserve-3d: browsers
 // rasterise such layers at low resolution and the small print goes blurry.)
 type Look = {
@@ -21,8 +21,7 @@ type Look = {
   loOpacity: number;
 };
 export const CARD_LOOKS: Record<Metal, Look> = {
-  bronze: { art: "/brand/card-bronze.webp", ink: "#1e1006", ribbon: "#b47950", hi: "#ffd9b8", hiOpacity: 0.6, lo: "#2a1204", loOpacity: 0.5 },
-  silver: { art: "/brand/card-silver.webp", ink: "#1b1d21", ribbon: "#c6c9ce", hi: "#ffffff", hiOpacity: 0.85, lo: "#1a1f28", loOpacity: 0.45 },
+  green: { art: "/brand/card-green.webp", ink: "#0e1d11", ribbon: "#8aa886", hi: "#e6f4e2", hiOpacity: 0.65, lo: "#0a1a0d", loOpacity: 0.5 },
   gold: { art: "/brand/card.webp", ink: "#1d1810", ribbon: "#d2b468", hi: "#fff4d2", hiOpacity: 0.8, lo: "#3b2a06", loOpacity: 0.45 },
   platinum: { art: "/brand/card-platinum.webp", ink: "#0e131b", ribbon: "#98a2b0", hi: "#eef3fa", hiOpacity: 0.6, lo: "#0b0f16", loOpacity: 0.5 },
   black: { art: "/brand/card-black.webp", ink: "#d6d6dc", ribbon: "#1e1e21", hi: "#000000", hiOpacity: 0.9, lo: "#ffffff", loOpacity: 0.12 },
