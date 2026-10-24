@@ -321,13 +321,22 @@
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background: repeating-linear-gradient(
-    180deg,
-    rgba(222, 196, 120, 0.2) 0,
-    rgba(222, 196, 120, 0.2) 0.8px,
-    transparent 0.8px,
-    transparent 2.5px
+  /* the colour of the lines: pale gold at the top right, bronze, dimming down */
+  background: linear-gradient(
+    165deg,
+    rgba(253, 228, 160, 0.42) 0%,
+    rgba(241, 187, 76, 0.28) 22%,
+    rgba(176, 128, 52, 0.1) 52%,
+    rgba(120, 86, 34, 0.05) 72%,
+    rgba(217, 154, 53, 0.18) 100%
   );
-  -webkit-mask-image: linear-gradient(180deg, #000 0%, rgba(0, 0, 0, 0.75) 35%, rgba(0, 0, 0, 0.45) 70%, rgba(0, 0, 0, 0.6) 100%);
-  mask-image: linear-gradient(180deg, #000 0%, rgba(0, 0, 0, 0.75) 35%, rgba(0, 0, 0, 0.45) 70%, rgba(0, 0, 0, 0.6) 100%);
+  /* cut into thin horizontal lines, with a soft glow from the top right */
+  -webkit-mask-image:
+    repeating-linear-gradient(180deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
+    radial-gradient(140% 80% at 78% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.3) 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    repeating-linear-gradient(180deg, #000 0, #000 0.8px, transparent 0.8px, transparent 2.5px),
+    radial-gradient(140% 80% at 78% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.3) 100%);
+  mask-composite: intersect;
 }
