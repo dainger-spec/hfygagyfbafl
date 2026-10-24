@@ -1554,6 +1554,7 @@ type CheckData = {
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: { channelId?: string; messageId?: number; channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
+  forum?: { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet" }[];
   sourceHits?: Record<string, number>;
   account?: {
     id: string;
@@ -1992,7 +1993,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   // the search stays as it was when the user comes back from the base page
   if (showBase) return <BasePage onBack={() => setShowBase(false)} />;
 
-  const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0);
+  const found = data && (data.epb.length > 0 || data.channels.length > 0 || (data.manual?.length ?? 0) > 0 || (data.forum?.length ?? 0) > 0);
   const fmtDate = (ms: number) => fmtBlDate(locale, ms);
 
   return (
@@ -2149,6 +2150,35 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                       {fmtDate(c.date) ? <p className="mt-1 text-[11px] text-subtle">{fmtDate(c.date)}</p> : null}
                     </button>
                   ))}
+                </div>
+              ) : null}
+              {data.forum?.length ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
+                    <ShieldAlert className="size-4" />
+                    {t(locale, "checkForumArb", { source: data.forum[0]!.source, n: String(data.forum.length) })}
+                  </div>
+                  {data.forum.map((f) => (
+                    <a
+                      key={f.key}
+                      href={f.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block w-full rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-semibold">
+                          {f.defendant}
+                          {f.via !== "nick" ? <span className="font-normal text-muted"> · {t(locale, f.via === "wallet" ? "forumViaWallet" : "forumViaContact")}</span> : null}
+                        </p>
+                        <span className="flex shrink-0 items-center gap-1 text-xs text-gold">
+                          {t(locale, "postOpen")} <ExternalLink className="size-3" />
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted">{[f.amount, f.status, fmtDate(f.date)].filter(Boolean).join(" · ")}</p>
+                    </a>
+                  ))}
+                  <p className="text-[11px] leading-relaxed text-subtle">{t(locale, "forumArbNote")}</p>
                 </div>
               ) : null}
             </div>

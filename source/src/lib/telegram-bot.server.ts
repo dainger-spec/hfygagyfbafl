@@ -3914,7 +3914,7 @@ function memberFacts(from: TgUser) {
   const botPosts = new Set<number>();
   for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
   const find = parsLookup({ id: uid, usernames: from.username ? [from.username.toLowerCase()] : [], name }, checkChannels(), botPosts);
-  const sources = find ? Math.max(1, find.epb.length + find.manual.length + new Set(find.posts.map((p) => p.channelTitle)).size) : 0;
+  const sources = find ? Math.max(1, find.epb.length + find.manual.length + new Set(find.posts.map((p) => p.channelTitle)).size + new Set((find.forum || []).map((a) => a.source)).size) : 0;
   return { uid, name, published, st, sources };
 }
 
@@ -4295,6 +4295,8 @@ type ParsFind = {
   epb: { key: string; date: number; link?: string }[];
   manual: CheckResult["manual"];
   posts: CheckHit[];
+  // forum cases whose claim names one of the member's usernames
+  forum?: ForumArbHit[];
 };
 const parsTargets = new Map<string, ParsTarget>();
 let parsRunning: ParsTarget | null = null;
@@ -4710,9 +4712,13 @@ function parsLookup(m: ParsMember, channels: CheckChannel[], botPosts: Set<numbe
     }
   }
   const uniqueManual = manual.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i);
-  if (!epb.length && !uniqueManual.length && !posts.length) return null;
+  // a chat member is matched by the contacts named in a claim only (a forum
+  // nick equal to someone's username is too weak for a whole chat)
+  const forum: ForumArbHit[] = [];
+  for (const u of names) for (const f of matchForumArbs({ uname: u })) if (f.via === "contact" && !forum.some((x) => x.key === f.key)) forum.push(f);
+  if (!epb.length && !uniqueManual.length && !posts.length && !forum.length) return null;
   posts.sort((a, b) => b.date - a.date);
-  return { member: m, epb, manual: uniqueManual, posts };
+  return { member: m, epb, manual: uniqueManual, posts, forum };
 }
 
 // Posts found in the saved copies are re-checked with Telegram (still there,
@@ -4738,7 +4744,7 @@ async function parsConfirm(finds: ParsFind[]): Promise<ParsFind[]> {
       }
       f.posts = kept;
     }
-    if (f.epb.length || f.manual.length || f.posts.length) out.push(f);
+    if (f.epb.length || f.manual.length || f.posts.length || f.forum?.length) out.push(f);
   }
   return out;
 }
@@ -4765,6 +4771,9 @@ function parsFindHtml(f: ParsFind): string {
     lines.push(`   ${escapeHtml(title)}: ${links}${hits.length > 3 ? ` и ещё ${hits.length - 3}` : ""}`);
   }
   for (const x of f.manual.slice(0, 2)) lines.push(`   Ручной список: ${escapeHtml(x.source || x.account)}`);
+  for (const a of (f.forum || []).slice(0, 2)) {
+    lines.push(`   Арбитраж ${escapeHtml(a.source)}: ответчик ${escapeHtml(a.defendant)} · ${escapeHtml(a.amount)} · ${escapeHtml(a.status)} — <a href="${escapeHtml(a.url)}">тема</a>`);
+  }
   return lines.join("\n");
 }
 
@@ -4774,6 +4783,7 @@ function parsFindText(f: ParsFind): string {
   for (const e of f.epb) lines.push(`  EPB: жалоба ${e.key}${e.link ? ` ${e.link}` : ""}`);
   for (const h of f.posts) lines.push(`  ${h.channelTitle}: ${h.link}`);
   for (const x of f.manual) lines.push(`  Ручной список: ${x.source || x.account}`);
+  for (const a of f.forum || []) lines.push(`  Арбитраж ${a.source} (ответчик ${a.defendant}, ${a.amount}, ${a.status}): ${a.url}`);
   return lines.join("\n");
 }
 
@@ -5266,6 +5276,8 @@ export type CheckResult = {
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: CheckHit[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
+  // forum arbitration cases filed against this person (see ForumArb)
+  forum?: ForumArbHit[];
   // Hits per searched source (keys from checkSources()), for the app's scan animation.
   sourceHits?: Record<string, number>;
   // What is known about the account itself (see accountCard).
@@ -5347,6 +5359,9 @@ export function checkSources(): { key: string; title: string }[] {
     if (!out.some((o) => o.key === `ch:${name}`)) out.push({ key: `ch:${name}`, title: name });
   }
   out.push({ key: "manual", title: "Сторонние блеклисты" });
+  if (forumArbs.length) {
+    for (const name of [...new Set(forumArbs.map((a) => a.source))]) out.push({ key: `forum:${name}`, title: `Арбитражи ${name}` });
+  }
   return out;
 }
 
@@ -5498,6 +5513,191 @@ export function blacklistEntry(id: string): BlacklistDetailResult {
   return null;
 }
 
+// ---- Forum arbitrations, imported by the admins from a JSON file ----
+// Each record is one arbitration case on a forum: who it was filed against
+// (the defendant's forum nick), the contacts and wallets named in the claim,
+// the amount, the status and the link to the case. A case only says that the
+// person was a defendant: "Решено" does not tell in whose favour, so the check
+// shows it as a fact ("был ответчиком в арбитраже"), never as a verdict.
+type ForumArb = {
+  key: string; // the case link (unique)
+  source: string; // "WWH"
+  id: string;
+  url: string;
+  status: string;
+  amount: string;
+  defendant: string;
+  date: number;
+  contacts: string[]; // telegram usernames from the claim, lowercase
+  wallets: string[];
+};
+export type ForumArbHit = { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet" };
+const FORUM_ARB_PATH = join(DATA_DIR, "forum-arbitrations.json");
+const FORUM_ARB_MAX = 50_000;
+let forumArbs: ForumArb[] = (readJson<{ items?: ForumArb[] }>(FORUM_ARB_PATH)?.items || []).filter((x) => x && typeof x.url === "string");
+let forumArbIndex: { nick: Map<string, ForumArb[]>; contact: Map<string, ForumArb[]>; wallet: Map<string, ForumArb[]> } | null = null;
+
+// "Dark Money", "dark_money", "dark.money" are one forum nick
+const forumNickKey = (s: string) => s.toLowerCase().replace(/[\s_.\-]+/g, "");
+
+function forumArbIdx() {
+  if (forumArbIndex) return forumArbIndex;
+  const idx = { nick: new Map<string, ForumArb[]>(), contact: new Map<string, ForumArb[]>(), wallet: new Map<string, ForumArb[]>() };
+  const add = (m: Map<string, ForumArb[]>, k: string, a: ForumArb) => {
+    if (!k) return;
+    const list = m.get(k) || [];
+    if (!list.includes(a)) list.push(a);
+    m.set(k, list);
+  };
+  for (const a of forumArbs) {
+    add(idx.nick, forumNickKey(a.defendant), a);
+    for (const c of a.contacts) add(idx.contact, c, a);
+    for (const w of a.wallets) add(idx.wallet, walletKey(w), a);
+  }
+  forumArbIndex = idx;
+  return idx;
+}
+
+function saveForumArbs() {
+  writeJsonAtomic(FORUM_ARB_PATH, { items: forumArbs });
+  forumArbIndex = null;
+  checkCache.clear();
+}
+
+export function forumArbCount(): number {
+  return forumArbs.length;
+}
+
+// A crypto address typed into the check (BTC, ETH/BSC, TRON).
+const WALLET_RE = /^(bc1[a-z0-9]{20,80}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|0x[a-fA-F0-9]{40}|T[1-9A-HJ-NP-Za-km-z]{33})$/;
+const WALLET_IN_TEXT = /(?<![A-Za-z0-9])(bc1[a-z0-9]{20,80}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|0x[a-fA-F0-9]{40}|T[1-9A-HJ-NP-Za-km-z]{33})(?![A-Za-z0-9])/g;
+// bc1 and 0x addresses are case-insensitive; base58 ones are not
+function walletKey(w: string): string {
+  return /^(bc1|0x)/i.test(w) ? w.toLowerCase() : w;
+}
+export function walletFromInput(input: string): string {
+  const t = (input || "").trim();
+  return WALLET_RE.test(t) ? t : "";
+}
+
+const RU_MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+// "22 Окт 2026 в 15:55" (forum time) -> ms
+function forumDate(text: string): number {
+  const m = /(\d{1,2})\s+([А-Яа-яЁё]{3})[а-яё]*\.?\s+(\d{4})(?:\D+(\d{1,2}):(\d{2}))?/.exec(text || "");
+  if (!m) return 0;
+  const month = RU_MONTHS.indexOf(m[2]!.toLowerCase().replace("мая", "май"));
+  if (month < 0) return 0;
+  return Date.UTC(Number(m[3]), month, Number(m[1]), Number(m[4] || 0), Number(m[5] || 0));
+}
+
+const CLAIM_STOPWORDS = new Set(["https", "http", "telegram", "joinchat", "jabber", "contact", "contacts", "username", "support", "admin"]);
+
+// Telegram usernames named in a claim: "Telegram: @x", "tg x", "t.me/x"; a bare
+// @x counts only when the claim talks about Telegram at all.
+function claimContacts(text: string): string[] {
+  const out = new Set<string>();
+  const add = (u: string) => {
+    const v = u.toLowerCase();
+    if (/^[a-z][a-z0-9_]{4,31}$/.test(v) && !CLAIM_STOPWORDS.has(v) && !isIgnoredHandle(v)) out.add(v);
+  };
+  for (const m of text.matchAll(/t(?:elegram)?\.me\/([A-Za-z][A-Za-z0-9_]{4,31})/gi)) add(m[1]!);
+  for (const m of text.matchAll(/(?:telegram|телеграм|телега|\btg\b|\bтг\b)\s*[:\-–—]?\s*@?([A-Za-z][A-Za-z0-9_]{4,31})/gi)) add(m[1]!);
+  if (/telegram|телеграм|\btg\b|\bтг\b|t\.me/i.test(text)) {
+    for (const m of text.matchAll(/(?<![\w.@])@([A-Za-z][A-Za-z0-9_]{4,31})\b(?!\.[a-z])/g)) add(m[1]!);
+  }
+  return [...out].slice(0, 10);
+}
+
+function forumSourceName(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /wwh/.test(host) ? "WWH" : host.replace(/^www\./, "");
+  } catch {
+    return "Форум";
+  }
+}
+
+const clip = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+
+// Reads an export: an array of cases (or {items: [...]}) with url, defendant,
+// status, amount, date, description. Cases without a defendant or an https
+// link are skipped.
+export function parseForumArbitrations(raw: unknown): { items: ForumArb[]; skipped: number } {
+  const list = Array.isArray(raw) ? raw : raw && typeof raw === "object" && Array.isArray((raw as { items?: unknown }).items) ? (raw as { items: unknown[] }).items : null;
+  if (!list) throw new Error("not a list");
+  const items: ForumArb[] = [];
+  const seen = new Set<string>();
+  let skipped = 0;
+  for (const x of list.slice(0, FORUM_ARB_MAX)) {
+    const r = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+    const url = clip(r.url, 300);
+    const defendant = clip(r.defendant, 64);
+    if (!/^https:\/\/[^\s"'<>]+$/i.test(url) || !defendant || seen.has(url)) {
+      skipped++;
+      continue;
+    }
+    seen.add(url);
+    const desc = clip(r.description, 2000);
+    items.push({
+      key: url,
+      source: forumSourceName(url),
+      id: clip(r.id, 20),
+      url,
+      status: clip(r.status, 40),
+      amount: clip(r.amount, 40),
+      defendant,
+      date: forumDate(clip(r.date, 60)),
+      contacts: claimContacts(desc),
+      wallets: [...new Set([...desc.matchAll(WALLET_IN_TEXT)].map((m) => m[1]!))].slice(0, 6),
+    });
+  }
+  // a "contact" named in the claims against many different people is a
+  // guarantor, a forum account or a shop, not the defendant's own
+  const owners = new Map<string, Set<string>>();
+  for (const a of items) for (const c of a.contacts) owners.set(c, (owners.get(c) || new Set()).add(forumNickKey(a.defendant)));
+  for (const a of items) a.contacts = a.contacts.filter((c) => (owners.get(c)?.size || 0) < 4);
+  return { items, skipped: skipped + Math.max(0, list.length - FORUM_ARB_MAX) };
+}
+
+// What an import would change, and applying it (by case link: new cases are
+// added, known ones updated, e.g. a status that became "Решено").
+function forumArbDiff(items: ForumArb[]) {
+  const known = new Map(forumArbs.map((a) => [a.key, a]));
+  let added = 0;
+  let changed = 0;
+  for (const a of items) {
+    const old = known.get(a.key);
+    if (!old) added++;
+    else if (old.status !== a.status || old.amount !== a.amount || old.defendant !== a.defendant || old.contacts.join() !== a.contacts.join()) changed++;
+  }
+  return { added, changed, same: items.length - added - changed };
+}
+
+function applyForumArbs(items: ForumArb[]) {
+  const byKey = new Map(forumArbs.map((a) => [a.key, a]));
+  for (const a of items) byKey.set(a.key, a);
+  forumArbs = [...byKey.values()].sort((a, b) => b.date - a.date).slice(0, FORUM_ARB_MAX);
+  saveForumArbs();
+}
+
+function matchForumArbs(q: { uname?: string; nick?: string; wallet?: string }): ForumArbHit[] {
+  if (!forumArbs.length) return [];
+  const idx = forumArbIdx();
+  const out = new Map<string, ForumArbHit>();
+  const add = (list: ForumArb[] | undefined, via: ForumArbHit["via"]) => {
+    for (const a of list || []) {
+      if (!out.has(a.key)) out.set(a.key, { key: a.key, source: a.source, url: a.url, status: a.status, amount: a.amount, defendant: a.defendant, date: a.date, via });
+    }
+  };
+  if (q.wallet) add(idx.wallet.get(walletKey(q.wallet)), "wallet");
+  if (q.uname) {
+    add(idx.contact.get(q.uname.toLowerCase()), "contact");
+    add(idx.nick.get(forumNickKey(q.uname)), "nick");
+  }
+  if (q.nick && forumNickKey(q.nick).length >= 3) add(idx.nick.get(forumNickKey(q.nick)), "nick");
+  return [...out.values()].sort((a, b) => b.date - a.date);
+}
+
 function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] {
   const out: CheckResult["manual"] = [];
   for (const e of bindings.manualBlacklist || []) {
@@ -5551,6 +5751,8 @@ export function nicknameFromInput(input: string): string {
 export async function checkCounterparty(input: string): Promise<CheckResult> {
   if (!checkEnabled()) return { query: { username: "", id: "" }, epb: [], channels: [], manual: [] };
   const cacheKey = (() => {
+    const wallet = walletFromInput(input);
+    if (wallet) return `||w:${walletKey(wallet)}`;
     const p = parseTelegramInput(input);
     const nick = p.username || p.id ? "" : nicknameFromInput(input).toLowerCase().replace(/[\s_.\-]+/g, " ");
     return `${p.username.replace(/^@/, "").toLowerCase()}|${p.id}|${nick}`;
@@ -5574,6 +5776,14 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
 }
 
 async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
+  // a crypto address: only the forum cases name wallets
+  const wallet = walletFromInput(input);
+  if (wallet) {
+    const forum = matchForumArbs({ wallet });
+    const sourceHits: Record<string, number> = {};
+    for (const f of forum) sourceHits[`forum:${f.source}`] = (sourceHits[`forum:${f.source}`] || 0) + 1;
+    return { query: { username: "", id: "" }, epb: [], channels: [], manual: [], forum, sourceHits };
+  }
   const parsed = parseTelegramInput(input);
   // Off-limits service handles (@ctoroot, @sbepbank, the arbiter, the bot) are
   // never searched or shown; an id in the same input is still honoured.
@@ -5719,7 +5929,11 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   // taken out of the search by the arbiters: other channels' posts don't count
   if (isExcludedAccount([uname, ...oldNames], effectiveId || id)) hits.length = 0;
   const manual = matchManualBlacklist(uname, id);
+  const excluded = isExcludedAccount([uname, ...oldNames], effectiveId || id);
+  const forum = excluded ? [] : matchForumArbs({ uname: [uname, ...oldNames].find(Boolean), nick });
+  for (const o of excluded ? [] : oldNames) for (const f of matchForumArbs({ uname: o })) if (!forum.some((x) => x.key === f.key)) forum.push(f);
   const sourceHits: Record<string, number> = { epb: epb.length, manual: manual.length };
+  for (const f of forum) sourceHits[`forum:${f.source}`] = (sourceHits[`forum:${f.source}`] || 0) + 1;
   for (const h of hits) {
     const ch = isCheckChannel(h.channelId);
     const key =
@@ -5728,7 +5942,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
         : `ch:${checkSourceName(ch?.title || ch?.username || h.channelTitle)}`;
     sourceHits[key] = (sourceHits[key] || 0) + 1;
   }
-  const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, sourceHits };
+  const result: CheckResult = { query: { username: uname, id }, epb, channels: hits.slice(0, 30), manual, forum: forum.slice(0, 30), sourceHits };
   if (effectiveId || known.length) {
     // Wait for the profile request at most 2.5 s; a slow answer still lands in
     // the cache for the next check.
@@ -5765,7 +5979,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       channel: profile?.channel,
     };
     // Our own data: when this account first showed up in a blacklist, and in how many sources.
-    const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000))].filter((d) => d > 0);
+    const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000)), ...forum.map((f) => Math.floor(f.date / 1000))].filter((d) => d > 0);
     if (dates.length) result.account.firstListed = Math.min(...dates);
     const srcCount = Object.values(sourceHits).filter((n) => n > 0).length;
     if (srcCount) result.account.listedIn = srcCount;
@@ -7557,9 +7771,29 @@ function accountLines(locale: Locale, a?: AccountCard): string[] {
   return [...out, ""];
 }
 
+// "Был ответчиком в арбитраже": a fact with the case links, never a verdict.
+function forumArbLines(locale: Locale, list: ForumArbHit[]): string[] {
+  if (!list.length) return [];
+  const en = locale === "en";
+  const out: string[] = [];
+  const bySource = new Map<string, ForumArbHit[]>();
+  for (const f of list) bySource.set(f.source, [...(bySource.get(f.source) || []), f]);
+  for (const [source, cases] of bySource) {
+    out.push(`⚖️ <b>${en ? `${escapeHtml(source)} arbitrations` : `Арбитражи ${escapeHtml(source)}`}</b> — ${en ? "named as defendant" : "был ответчиком"}: ${cases.length}`);
+    for (const f of cases.slice(0, 6)) {
+      const bits = [f.amount, f.status, parsDate(f.date)].filter(Boolean).map((b) => escapeHtml(b));
+      const via = f.via === "contact" ? (en ? " (contact in the claim)" : " (контакт из жалобы)") : f.via === "wallet" ? (en ? " (wallet in the claim)" : " (кошелёк из жалобы)") : "";
+      out.push(`• ${escapeHtml(f.defendant)}${via} · ${bits.join(" · ")} — <a href="${escapeHtml(f.url)}">${en ? "case" : "тема"}</a>`);
+    }
+    if (cases.length > 6) out.push(en ? `… and ${cases.length - 6} more` : `… и ещё ${cases.length - 6}`);
+  }
+  out.push(en ? "<i>“Resolved” means the case is closed; the outcome is in the case itself.</i>" : "<i>«Решено» — арбитраж закрыт; в чью пользу, смотрите в теме.</i>", "");
+  return out;
+}
+
 function formatBotCheck(locale: Locale, input: string, res: CheckResult): string {
   const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : input.trim();
-  const found = res.epb.length || res.manual.length || res.channels.length;
+  const found = res.epb.length || res.manual.length || res.channels.length || res.forum?.length;
   if (!found) return [...accountLines(locale, res.account), tb(locale, "checkClean", { q: escapeHtml(q) })].join("\n").slice(0, 3900);
   const lines: string[] = [`🔎 <b>${escapeHtml(q)}</b>`, "", ...accountLines(locale, res.account)];
   if (res.epb.length) {
@@ -7581,6 +7815,7 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
     }
     lines.push("");
   }
+  lines.push(...forumArbLines(locale, res.forum || []));
   lines.push(tb(locale, "checkDispute"));
   return lines.join("\n").slice(0, 3900);
 }
@@ -9710,7 +9945,7 @@ export function logSearch(
   via: "app" | "bot",
   platform?: string,
 ) {
-  const found = Boolean(res.epb.length || res.manual.length || res.channels.length);
+  const found = Boolean(res.epb.length || res.manual.length || res.channels.length || res.forum?.length);
   const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : query.trim();
   const entry: SearchLogEntry = {
     at: Date.now(),
@@ -9886,6 +10121,7 @@ function adminHome(): AdminView {
         ? [
             [{ text: "➕ Добавить юзера в блеклист", callback_data: "adm:bladd" }],
             [{ text: "🧹 Убрать юзера из блеклиста", callback_data: "adm:ccrm" }],
+            [{ text: `⚖️ Арбитражи форумов (${forumArbs.length})`, callback_data: "adm:arb" }],
           ]
         : []),
       [
@@ -9894,6 +10130,62 @@ function adminHome(): AdminView {
       ],
     ],
   };
+}
+
+// Forum arbitrations in the panel: how many, from where, and the import button.
+const arbImportSetup = new Set<string>();
+const arbImportPending = new Map<string, { at: number; items: ForumArb[] }>();
+function adminForumArbs(): AdminView {
+  const bySource = new Map<string, number>();
+  for (const a of forumArbs) bySource.set(a.source, (bySource.get(a.source) || 0) + 1);
+  const withContacts = forumArbs.filter((a) => a.contacts.length).length;
+  const lines = [
+    "<b>⚖️ Арбитражи форумов</b>",
+    "",
+    forumArbs.length
+      ? [...bySource].map(([src, n]) => `${escapeHtml(src)}: ${n}`).join("\n") + `\nС Telegram-контактами: ${withContacts}`
+      : "Пока пусто.",
+    "",
+    "В проверке показывается как «был ответчиком в арбитраже» со ссылкой на тему. Совпадение: по нику на форуме, по Telegram-контакту или кошельку из жалобы. Убрать человека из выдачи — «🧹 Убрать юзера из блеклиста».",
+  ];
+  return {
+    text: lines.join("\n"),
+    keyboard: [[{ text: "📥 Загрузить файл", callback_data: "adm:arbimp" }], [{ text: "⬅️ Назад", callback_data: "adm:home" }]],
+  };
+}
+
+async function handleArbImportFile(msg: TgMessage) {
+  const chatId = msg.chat.id;
+  arbImportSetup.delete(String(chatId));
+  const doc = msg.document;
+  const say = (text: string) => tgSoft("sendMessage", { chat_id: chatId, text, reply_to_message_id: msg.message_id });
+  if (!doc?.file_id) return say("Нужен файл (документ) .json.");
+  if (doc.file_size && doc.file_size > MAX_BANNER_BYTES) return say("Файл больше 20 МБ — Telegram не даст боту его скачать. Разделите на части.");
+  const bytes = await downloadTelegramFile(doc.file_id);
+  if (!bytes) return say("Не удалось скачать файл.");
+  let parsed: { items: ForumArb[]; skipped: number };
+  try {
+    parsed = parseForumArbitrations(JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/, "")));
+  } catch {
+    return say("Это не похоже на JSON-список арбитражей.");
+  }
+  if (!parsed.items.length) return say(`В файле нет подходящих записей (пропущено: ${parsed.skipped}).`);
+  const diff = forumArbDiff(parsed.items);
+  arbImportPending.set(String(chatId), { at: Date.now(), items: parsed.items });
+  const sources = [...new Set(parsed.items.map((a) => a.source))].join(", ");
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    reply_to_message_id: msg.message_id,
+    parse_mode: "HTML",
+    text: [
+      `<b>Импорт арбитражей</b> (${escapeHtml(sources)})`,
+      `Записей в файле: ${parsed.items.length + parsed.skipped}`,
+      `Новых: ${diff.added} · обновится: ${diff.changed} · без изменений: ${diff.same}`,
+      `Пропущено (нет ответчика или ссылки, повторы): ${parsed.skipped}`,
+      `С Telegram-контактами: ${parsed.items.filter((a) => a.contacts.length).length} · с кошельками: ${parsed.items.filter((a) => a.wallets.length).length}`,
+    ].join("\n"),
+    reply_markup: { inline_keyboard: [[{ text: "✅ Импортировать", callback_data: "adm:arbok" }, { text: "✖ Отмена", callback_data: "adm:arbno" }]] },
+  });
 }
 
 function adminRelayList(filter: RelayFilter, page: number): AdminView {
@@ -10588,6 +10880,41 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     if (bindings.recentFinds.length !== before) saveBindings();
     await answer("Удалено из недавних");
     await renderAdmin(cb, adminRecentFinds(Number(rest[1] || 0)));
+    return;
+  }
+  if (action === "arb") {
+    await answer();
+    await renderAdmin(cb, adminForumArbs());
+    return;
+  }
+  if (action === "arbimp") {
+    arbImportSetup.add(String(chatId));
+    await answer("Пришлите файл");
+    await tgSoft("sendMessage", {
+      chat_id: chatId,
+      text: "Пришлите JSON-файл с арбитражами (до 20 МБ): список записей с полями url, defendant, status, amount, date, description. Бот покажет, что изменится, и спросит подтверждение.",
+    });
+    return;
+  }
+  if (action === "arbok" || action === "arbno") {
+    const pending = arbImportPending.get(String(chatId));
+    arbImportPending.delete(String(chatId));
+    if (!pending || Date.now() - pending.at > 30 * 60_000) {
+      await answer("Импорт устарел — пришлите файл заново", true);
+      return;
+    }
+    if (action === "arbno") {
+      await answer("Отменено");
+      await tgSoft("editMessageText", { chat_id: chatId, message_id: cb.message!.message_id, text: "Импорт арбитражей отменён." });
+      return;
+    }
+    applyForumArbs(pending.items);
+    await answer("Импортировано");
+    await tgSoft("editMessageText", {
+      chat_id: chatId,
+      message_id: cb.message!.message_id,
+      text: `✅ Импорт готов. В базе арбитражей: ${forumArbs.length}. Они уже ищутся в проверке контрагента и в /pars.`,
+    });
     return;
   }
   if (action === "bladd") {
@@ -11372,6 +11699,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
   }
   if (isOfficialArbiterChat(msg.chat.id) && banSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyBan(msg.chat.id, msg.text);
+    return;
+  }
+  if (isOfficialArbiterChat(msg.chat.id) && arbImportSetup.has(String(msg.chat.id)) && msg.document && !cmd) {
+    await handleArbImportFile(msg);
     return;
   }
   if (isOfficialArbiterChat(msg.chat.id) && addBlacklistSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
