@@ -521,16 +521,21 @@
   line-height: 1;
   letter-spacing: 0.01em;
   color: #f2be55;
-  opacity: 0.3;
+  opacity: 0.18;
+  /* fades out towards the label */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 75%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 75%);
 }
 .epb-act-loupe {
   position: absolute;
-  right: -14px;
+  right: -10px;
   top: 50%;
-  width: 92px;
-  height: 92px;
+  width: 72px;
+  height: 72px;
   transform: translateY(-50%) rotate(-8deg);
   pointer-events: none;
   color: #ffffff;
-  opacity: 0.2;
+  opacity: 0.13;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 70%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 70%);
 }
