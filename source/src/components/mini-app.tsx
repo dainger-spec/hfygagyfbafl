@@ -617,6 +617,9 @@ const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number; text?: "
   { src: "/partners/illidan.png", alt: "Illidan Blacklist Community", r: 129 / 128 },
   { src: "/partners/imperial.png", alt: "Imperial Black List", r: 89 / 128 },
   { src: "/partners/shopping-avenue.png", alt: "Shopping Avenue скам-лист", r: 239 / 128, s: 0.95 },
+  { src: "/partners/chernyi-spisok.png", alt: "Чёрный список — арбитраж трафика", r: 210 / 128, s: 0.9 },
+  { src: "/partners/btc-detective.png", alt: "Crypto detective blacklist", r: 119 / 128 },
+  { src: "/partners/skam-desk.png", alt: "SKAM DESK", r: 115 / 128 },
 ];
 
 function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
