@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { CHANNEL_NAME, CHANNEL_URL, KNOWN_TELEGRAM_IDS, parseDamageAmount, parseTelegramInput } from "@/lib/telegram";
 import type { Application, ComplaintHistoryItem, Currency, EvidenceItem, PersonRef } from "@/lib/types";
 import { scammerAccounts } from "@/lib/types";
+import { nextTier, tierFor } from "@/lib/tiers";
 import { WELCOME_JPEG_BASE64 } from "@/lib/welcome-card";
 import { WELCOME_MP4_BASE64 } from "@/lib/welcome-anim";
 import { isLocale, tb, type BotMsg, type Locale } from "@/lib/i18n";
@@ -83,6 +84,8 @@ type RelayChat = {
   // Public handle / invite link, shown on the "Sponsors" page (filled lazily).
   username?: string;
   link?: string;
+  // members may type /im here to get their member card (an animation) with stats
+  imEnabled?: boolean;
 };
 
 // A promo banner shown at the top of the mini app. "video" covers real videos
@@ -137,6 +140,9 @@ type Bindings = {
   checkEnabled?: boolean;
   banners?: Banner[];
   manualBlacklist?: ManualBlacklistEntry[];
+  // Accounts the arbiters took out of the search altogether: posts about them in
+  // the other blacklist channels are not shown either (an erroneous blacklist).
+  checkExclusions?: { id: string; username?: string; telegramId?: string; addedAt: number }[];
   // Baseline total audience shown in the stats line (owner can set it).
   audienceBase?: number;
   // Premium custom emoji in private-chat messages (default on).
@@ -246,6 +252,13 @@ function loadBindings(): Bindings {
 // Cached check results must not outlive a data change (channels, manual
 // entries, published complaints). The cache is declared further down, so during
 // module start-up this is a harmless no-op.
+function isExcludedAccount(usernames: (string | undefined)[], id?: string): boolean {
+  const list = bindings.checkExclusions;
+  if (!list?.length) return false;
+  const names = usernames.map((u) => (u || "").replace(/^@/, "").toLowerCase()).filter(Boolean);
+  return list.some((e) => (id && e.telegramId === id) || (e.username && names.includes(e.username)));
+}
+
 function invalidateCheckCache() {
   try {
     checkCache.clear();
@@ -3799,6 +3812,105 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+// ---------- /im: a member's card in a group ----------
+// The card of the app (metal by tier, the person's name, the base count) as a
+// short looping animation that tilts in 3D, with the person's numbers below.
+// Drawing one takes ~2 s, so cards are drawn one at a time, a finished one is
+// reused for half an hour (by Telegram file id), and each person and chat has a
+// small limit.
+const imCache = new Map<string, { fileId: string; at: number }>();
+let imQueue: Promise<unknown> = Promise.resolve();
+let imWaiting = 0;
+const IM_CACHE_MS = 30 * 60_000;
+
+function memberStats(uid: string) {
+  let filed = 0;
+  let accepted = 0;
+  let rejected = 0;
+  let pending = 0;
+  for (const rec of Object.values(pendingPosts)) {
+    if (rec.victimId !== uid) continue;
+    filed++;
+    if (rec.status === "published") accepted += rec.deletedEverywhere ? 0 : 1;
+    else if (rec.status === "rejected") rejected++;
+    else pending++;
+  }
+  // older accepted ones may have been pruned from the records: the card counter keeps them
+  accepted = Math.max(accepted, publishedCountFor(uid));
+  filed = Math.max(filed, accepted + rejected + pending);
+  return { filed, accepted, rejected, pending };
+}
+
+function plural(n: number, one: string, few: string, many: string) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+async function replyMemberCard(msg: TgMessage) {
+  const from = msg.from!;
+  const chatId = msg.chat.id;
+  if (tooMany(`im:${from.id}`, 1, 30_000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+  const uid = String(from.id);
+  const tier = tierFor(publishedCountFor(uid));
+  const next = nextTier(publishedCountFor(uid));
+  const st = memberStats(uid);
+  const holder = from.username || [from.first_name, from.last_name].filter(Boolean).join(" ") || "EPB Member";
+  const who = from.username ? `@${escapeHtml(from.username)}` : escapeHtml(holder);
+  const caption = [
+    `🎴 ${who} — карта <b>${tier.name}</b>`,
+    "",
+    `📨 Подано жалоб: <b>${st.filed}</b>`,
+    `✅ Принято: <b>${st.accepted}</b> · ❌ Отклонено: <b>${st.rejected}</b> · ⏳ На проверке: <b>${st.pending}</b>`,
+    next
+      ? `До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
+      : "Высшая карта участника",
+  ].join("\n");
+  const markup = { inline_keyboard: [[{ text: "Подать жалобу", url: `https://t.me/${BOT_USERNAME}?start=im` }]] };
+  const base = blacklistBaseCached() || null;
+  const key = `${tier.metal}|${holder}`;
+  const cached = imCache.get(key);
+  if (cached && Date.now() - cached.at < IM_CACHE_MS) {
+    const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: cached.fileId, caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+    if (sent) return;
+    imCache.delete(key);
+  }
+  if (imWaiting >= 4) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
+    return;
+  }
+  imWaiting++;
+  const job = imQueue.then(async () => {
+    try {
+      void tgSoft("sendChatAction", { chat_id: chatId, action: "upload_video" });
+      const { renderMemberGif } = await import("@/lib/member-gif.server");
+      const gif = await renderMemberGif({ metal: tier.metal, holder, count: base });
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("caption", caption);
+      form.set("parse_mode", "HTML");
+      form.set("reply_to_message_id", String(msg.message_id));
+      form.set("reply_markup", JSON.stringify(markup));
+      form.set("animation", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
+      const sent = await tgForm<{ animation?: { file_id: string }; document?: { file_id: string } }>("sendAnimation", form);
+      const fileId = sent.animation?.file_id || sent.document?.file_id;
+      if (fileId) {
+        imCache.set(key, { fileId, at: Date.now() });
+        if (imCache.size > 500) imCache.delete(imCache.keys().next().value!);
+      }
+    } catch (err) {
+      console.error("[epb] im", err);
+      // without the picture the numbers still reach the chat
+      await tgSoft("sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+    } finally {
+      imWaiting--;
+    }
+  });
+  imQueue = job.catch(() => {});
+}
+
 // ---------- /pars: check a chat's members against the blacklist base ----------
 // The owner types /pars in a group. The bot answers there with one quiet line
 // (deleted again after a minute together with the command) and carries on in
@@ -4186,6 +4298,7 @@ async function parsFetchMembers(
 
 // One member against the local base: no network at all.
 function parsLookup(m: ParsMember, channels: CheckChannel[], botPosts: Set<number>): ParsFind | null {
+  if (isExcludedAccount(m.usernames, m.id)) return null;
   const names = m.usernames.filter((u) => !isIgnoredHandle(u));
   const epb: ParsFind["epb"] = [];
   let hasBotRecord = false;
@@ -5235,6 +5348,8 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     }
   }
   hits.sort((a, b) => b.date - a.date);
+  // taken out of the search by the arbiters: other channels' posts don't count
+  if (isExcludedAccount([uname, ...oldNames], effectiveId || id)) hits.length = 0;
   const manual = matchManualBlacklist(uname, id);
   const sourceHits: Record<string, number> = { epb: epb.length, manual: manual.length };
   for (const h of hits) {
@@ -6830,7 +6945,7 @@ async function publishFromMessage(
   return true;
 }
 
-type TgUser = { id: number; username?: string; first_name?: string };
+type TgUser = { id: number; username?: string; first_name?: string; last_name?: string; is_bot?: boolean };
 type TgEntity = { type: string; offset?: number; length?: number; url?: string; language?: string; user?: TgUser };
 
 type TgMessage = {
@@ -7830,6 +7945,7 @@ export function latestParsed(limit = 30): LatestParsed[] {
       if (!msg) continue;
       const p = postAccused(c, msg, strict, self);
       if (!p.hs.length && !p.is.length) continue;
+      if (isExcludedAccount(p.hs, p.is[0]) || p.is.some((x) => isExcludedAccount([], x))) continue;
       const account = p.hs.length ? p.hs.slice(0, 2).join(", ") : `ID ${p.is[0]}`;
       const amount = msg.text.match(AMOUNT_RE)?.[1]?.replace(/\s+/g, " ").trim();
       rows.push({
@@ -9452,6 +9568,7 @@ async function adminRelayCard(chatId: string, filter: string, page: string, note
       `Тип: ${chatKindLabel(relay.type)}`,
       `Статус: ${statusIcon(relay.status)} ${statusText(relay.status)}`,
       `Ссылка спонсора: ${relay.link ? `<code>${escapeHtml(relay.link)}</code>` : "не задана"}`,
+      `Команда /im (карта участника): ${relay.imEnabled ? "включена" : "выключена"}`,
       relay.requestedAt ? `Запрос: ${ago(relay.requestedAt)}` : "",
       note ? `\n${note}` : "",
     ]
@@ -9461,6 +9578,11 @@ async function adminRelayCard(chatId: string, filter: string, page: string, note
       [toggle],
       [{ text: relay.link ? "🔗 Изменить ссылку спонсора" : "🔗 Задать ссылку спонсора", callback_data: `adm:rlink:${suffix}` }],
       [{ text: "🔍 Проверить права бота", callback_data: `adm:rchk:${suffix}` }],
+      [
+        relay.imEnabled
+          ? { text: "🎴 /im в чате: включено — выключить", callback_data: `adm:rimoff:${suffix}` }
+          : { text: "🎴 /im в чате: выключено — включить", callback_data: `adm:rimon:${suffix}` },
+      ],
       [back],
     ],
   };
@@ -9705,8 +9827,31 @@ async function applyRemoveFromCheck(arbiterChatId: number | string, raw: string)
       bindings.manualBlacklist = keptManual;
       saveBindings();
     }
+    // And the posts about this account in the other blacklist channels: the
+    // account is taken out of the search altogether.
+    const exclusions = bindings.checkExclusions || [];
+    let ex = exclusions.find((e) => (id && e.telegramId === id) || (uname && e.username === uname));
+    if (!ex) {
+      ex = { id: randomUUID().slice(0, 8), ...(uname ? { username: uname } : {}), ...(id ? { telegramId: id } : {}), addedAt: Date.now() };
+      bindings.checkExclusions = [...exclusions, ex].slice(-5000);
+      saveBindings();
+    }
+    if (removed) savePending();
+    invalidateCheckCache();
+    latestParsedCache = { at: 0, items: [] };
+    const who = uname ? `@${uname}` : `ID ${id}`;
+    await tgSoft("sendMessage", {
+      chat_id: arbiterChatId,
+      text:
+        `${who} убран из блеклиста целиком.` +
+        (removed ? `\nЖалоб и ручных записей скрыто: ${removed}.` : "") +
+        "\nПосты о нём в других блеклист-каналах тоже больше не находятся (в боте, приложении и /pars).",
+      reply_markup: { inline_keyboard: [[{ text: "↩ Вернуть в поиск", callback_data: `adm:unex:${ex.id}` }]] },
+    });
+    return;
   }
   if (removed) savePending();
+  invalidateCheckCache();
   await tgSoft("sendMessage", {
     chat_id: arbiterChatId,
     text: removed ? `Убрано из блеклиста: ${removed}. В проверке контрагента больше не показывается.` : "Ничего подходящего не нашёл.",
@@ -9953,6 +10098,18 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await renderAdmin(cb, await adminRelayCard(target, filter, page));
     return;
   }
+  if (action === "rimon" || action === "rimoff") {
+    const relay = findRelay(target);
+    if (!relay) {
+      await answer("Чата уже нет в списке", true);
+      return;
+    }
+    relay.imEnabled = action === "rimon";
+    saveBindings();
+    await answer(relay.imEnabled ? "/im включена в этом чате" : "/im выключена в этом чате");
+    await renderAdmin(cb, await adminRelayCard(target, filter, page));
+    return;
+  }
   if (action === "rchk") {
     await answer("Проверяем…");
     await renderAdmin(cb, await adminRelayCard(target, filter, page, await botRightsNote(target)));
@@ -9998,7 +10155,7 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
     await answer("Пришлите номер жалобы или аккаунт");
     await tgSoft("sendMessage", {
       chat_id: chatId,
-      text: "Пришлите номер жалобы (EPB-…) либо @username / ID аккаунта, который нужно убрать из блеклиста (поиска). Жалоба останется в истории, но перестанет находиться в проверке контрагента.",
+      text: "Пришлите @username / ID аккаунта, которого нужно убрать из блеклиста целиком (например, ошибочный блек): перестанут находиться и жалобы EPB, и ручные записи, и посты о нём в других блеклист-каналах — в боте, приложении и /pars. Вернуть можно кнопкой под ответом.\n\nИли номер жалобы (EPB-…), чтобы скрыть только её.",
     });
     return;
   }
@@ -10035,6 +10192,24 @@ async function handleAdminCallback(cb: NonNullable<TgUpdate["callback_query"]>) 
   if (action === "rf") {
     await answer();
     await renderAdmin(cb, adminRecentFinds(Number(rest[0] || 0)));
+    return;
+  }
+  if (action === "unex") {
+    // undo "taken out of the search": other channels' posts count again
+    const before = (bindings.checkExclusions || []).length;
+    const gone = (bindings.checkExclusions || []).find((e) => e.id === rest[0]);
+    bindings.checkExclusions = (bindings.checkExclusions || []).filter((e) => e.id !== rest[0]);
+    if (bindings.checkExclusions.length !== before) saveBindings();
+    invalidateCheckCache();
+    latestParsedCache = { at: 0, items: [] };
+    await answer(gone ? "Вернули в поиск" : "Уже возвращён");
+    if (gone) {
+      await tgSoft("editMessageText", {
+        chat_id: chatId,
+        message_id: cb.message?.message_id,
+        text: `${gone.username ? `@${gone.username}` : `ID ${gone.telegramId}`} снова находится в постах других блеклист-каналов. (Скрытые жалобы EPB при этом остаются скрытыми.)`,
+      });
+    }
     return;
   }
   if (action === "rfdel") {
@@ -10321,6 +10496,12 @@ async function handleTelegramUpdate(update: TgUpdate) {
       (groupMsg.new_chat_members?.some((u) => String(u.id) === cleanup.userbotId) || String(groupMsg.left_chat_member?.id || "") === cleanup.userbotId)
     ) {
       void tgSoft("deleteMessage", { chat_id: groupMsg.chat.id, message_id: groupMsg.message_id });
+      return;
+    }
+    // /im: the member's card with their stats, in chats where the admins turned it on
+    if (commandName(groupMsg.text) === "im") {
+      const relay = findRelay(groupMsg.chat.id);
+      if (relay?.imEnabled && groupMsg.from && !groupMsg.from.is_bot) await replyMemberCard(groupMsg);
       return;
     }
     // /pars from the bot owner: check this chat's members (continues in private)
