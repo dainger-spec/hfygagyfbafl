@@ -617,7 +617,7 @@ function Home({
                 count={base?.accounts ?? null}
                 ribbon={t(locale, "cardRibbon")}
                 locale={locale}
-                onOpen={onBase}
+                onOpen={onTiers}
                 width="min(290px, 76vw)"
               />
             </div>
