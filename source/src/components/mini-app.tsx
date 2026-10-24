@@ -16,13 +16,13 @@ import {
   telegramPlatform,
   waitForTelegramUser,
 } from "@/lib/telegram";
-import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
+import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseDetails, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { hasSavedLocale, t, type Locale } from "@/lib/i18n";
 
-export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors";
+export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors" | "base";
 
 export function MiniApp({
   page,
@@ -137,7 +137,7 @@ export function MiniApp({
         <i className="epb-bg-a" />
         <i className="epb-bg-b" />
       </div>
-      {showApp && !["home", "sponsors", "check", "apply"].includes(page) ? (
+      {showApp && !["home", "sponsors", "check", "apply", "base"].includes(page) ? (
         <button
           type="button"
           className="absolute left-2 z-10 flex size-11 items-center justify-center rounded-xl text-fg hover:bg-surface"
@@ -149,7 +149,7 @@ export function MiniApp({
         </button>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply"].includes(page) && "pt-10")}>
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", showApp && !["home", "sponsors", "check", "apply", "base"].includes(page) && "pt-10")}>
         {!showApp && !showLang ? <AccountLoading locale={locale} /> : null}
         {ready && banned ? (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
@@ -160,7 +160,7 @@ export function MiniApp({
         ) : null}
         {showLang ? <LanguageGate onPicked={() => setLangPicked(true)} /> : null}
         {showApp && page === "home" ? (
-          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} checkOn={checkOn} />
+          <Home identity={identity} onComplaint={openComplaint} onHistory={openHistory} onOwners={openOwners} onCheck={openCheck} onSponsors={openSponsors} onBase={() => onPage("base")} checkOn={checkOn} />
         ) : null}
         {showApp && page === "apply" ? (
           <ApplyForm
@@ -175,6 +175,7 @@ export function MiniApp({
         {showApp && page === "check" && checkOn ? <CheckCounterparty onBack={() => onPage("home")} /> : null}
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "sponsors" ? <SponsorsPage onBack={() => onPage("home")} /> : null}
+        {showApp && page === "base" ? <BasePage onBack={() => onPage("home")} /> : null}
         {showApp && page === "done" ? (
           <Done
             onPage={onPage}
@@ -408,7 +409,7 @@ type BaseStats = { accounts: number; sources: number; updatedAt: number };
 
 // "Blacklist base: N accounts from M sources", with when the copies were last
 // updated. Refreshed every minute while the home screen is open.
-function BaseCard() {
+function BaseCard({ onOpen }: { onOpen?: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   const [stats, setStats] = useState<BaseStats | null>(() => cachedBase());
   const [now, setNow] = useState(() => Date.now());
@@ -443,7 +444,15 @@ function BaseCard() {
 
   return (
     <div className="mx-auto w-full max-w-md pt-3">
-      <div className="epb-base-card relative overflow-hidden rounded-2xl px-4 py-2.5">
+      <button
+        type="button"
+        aria-label={t(locale, "basePageTap")}
+        onClick={() => {
+          haptic("light");
+          onOpen?.();
+        }}
+        className="epb-base-card relative block w-full overflow-hidden rounded-2xl px-4 py-2.5 text-left transition-transform active:scale-[0.99]"
+      >
         <img
           src="/brand/emblem-v2.webp"
           alt=""
@@ -464,7 +473,7 @@ function BaseCard() {
           </span>
           <span className="truncate text-xs text-muted">{t(locale, "baseSub", { n, src })}</span>
         </div>
-      </div>
+      </button>
     </div>
   );
 }
@@ -476,6 +485,7 @@ function Home({
   onOwners,
   onCheck,
   onSponsors,
+  onBase,
   checkOn,
 }: {
   identity: { username: string; firstName?: string; telegramId: string };
@@ -484,6 +494,7 @@ function Home({
   onOwners: () => void;
   onCheck: () => void;
   onSponsors: () => void;
+  onBase?: () => void;
   checkOn: boolean;
 }) {
   const locale = useBlacklistStore((s) => s.locale);
@@ -501,7 +512,7 @@ function Home({
         <SponsorsTicker onOpen={onSponsors} />
       </div>
       {/* No banners: the blacklist base card shows under the ticker. */}
-      {noBanners ? <BaseCard /> : null}
+      {noBanners ? <BaseCard onOpen={onBase} /> : null}
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={150} title="Europe Private Blacklist" spin emblem big className="mt-4" />
@@ -825,6 +836,126 @@ function SponsorAvatar({ src, title }: { src?: string; title: string }) {
     <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-xs font-bold text-muted">
       {letter}
     </span>
+  );
+}
+
+type BaseDetailsData = {
+  accounts: number;
+  usernames: number;
+  ids: number;
+  posts: number;
+  sources: { name: string; posts: number; accounts: number | null; complete: boolean; progress: number; updatedAt: number }[];
+  epb: number;
+  manual: number;
+  updatedAt: number;
+};
+
+// "Blacklist base": the totals and what each source adds (opened from the base card).
+function BasePage({ onBack }: { onBack: () => void }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [data, setData] = useState<BaseDetailsData | null | undefined>(undefined);
+  useEffect(() => {
+    void getBaseDetails()
+      .then((d) => setData((d as BaseDetailsData | null) ?? null))
+      .catch(() => setData(null));
+  }, []);
+  const fmt = (n: number) => n.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
+  const stat = (value: number, label: string) => (
+    <div className="rounded-2xl bg-surface/70 px-3 py-2.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+      <div className="font-display text-lg leading-tight font-extrabold text-fg">{fmt(value)}</div>
+      <div className="text-[11px] text-muted">{label}</div>
+    </div>
+  );
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [touch-action:pan-y]">
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onBack();
+          }}
+          className="-ml-2 flex h-9 shrink-0 items-center gap-1 rounded-xl pr-2 font-display text-xl font-bold text-fg hover:bg-surface"
+        >
+          <ChevronLeft className="size-5" />
+          {t(locale, "back")}
+        </button>
+        {data === undefined ? (
+          <div className="space-y-2">
+            <div className="h-28 animate-pulse rounded-2xl bg-surface/60" />
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="h-[56px] animate-pulse rounded-2xl bg-surface/60" />
+            ))}
+          </div>
+        ) : !data ? (
+          <p className="py-8 text-center text-sm text-muted">{t(locale, "checkFail")}</p>
+        ) : (
+          <>
+            <div className="epb-base-card relative overflow-hidden rounded-2xl px-4 py-4">
+              <img
+                src="/brand/emblem-v2.webp"
+                alt=""
+                aria-hidden
+                draggable={false}
+                className="pointer-events-none absolute -right-6 top-1/2 h-[150%] w-auto -translate-y-1/2 select-none opacity-[0.16]"
+              />
+              <div className="relative">
+                <div className="text-[11px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
+                <div className="mt-1 font-display text-4xl leading-none font-extrabold tracking-tight text-gold">{fmt(data.accounts)}</div>
+                <div className="mt-1 text-sm text-muted">{t(locale, "basePageAccounts")}</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {stat(data.usernames, t(locale, "basePageUsernames"))}
+              {stat(data.ids, t(locale, "basePageIds"))}
+              {stat(data.posts, t(locale, "basePagePosts"))}
+            </div>
+            <div className="space-y-2 pt-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm font-bold text-muted">
+                  <ShieldAlert className="size-4" />
+                  {t(locale, "basePageSources")}
+                </div>
+                <span className="rounded-full bg-gold/10 px-2 py-0.5 text-xs font-bold text-gold">{data.sources.length + 2}</span>
+              </div>
+              <p className="text-xs leading-relaxed text-subtle">{t(locale, "basePageSourcesHint")}</p>
+              {data.sources.map((src) => (
+                <div key={src.name} className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate text-sm font-semibold">{src.name}</span>
+                    <span className={cn("shrink-0 text-xs font-semibold", src.complete ? "text-gold" : "text-muted")}>
+                      {src.complete ? `✓ ${t(locale, "basePageFull")}` : t(locale, "basePageLoading", { p: src.progress })}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted">
+                    <span>
+                      {fmt(src.posts)} {t(locale, "basePagePosts")}
+                    </span>
+                    {src.accounts !== null ? <span>{t(locale, "basePageAcc", { n: fmt(src.accounts) })}</span> : null}
+                    {src.updatedAt ? <span>{agoText(locale, src.updatedAt)}</span> : null}
+                  </div>
+                  {!src.complete ? (
+                    <div className="mt-2 h-1 overflow-hidden rounded-full bg-fg/10">
+                      <div className="h-full rounded-full bg-gold" style={{ width: `${Math.max(3, src.progress)}%` }} />
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                  <div className="text-sm font-semibold">{t(locale, "basePageEpb")}</div>
+                  <div className="mt-1 text-xs text-muted">{t(locale, "basePageEntries", { n: fmt(data.epb) })}</div>
+                </div>
+                <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                  <div className="text-sm font-semibold">{t(locale, "basePageManual")}</div>
+                  <div className="mt-1 text-xs text-muted">{t(locale, "basePageEntries", { n: fmt(data.manual) })}</div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

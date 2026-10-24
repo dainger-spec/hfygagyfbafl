@@ -6830,6 +6830,63 @@ export async function postDetail(userId: string, channelId: string, messageId: n
   return { ok: true, text: got.text || base.text, date: got.date || base.date, source, photos: got.photos.map(dataUrl), more: got.more, links: got.text ? got.links : [] };
 }
 
+// The app's "blacklist base" page: totals and, per source, how much has been
+// copied and how many accounts it adds. Counted at most once a minute; before
+// the background count has run, the per-source account numbers are left out
+// (never a slow count while someone waits).
+export type BaseSource = { name: string; posts: number; accounts: number | null; complete: boolean; progress: number; updatedAt: number };
+export type BaseDetails = {
+  accounts: number;
+  usernames: number;
+  ids: number;
+  posts: number;
+  sources: BaseSource[];
+  epb: number;
+  manual: number;
+  updatedAt: number;
+};
+let baseDetailsCache: { at: number; value: BaseDetails | null } = { at: 0, value: null };
+export function publicBaseDetails(): BaseDetails | null {
+  if (!checkEnabled()) return null;
+  if (Date.now() - baseDetailsCache.at < 60_000 && baseDetailsCache.value) return baseDetailsCache.value;
+  const totals = blacklistBaseStats();
+  if (!totals) return baseDetailsCache.value;
+  const ready = Boolean(baseStatsCache.value);
+  const byName = new Map<string, BaseSource>();
+  let updatedAt = 0;
+  for (const c of mirrorChannels()) {
+    const m = loadMirror(c);
+    const epbChan = epbCheckChannel();
+    const name = epbChan && sameChat(c.id, epbChan.id) ? "Europe Private Blacklist" : checkSourceName(c.title || c.username || "");
+    const a = ready ? mirrorAccused(c, m) : null;
+    const accounts = a ? a.ids.size + [...a.usernames].filter((u) => !a.paired.has(u)).length : null;
+    const prev = byName.get(name);
+    const row: BaseSource = {
+      name,
+      posts: (prev?.posts || 0) + m.msgs.size,
+      accounts: accounts === null ? null : (prev?.accounts || 0) + accounts,
+      complete: (prev ? prev.complete : true) && m.complete,
+      progress: prev ? Math.min(prev.progress, mirrorProgress(m)) : mirrorProgress(m),
+      updatedAt: Math.max(prev?.updatedAt || 0, m.updatedAt || 0),
+    };
+    byName.set(name, row);
+    updatedAt = Math.max(updatedAt, m.updatedAt || 0);
+  }
+  const epb = Object.values(pendingPosts).filter((r) => r.status === "published" && !r.removedFromCheck).length;
+  const value: BaseDetails = {
+    accounts: totals.accounts,
+    usernames: totals.usernames,
+    ids: totals.ids,
+    posts: totals.posts,
+    sources: [...byName.values()].sort((x, y) => y.posts - x.posts),
+    epb,
+    manual: (bindings.manualBlacklist || []).length,
+    updatedAt: updatedAt || Date.now(),
+  };
+  baseDetailsCache = { at: Date.now(), value };
+  return value;
+}
+
 // The newest posts copied from the blacklist channels, for the list at the bottom
 // of the app's home screen: the accused account, where and when, and the damage
 // when the post has a "Сумма/Ущерб" field. One row per account, cached a minute.
