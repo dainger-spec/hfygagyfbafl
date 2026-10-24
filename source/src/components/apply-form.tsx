@@ -405,7 +405,8 @@ export function ApplyForm({
       </div>
 
       <div className="shrink-0 border-t border-line bg-bg px-4 py-3">
-        <Button type="submit" size="lg" className="w-full" disabled={sending}>
+        {/* solid gold, no gradient (same as "Подать жалобу") */}
+        <Button type="submit" size="lg" className="w-full bg-none" disabled={sending}>
           {sending ? t(locale, "sending") : t(locale, "send")}
         </Button>
       </div>
