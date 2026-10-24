@@ -43,7 +43,7 @@ const RIBBON = ribbonPaths();
 // edge layers behind the face, each shifted a fraction of the rim offset
 const EDGES = [0.2, 0.4, 0.6, 0.8, 1];
 // how thick the plate looks, px
-const THICK = 7;
+const THICK = 4;
 
 export function GoldCard({
   count,
