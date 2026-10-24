@@ -4145,15 +4145,52 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
   return "sent";
 }
 
+const PROFILE_STEPS = [
+  "💳 <b>Регистрируем карту…</b>",
+  "🔐 <b>Выпускаем карту…</b>\n✅ Карта зарегистрирована",
+  "✍️ <b>Ставим подпись…</b>\n✅ Карта зарегистрирована\n✅ Карта выпущена",
+  "✨ <b>Наносим гравировку…</b>\n✅ Карта зарегистрирована\n✅ Карта выпущена\n✅ Подпись поставлена",
+  "📦 <b>Упаковываем…</b>\n✅ Карта зарегистрирована\n✅ Карта выпущена\n✅ Подпись поставлена\n✅ Гравировка нанесена",
+];
+
 // "Мой профиль" in the bot's menu: the card replaces the menu message, and
 // "В меню" under it brings the menu back.
 async function openMemberProfile(cb: NonNullable<TgUpdate["callback_query"]>) {
   const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
   if (!cb.message || !cb.from || cb.message.chat.type !== "private") return answer();
   if (tooMany(`im:${cb.from.id}`, 1, 3000)) return answer("Секунду…");
-  const result = await sendMemberCard(cb.message.chat.id, cb.from, { menu: true });
+  // When the card has to be drawn, the menu message tells how it is being made
+  // (step by step) instead of just waiting.
+  const info = memberInfo(cb.from);
+  const saved = imCache.get(animationKey(info, "front"));
+  let making: ReturnType<typeof setInterval> | null = null;
+  if (!saved || Date.now() - saved.at >= IM_FRESH_MS) {
+    void answer();
+    let step = 0;
+    const m = cb.message as { message_id: number; chat: { id: number }; caption?: string; photo?: unknown };
+    const field = m.caption || m.photo ? "caption" : "text";
+    // only edits (never a new message, even if an edit fails)
+    const show = () => {
+      if (step >= PROFILE_STEPS.length) return;
+      void tgSoft(field === "caption" ? "editMessageCaption" : "editMessageText", {
+        chat_id: m.chat.id,
+        message_id: m.message_id,
+        [field]: PROFILE_STEPS[step++],
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      });
+    };
+    show();
+    making = setInterval(show, 800);
+  }
+  const result = await sendMemberCard(cb.message.chat.id, cb.from, { menu: true }).finally(() => making && clearInterval(making));
+  if (result === "busy" && making) {
+    await editCard(cb, await startCaption(langOf(cb.from.id)), applyKeyboard(langOf(cb.from.id)));
+    await tgSoft("sendMessage", { chat_id: cb.message.chat.id, text: "Сейчас рисую карты для других — попробуйте через минуту." });
+    return;
+  }
   if (result === "busy") return answer("Сейчас рисую карты для других — попробуйте через минуту.", true);
-  await answer();
+  if (!making) await answer();
   void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
 }
 
