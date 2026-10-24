@@ -332,11 +332,11 @@
   );
   /* thin horizontal lines, with a soft glow rising from the bottom */
   -webkit-mask-image:
-    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
+    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.45px, #000 0.8px, rgba(0, 0, 0, 0.9) 1.15px, transparent 1.6px, transparent 4.2px),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   -webkit-mask-composite: source-in;
   mask-image:
-    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
+    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.45px, #000 0.8px, rgba(0, 0, 0, 0.9) 1.15px, transparent 1.6px, transparent 4.2px),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   mask-composite: intersect;
 }
