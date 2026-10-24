@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { Metal } from "@/lib/tiers";
 
 // The member card on the home screen. The art (public/brand/card-*.webp, drawn
@@ -71,6 +71,7 @@ export function MemberCard({
   ribbon,
   locale,
   onOpen,
+  width = "min(340px, 88vw)",
 }: {
   metal: Metal;
   holder: string;
@@ -78,8 +79,14 @@ export function MemberCard({
   ribbon: string;
   locale: "ru" | "en";
   onOpen?: () => void;
+  // CSS width of the card
+  width?: string;
 }) {
   const look = CARD_LOOKS[metal];
+  // ids for the SVG filter and text path, unique when several cards are on screen
+  const uid = useId().replace(/:/g, "");
+  const embossId = `epb-emboss-${uid}`;
+  const lineId = `epb-ribbon-${uid}`;
   // long names get a smaller size so they stay inside the frame
   const name = holder.toUpperCase();
   const nameSize = Math.max(28, Math.min(54, (54 * 14) / Math.max(14, name.length)));
@@ -211,7 +218,7 @@ export function MemberCard({
   const shown = count == null ? "—" : count.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
 
   return (
-    <div className="epb-card-stage" data-metal={metal}>
+    <div className="epb-card-stage" data-metal={metal} style={{ width }}>
       <div ref={shadowRef} className="epb-card-shadow" aria-hidden />
       <div
         ref={cardRef}
@@ -235,7 +242,7 @@ export function MemberCard({
           <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
             <defs>
               {/* raised lettering: a light edge above, a soft dark one below */}
-              <filter id="epb-emboss" x="-5%" y="-30%" width="110%" height="160%">
+              <filter id={embossId} x="-5%" y="-30%" width="110%" height="160%">
                 <feOffset in="SourceAlpha" dx="-2" dy="-2.5" result="up" />
                 <feFlood floodColor={look.hi} floodOpacity={look.hiOpacity} />
                 <feComposite in2="up" operator="in" result="hi" />
@@ -249,7 +256,7 @@ export function MemberCard({
                 </feMerge>
               </filter>
             </defs>
-            <g filter="url(#epb-emboss)">
+            <g filter={`url(#${embossId})`}>
               <text
                 x={600}
                 y={162}
@@ -284,7 +291,7 @@ export function MemberCard({
               ))}
               <path d={RIBBON.body} />
             </g>
-            <path id="epb-ribbon-line" d={RIBBON.text} fill="none" />
+            <path id={lineId} d={RIBBON.text} fill="none" />
             <text
               fontFamily={CARD_FONT}
               fontWeight={600}
@@ -293,7 +300,7 @@ export function MemberCard({
               style={{ fontStretch: "110%" }}
               fill={look.ink}
             >
-              <textPath href="#epb-ribbon-line" startOffset="50%" textAnchor="middle">
+              <textPath href={`#${lineId}`} startOffset="50%" textAnchor="middle">
                 {ribbon}
               </textPath>
             </text>
@@ -307,7 +314,7 @@ export function MemberCard({
               letterSpacing={2}
               style={{ fontStretch: "105%" }}
               fill={look.ink}
-              filter="url(#epb-emboss)"
+              filter={`url(#${embossId})`}
             >
               {shown}
             </text>

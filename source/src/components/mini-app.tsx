@@ -1,8 +1,8 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, Lock, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { CARD_LOOKS, MemberCard } from "@/components/member-card";
-import { TIERS, nextTier, tierFor } from "@/lib/tiers";
+import { TIERS, nextTier, tierFor, type Metal } from "@/lib/tiers";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -178,7 +178,13 @@ export function MiniApp({
         {showApp && page === "owners" ? <OwnersGuide /> : null}
         {showApp && page === "sponsors" ? <SponsorsPage onBack={() => onPage("home")} /> : null}
         {showApp && page === "base" ? <BasePage onBack={() => onPage("home")} /> : null}
-        {showApp && page === "tiers" ? <TiersPage onBack={() => onPage("home")} /> : null}
+        {showApp && page === "tiers" ? (
+          <TiersPage
+            onBack={() => onPage("home")}
+            onComplaint={openComplaint}
+            holder={identity.username || identity.firstName || "EPB Member"}
+          />
+        ) : null}
         {showApp && page === "done" ? (
           <Done
             onPage={onPage}
@@ -596,6 +602,7 @@ function Home({
             ribbon={t(locale, "cardRibbon")}
             locale={locale}
             onOpen={onBase}
+            width="min(290px, 76vw)"
           />
         </div>
         <h1 className="epb-title-heavy mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
@@ -979,8 +986,34 @@ function ruBlacklists(n: number) {
 }
 
 // What each member card takes, with the user's own progress.
-function TiersPage({ onBack }: { onBack: () => void }) {
+// What each card means and how to get it (shown when a card is opened).
+const TIER_INFO: Record<Metal, Record<Locale, string>> = {
+  bronze: {
+    ru: "Стартовая карта участника — выдаётся сразу, как только вы открыли приложение.",
+    en: "The starter card — yours as soon as you open the app.",
+  },
+  silver: {
+    ru: "Ваш первый блеклист: подайте жалобу с доказательствами, и после публикации в канале карта станет серебряной.",
+    en: "Your first blacklist: file a complaint with proof, and once it is published the card turns silver.",
+  },
+  gold: {
+    ru: "Три опубликованных блеклиста. Вы уже помогли нескольким людям не попасть на скамера.",
+    en: "Three published blacklists. You have already kept several people away from scammers.",
+  },
+  platinum: {
+    ru: "Десять опубликованных блеклистов — карта для тех, кто регулярно выводит скамеров на чистую воду.",
+    en: "Ten published blacklists — for those who expose scammers regularly.",
+  },
+  black: {
+    ru: "Высшая карта: двадцать пять опубликованных блеклистов. Для самых активных участников сообщества.",
+    en: "The highest card: twenty-five published blacklists. For the most active members of the community.",
+  },
+};
+
+function TiersPage({ onBack, onComplaint, holder }: { onBack: () => void; onComplaint: () => void; holder: string }) {
   const locale = useBlacklistStore((s) => s.locale);
+  const [opened, setOpened] = useState<Metal | null>(null);
+  const [base] = useState<BaseStats | null>(() => cachedBase());
   const published = usePublished();
   const n = published ?? 0;
   const current = tierFor(n);
@@ -1037,10 +1070,15 @@ function TiersPage({ onBack }: { onBack: () => void }) {
             const reached = n >= tier.min;
             const isCurrent = tier.metal === current.metal;
             return (
-              <div
+              <button
+                type="button"
                 key={tier.metal}
+                onClick={() => {
+                  haptic("light");
+                  setOpened(tier.metal);
+                }}
                 className={cn(
-                  "flex items-center gap-3 rounded-2xl bg-surface/60 p-2.5 pr-3.5",
+                  "flex w-full items-center gap-3 rounded-2xl bg-surface/60 p-2.5 pr-3.5 transition-transform active:scale-[0.99]",
                   isCurrent && "shadow-[0_0_0_1px_rgba(242,190,85,0.55)]",
                 )}
               >
@@ -1059,9 +1097,112 @@ function TiersPage({ onBack }: { onBack: () => void }) {
                 ) : !reached ? (
                   <Lock className="size-4 shrink-0 text-subtle" />
                 ) : null}
-              </div>
+                <ChevronRight className="size-4 shrink-0 text-subtle" />
+              </button>
             );
           })}
+        </div>
+      </div>
+      {opened ? (
+        <TierSheet
+          tier={TIERS.find((x) => x.metal === opened)!}
+          published={n}
+          isCurrent={opened === current.metal}
+          holder={holder}
+          count={base?.accounts ?? null}
+          need={need}
+          onClose={() => setOpened(null)}
+          onComplaint={() => {
+            setOpened(null);
+            onComplaint();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// One card opened over a blurred page: tilt it, read what it takes, close.
+function TierSheet({
+  tier,
+  published,
+  isCurrent,
+  holder,
+  count,
+  need,
+  onClose,
+  onComplaint,
+}: {
+  tier: (typeof TIERS)[number];
+  published: number;
+  isCurrent: boolean;
+  holder: string;
+  count: number | null;
+  need: (min: number) => string;
+  onClose: () => void;
+  onComplaint: () => void;
+}) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const reached = published >= tier.min;
+  const left = tier.min - published;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="epb-card-sheet" role="dialog" aria-modal="true" aria-label={tier.name}>
+      <div className="flex shrink-0 justify-end px-3" style={{ paddingTop: "calc(var(--tg-safe-top, 0px) + 10px)" }}>
+        <button
+          type="button"
+          onClick={() => {
+            haptic("light");
+            onClose();
+          }}
+          className="inline-flex h-9 items-center gap-1.5 rounded-full bg-white/10 px-3.5 text-sm font-semibold text-fg backdrop-blur hover:bg-white/15"
+        >
+          <X className="size-4" />
+          {t(locale, "tierClose")}
+        </button>
+      </div>
+      {/* a tap outside the card and the text closes it */}
+      <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-5 pb-8" onClick={(e) => e.target === e.currentTarget && onClose()}>
+        <div className="epb-card-sheet-card mt-6 w-full">
+          <MemberCard
+            metal={tier.metal}
+            holder={holder}
+            count={count}
+            ribbon={t(locale, "cardRibbon")}
+            locale={locale}
+            width="min(360px, 90vw)"
+          />
+        </div>
+        <div className="epb-card-sheet-info mt-8 w-full max-w-md text-center">
+          <div className={cn("font-display text-3xl font-extrabold", TIER_TEXT[tier.metal])}>{tier.name}</div>
+          <div className="mt-1 text-sm font-semibold text-muted">{need(tier.min)}</div>
+          <p className="mx-auto mt-4 max-w-sm text-sm leading-relaxed text-fg/90">{TIER_INFO[tier.metal][locale]}</p>
+          <div className="mx-auto mt-5 max-w-sm rounded-2xl bg-white/[0.06] px-4 py-3 text-left text-sm leading-relaxed text-muted">
+            <div className="mb-1 font-semibold text-fg">{t(locale, "tierHowTitle")}</div>
+            {t(locale, "tierHow")}
+          </div>
+          <div className="mt-5 text-sm font-semibold">
+            {isCurrent ? (
+              <span className="text-gold">{t(locale, "tierIsYours")}</span>
+            ) : reached ? (
+              <span className="text-fg/80">{t(locale, "tierReached")}</span>
+            ) : (
+              <span className="text-muted">
+                {locale === "en"
+                  ? `${left} more blacklist${left === 1 ? "" : "s"} to go`
+                  : `Осталось ${left} ${ruBlacklists(left)}`}
+              </span>
+            )}
+          </div>
+          {!reached ? (
+            <Button size="lg" className="mt-5 w-full max-w-sm rounded-xl bg-none" onClick={onComplaint}>
+              {t(locale, "fileComplaint")}
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>
