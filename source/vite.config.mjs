@@ -135,6 +135,9 @@ export default defineConfig(({ command, isPreview }) => ({
           nitro({
             preset: process.env.NITRO_PRESET || "node-server",
             serverDir: "./server",
+            // gzip/brotli copies of the static files (JS, CSS, SVG) are served to
+            // browsers that accept them: ~4x less to download on every first open
+            compressPublicAssets: true,
             plugins: ["./server/plugins/http-guards.ts", "./server/plugins/ignore-aborts.ts", "./server/plugins/start-bot.ts"],
             routeRules: {
               "/api/telegram/evidence": { cache: false },

@@ -330,14 +330,21 @@
     rgba(246, 200, 90, 0.3) 85%,
     rgba(255, 216, 110, 0.36) 100%
   );
-  /* thin horizontal lines, with a soft glow rising from the bottom */
+  /* banknote-style engraving: flowing wavy lines with patches of cross-hatching
+     (scripts/gen-engrave.py), plus a soft glow rising from the bottom */
   -webkit-mask-image:
-    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.45px, #000 0.8px, rgba(0, 0, 0, 0.9) 1.15px, transparent 1.6px, transparent 4.2px),
+    url("./assets/engrave.svg"),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
+  -webkit-mask-size: cover, 100% 100%;
+  -webkit-mask-position: center, center;
+  -webkit-mask-repeat: no-repeat;
   -webkit-mask-composite: source-in;
   mask-image:
-    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.45px, #000 0.8px, rgba(0, 0, 0, 0.9) 1.15px, transparent 1.6px, transparent 4.2px),
+    url("./assets/engrave.svg"),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
+  mask-size: cover, 100% 100%;
+  mask-position: center, center;
+  mask-repeat: no-repeat;
   mask-composite: intersect;
 }
 
