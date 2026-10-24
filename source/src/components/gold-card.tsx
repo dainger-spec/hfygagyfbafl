@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { haptic } from "@/lib/telegram";
+import { haptic, hapticTick } from "@/lib/telegram";
 
 // The gold card on the home screen. The art (public/brand/card.webp, drawn by
 // scripts/gen-card.py) carries the engraving, frame, chip and medallion; the
@@ -114,8 +114,18 @@ export function GoldCard({
     };
     run();
 
+    // haptics while turning: a click every few degrees like a dial, a firmer
+    // knock when the card hits the end of its swing, a soft one when let go
+    const STEP = 5;
+    let stepX = 0;
+    let stepY = 0;
+    let atEdge = false;
+    let lastTick = 0;
     const down = (e: PointerEvent) => {
       haptic("light");
+      stepX = Math.round(rx / STEP);
+      stepY = Math.round(ry / STEP);
+      atEdge = false;
       dragging = true;
       moved = 0;
       sx = e.clientX;
@@ -137,11 +147,28 @@ export function GoldCard({
       moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
       ty = clamp(by + dx * 0.35, 32);
       tx = clamp(bx - dy * 0.35, 24);
+      const edge = Math.abs(ty) >= 32 || Math.abs(tx) >= 24;
+      if (edge && !atEdge) {
+        haptic("rigid");
+        lastTick = performance.now();
+      }
+      atEdge = edge;
+      const sX = Math.round(tx / STEP);
+      const sY = Math.round(ty / STEP);
+      if (sX !== stepX || sY !== stepY) {
+        stepX = sX;
+        stepY = sY;
+        const now = performance.now();
+        if (!edge && now - lastTick > 40) {
+          lastTick = now;
+          hapticTick();
+        }
+      }
     };
     const up = () => {
       if (!dragging) return;
       dragging = false;
-      if (moved >= 6) haptic("light");
+      if (moved >= 6) haptic("soft");
       if (moved < 6) onOpenRef.current?.();
     };
     el.addEventListener("pointerdown", down);
