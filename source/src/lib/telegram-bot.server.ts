@@ -2050,25 +2050,25 @@ function escapeRe(s: string): string {
 // filer side of an arbitration, and known service handles. Easy to tune: add a
 // word here to exclude more, remove one to match more.
 const NON_ACCUSATION_LINE_RE =
-  /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|гарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|сервис|магазин|\bshop\b|подписк|вступай|вступить|присоединя|заказать|скидк|акци|цен[аы])/iu;
+  /(оспор|обжал|по\s*(всем\s*)?вопрос|для\s*связ|связ[ьи]|контакт|админ|administrator|\badmin\b|support|поддержк|dispute|appeal|помощ|реклам|сотруднич|менеджер|гарант|куп(лю|ить)|прод(ам|аж|ать)|прайс|услуг|сервис|магазин|\bshop\b|подписк|вступай|вступить|присоединя|заказать|скидк|акци|цен[аы]|\bcontact\b|\bdm\s+(me|us)\b|for\s+business|advertis|affiliate|promo\s*code|subscribe|join\s+(us|our)|discount|casino|giveaway|price\s*list)/iu;
 // Strict channels (e.g. WWH) are NOT pure blacklists — they mix arbitrations with
 // ad-stat rankings and other posts, so a bare mention there is often not an
 // accusation. In strict mode a mention counts only with an accusation signal on
 // the line (or the accused label just above it), plus arbitration lines.
 const ACCUSATION_LINE_RE =
-  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди)/iu;
+  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|scammer|ripper|ripped|\brip\b|stole|cheat|\bfake\b|beware|exit\s*scam|blocked\s+me|didn.?t\s+(pay|send|deliver|return)|never\s+(paid|sent|delivered|returned)|\bowes?\b|🚫|❌|🤡|⚠|🔴|🛑|📛|id\s*[:#]|айди)/iu;
 // Does the post read like a blacklist entry at all? A post without accused
 // fields only counts when it has some sign of a complaint somewhere: ads (a
 // casino's "@rainbetcom", a shop promo) mention handles too, but none of this.
 const SCAM_CONTEXT_RE =
-  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|блек|black\s*list|blacklist|арбитраж|arbitra|жалоб|доказ|пруф|proof|ущерб|сумм[аы]|не\s+верн|не\s+отда|заблокировал|пропал|🚫|❌|🤡|📛|🛑)/iu;
+  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|блек|black\s*list|blacklist|арбитраж|arbitra|жалоб|доказ|пруф|proof|ущерб|сумм[аы]|не\s+верн|не\s+отда|заблокировал|пропал|ripper|ripped|\brip\b|stole|cheat|beware|warning|exit\s*scam|didn.?t\s+(pay|send|deliver|return)|never\s+(paid|sent|delivered|returned)|blocked\s+me|evidence|screenshots?|refund|chargeback|\bowes?\b|\bdebt|amount|🚫|❌|🤡|📛|🛑)/iu;
 export function postHasScamContext(body: string): boolean {
   return SCAM_CONTEXT_RE.test(body || "");
 }
 
 // Russian word endings use \p{L}: in JS regexps \w matches Latin letters only.
 const ACCUSED_LABEL_RE =
-  /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer)\s*:?\s*$/iu;
+  /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer|fraudster|ripper|accused|offender)\s*:?\s*$/iu;
 
 function isStrictChannel(channel: CheckChannel): boolean {
   return /wwh/i.test(channel.title || "") || /wwh/i.test(channel.username || "");
@@ -2103,7 +2103,7 @@ function nickOnLine(line: string, nick: string): boolean {
 // "Ответчик: X", "Скамер — X", "Respondent: X": an accused label right before
 // the name on the same line.
 const ACCUSED_PREFIX_RE =
-  /(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer)\s*[:\-—–]\s*@?\s*$/iu;
+  /(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer|fraudster|ripper|accused|offender)\s*[:\-—–]\s*@?\s*$/iu;
 
 function idOnLine(line: string, id: string): boolean {
   const digits = (id || "").replace(/\D/g, "");
@@ -2140,7 +2140,7 @@ const INVISIBLE_RE = /[\u200B-\u200F\u2060-\u206F\uFE0E\uFE0F]/g;
 const NAME_TOKEN_RE = /@([A-Za-z][A-Za-z0-9_]{3,31})|(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})|(?<![\d/.,])(\d{5,15})(?![\d/,%$€₽]|\.\d)/gi;
 // Field labels that are not about the accused (and amounts/dates).
 const FIELD_NOT_ACCUSED_RE =
-  /(гарант|заявител|истец|пострадавш|жертв|автор|свидетел|рекоменд|связ|контакт|админ|модер|владел|owner|канал|чат|групп|предложк|вопрос|оспор|обжал|support|поддержк|реклам|менеджер|наш|подпис|сумм|ущерб|amount|цен|дат|обновл|итог|оплат|телефон|карт)/iu;
+  /(гарант|заявител|истец|пострадавш|жертв|автор|свидетел|рекоменд|связ|контакт|админ|модер|владел|owner|канал|чат|групп|предложк|вопрос|оспор|обжал|support|поддержк|реклам|менеджер|наш|подпис|сумм|ущерб|amount|цен|дат|обновл|итог|оплат|телефон|карт|guarant|escrow|middleman|^mm$|victim|reporter|report|submitted|author|witness|recommend|contact|admin|moder|channel|^chat$|group|question|appeal|dispute|^ads?$|advertis|promo|manager|^our$|subscri|price|^date$|updated|total|payment|paid|phone|^card$|lost|damage|sum$)/iu;
 
 function nameTokens(line: string): { value: string; index: number }[] {
   const out: { value: string; index: number }[] = [];
@@ -2170,6 +2170,9 @@ function accusedFields(body: string, selfHandle = ""): Set<string> {
   const self = selfHandle ? `@${selfHandle.replace(/^@/, "").toLowerCase()}` : "";
   const lines = body.split(/\r?\n/);
   const sig = signatureLineIndex(lines);
+  // "Label: @x" fields count only in a post that reads like a complaint (an ad's
+  // "Contact: @shop" is not a field); a bare "@x" line still does.
+  const complaint = postHasScamContext(body);
   for (let i = 0; i < lines.length; i++) {
     if (i === sig) continue;
     const line = lines[i]!.replace(INVISIBLE_RE, "");
@@ -2188,6 +2191,7 @@ function accusedFields(body: string, selfHandle = ""): Set<string> {
     // The label's first word decides: "Гарант кидалы:" is the garant, "Кидала из
     // чата:" is the scammer.
     if (!isField || (label && FIELD_NOT_ACCUSED_RE.test(label.split(" ")[0]!))) continue;
+    if (label && !complaint) continue;
     for (const t of tokens) fields.add(t.value);
   }
   return fields;
