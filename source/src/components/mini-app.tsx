@@ -237,21 +237,86 @@ function AccountLoading({ locale }: { locale: Locale }) {
 
 type BannerItem = { id: string; type: "image" | "video"; link: string; src: string; width?: number; height?: number };
 
+// Banners and the base size are remembered (memory + localStorage) so the home
+// screen draws them at once on every return and on the next app start; fresh
+// values are fetched in the background, starting as soon as the app loads.
+const BANNERS_KEY = "epb-banners";
+const BASE_KEY = "epb-base";
+function readCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+function writeCache(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+let bannersMem: BannerItem[] | null = null;
+let baseMem: BaseStats | null = null;
+let bannersReq: Promise<BannerItem[]> | null = null;
+let baseReq: Promise<BaseStats | null> | null = null;
+function cachedBanners(): BannerItem[] | null {
+  return (bannersMem ??= readCache<BannerItem[]>(BANNERS_KEY));
+}
+function cachedBase(): BaseStats | null {
+  return (baseMem ??= readCache<BaseStats>(BASE_KEY));
+}
+function fetchBanners(): Promise<BannerItem[]> {
+  bannersReq ??= getBanners()
+    .then((list) => {
+      const value = Array.isArray(list) ? (list as BannerItem[]) : [];
+      bannersMem = value;
+      writeCache(BANNERS_KEY, value);
+      return value;
+    })
+    .catch(() => cachedBanners() || [])
+    .finally(() => setTimeout(() => (bannersReq = null), 30_000));
+  return bannersReq;
+}
+function fetchBase(): Promise<BaseStats | null> {
+  baseReq ??= getBaseStats()
+    .then((r) => {
+      const value = r && typeof r.accounts === "number" ? (r as BaseStats) : null;
+      baseMem = value;
+      writeCache(BASE_KEY, value);
+      return value;
+    })
+    .catch(() => cachedBase())
+    .finally(() => setTimeout(() => (baseReq = null), 30_000));
+  return baseReq;
+}
+if (typeof window !== "undefined") {
+  // start both requests while the app is still booting
+  queueMicrotask(() => {
+    void fetchBanners();
+    void fetchBase();
+  });
+}
+
 // Promo banners at the very top of the app. A horizontal, swipeable strip;
 // videos and GIFs play muted and looped; a tap opens the banner's link.
 function Banners({ onLoaded }: { onLoaded?: (count: number) => void }) {
-  const [items, setItems] = useState<BannerItem[]>([]);
+  const [items, setItems] = useState<BannerItem[]>(() => cachedBanners() || []);
   const [active, setActive] = useState(0);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    void getBanners()
-      .then((list) => {
-        const value = Array.isArray(list) ? (list as BannerItem[]) : [];
-        setItems(value);
-        onLoaded?.(value.length);
-      })
-      .catch(() => onLoaded?.(0));
+    let alive = true;
+    void fetchBanners().then((value) => {
+      if (!alive) return;
+      setItems(value);
+      onLoaded?.(value.length);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!items.length) return null;
@@ -322,17 +387,15 @@ type BaseStats = { accounts: number; sources: number; updatedAt: number };
 // updated. Refreshed every minute while the home screen is open.
 function BaseCard() {
   const locale = useBlacklistStore((s) => s.locale);
-  const [stats, setStats] = useState<BaseStats | null>(null);
+  const [stats, setStats] = useState<BaseStats | null>(() => cachedBase());
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     let alive = true;
     const load = () =>
-      void getBaseStats()
-        .then((r) => {
-          if (alive) setStats(r && typeof r.accounts === "number" ? (r as BaseStats) : null);
-        })
-        .catch(() => {});
+      void fetchBase().then((value) => {
+        if (alive) setStats(value);
+      });
     load();
     const id = setInterval(() => {
       setNow(Date.now());
@@ -405,7 +468,8 @@ function Home({
     ? `@${identity.username}`
     : identity.firstName || (identity.telegramId ? `ID ${identity.telegramId}` : "");
   const canUse = Boolean(identity.telegramId);
-  const [noBanners, setNoBanners] = useState(false);
+  // known from the last visit, so the base card doesn't wait for the banners request
+  const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
