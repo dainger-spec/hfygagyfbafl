@@ -92,6 +92,40 @@ def add_glow(frame, spr, cx, cy, color, k):
     s = spr[ya - y0:yb - y0, xa - x0:xb - x0][..., None]
     frame[ya:yb, xa:xb] += s * color * k
 
+# ---- engraved "banknote" texture, the same one the mini app has behind it:
+# a family of fine wavy lines plus a steeper family in two soft patches. Two
+# copies (the second mirrored and fainter) drift against each other, so the
+# moire between them slowly shifts. It stays under the medallion and stars.
+TS = 2.6  # the pattern was drawn 400px wide; scale it up for this frame
+def flow_a(x, y):
+    return (7.0 * np.sin(x / 41 + y / 67) + 4.5 * np.sin(x / 23 - y / 49 + 1.3)
+            + 3.0 * np.sin((x + 2 * y) / 31 + 0.7) + 2.0 * np.sin(x / 11 + y / 90 + 2.1))
+def flow_b(x, y):
+    return (6.0 * np.sin(y / 37 + x / 71 + 0.4) + 4.0 * np.sin(y / 21 - x / 55 + 2.0)
+            + 2.5 * np.sin((y - x) / 27 + 1.1))
+def line_mask(phase, spacing):
+    # anti-aliased lines where the phase crosses a whole number
+    d = np.abs(phase - np.round(phase)) * spacing * TS
+    return np.clip(1.0 - (d - 0.55) / 0.9, 0, 1)
+PATCH = np.clip(np.maximum(
+    1 - np.sqrt(((xx / W - 0.22) / 0.38) ** 2 + ((yy / H - 0.74) / 0.38) ** 2),
+    1 - np.sqrt(((xx / W - 0.80) / 0.32) ** 2 + ((yy / H - 0.30) / 0.32) ** 2)), 0, 1)
+def engrave_layer(ox, oy, rot, mirror):
+    x = (W - xx if mirror else xx) - CX
+    y = yy - CY
+    c, s_ = math.cos(rot), math.sin(rot)
+    u = (c * x - s_ * y - ox + CX) / TS
+    v = (s_ * x + c * y - oy + CY) / TS
+    lines = line_mask((v - flow_a(u, v)) / 3.4, 3.4)
+    steep = line_mask((u - 0.42 * v - flow_b(u, v)) / 3.6, 3.6) * PATCH * 0.8
+    return np.maximum(lines, steep)
+# brighter towards the bottom, like the light in the mini app; calmer in the
+# middle so the medallion and the star ring keep a clean dark ground
+TEX_GRAD = (0.06 + 0.19 * (yy / H) ** 1.4) * (0.6 + 0.4 * np.clip(1 - ((xx - CX) / (W * 0.75)) ** 2, 0, 1))
+TEX_CLEAR = 0.3 + 0.7 * np.clip((rr - 150) / 230, 0, 1) ** 1.5
+TEX_BASE = TEX_GRAD * TEX_CLEAR
+TEX_COLOR = np.array([246, 200, 90], np.float32) / 255
+
 STAR_GLOW = np.asarray(Image.fromarray((STAR[..., 3] * 255).astype(np.uint8)).resize((140, 140)).filter(ImageFilter.GaussianBlur(10))).astype(np.float32) / 255
 
 for f in range(N):
@@ -110,6 +144,14 @@ for f in range(N):
     light = (glow + glow2)[..., None]
     frame += light * WARM
     frame *= 0.35 + 0.65 * vign
+
+    # ---- the engraved texture, lit a little more where the warm light is
+    ph = 2 * math.pi * t / DUR
+    la = engrave_layer(0.025 * W * math.sin(ph), 0.015 * H * math.cos(ph), math.radians(0.5 * math.sin(ph)), False)
+    lb = engrave_layer(-0.02 * W * math.sin(ph + 1.1), 0.02 * H * math.sin(ph), math.radians(-0.6 * math.cos(ph)), True)
+    tex = 1 - (1 - la) * (1 - 0.45 * lb)
+    tex_k = TEX_BASE * (0.75 + 2.2 * light[..., 0]) * smooth(t / 0.9)
+    frame += (tex * tex_k)[..., None] * TEX_COLOR
 
     # ---- star ring angle: still during intro, then eases into a steady spin
     w_spin = 2 * math.pi / 24  # one turn per 24 s

@@ -127,7 +127,7 @@ type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
   miniAppUrl?: string;
-  cards?: Partial<Record<"welcome" | "welcomeAnim2" | "submitted" | "published", string>>;
+  cards?: Partial<Record<"welcome" | "welcomeAnim3" | "submitted" | "published", string>>;
   cardStamp?: string;
   relayChats?: RelayChat[];
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
@@ -6540,7 +6540,7 @@ async function sendCard(
   // The /start card is an animation (medallion + circling stars); the still
   // picture below stays as the fallback if Telegram refuses it.
   if (kind === "welcome") {
-    const cachedAnim = bindings.cards?.welcomeAnim2;
+    const cachedAnim = bindings.cards?.welcomeAnim3;
     if (cachedAnim) {
       const sent = await trySend("sendAnimation", (c, markup) => ({
         chat_id: chatId,
@@ -6550,7 +6550,7 @@ async function sendCard(
         ...rest(markup),
       }));
       if (sent) return;
-      if (bindings.cards) delete bindings.cards.welcomeAnim2;
+      if (bindings.cards) delete bindings.cards.welcomeAnim3;
       saveBindings();
     }
     let mp4: Buffer | null = null;
@@ -6582,7 +6582,7 @@ async function sendCard(
         }
         const fileId = sent.animation?.file_id || sent.document?.file_id;
         if (fileId) {
-          bindings.cards = { ...bindings.cards, welcomeAnim2: fileId };
+          bindings.cards = { ...bindings.cards, welcomeAnim3: fileId };
           saveBindings();
         }
         return;

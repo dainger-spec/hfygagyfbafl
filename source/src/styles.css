@@ -461,9 +461,10 @@
   letter-spacing: 0.012em;
 }
 
-/* Home actions in the style of the base card: dark, engraved lines, a soft
-   light on the right. "Подать жалобу" carries a bold red SCAM, "Проверка
-   контрагента" is grey with a magnifier. */
+/* Home actions in the style of the base card: engraved lines over an even
+   side gradient (dark on the left, lighter on the right). "Подать жалобу" is
+   gold fading into black with a big SCAM, "Проверка контрагента" is grey with
+   a magnifier. */
 .epb-act {
   position: relative;
   isolation: isolate;
@@ -492,21 +493,17 @@
   z-index: -1;
   pointer-events: none;
   background: repeating-linear-gradient(180deg, var(--act-line) 0, var(--act-line) 0.75px, transparent 0.75px, transparent 2px);
-  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 85%);
-  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.6) 55%, #000 85%);
+  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.4), #000);
+  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.4), #000);
 }
 .epb-act-scam {
-  --act-line: rgba(222, 196, 120, 0.2);
-  background:
-    radial-gradient(90% 160% at 100% 50%, rgba(241, 187, 76, 0.22), transparent 60%),
-    #0b0b0b;
-  box-shadow: 0 0 0 1px rgba(241, 187, 76, 0.28);
+  --act-line: rgba(255, 222, 140, 0.14);
+  background: linear-gradient(90deg, #0c0a06 0%, #2e220c 30%, #5c4315 60%, #94692a 85%, #b8862f 100%);
+  box-shadow: 0 0 0 1px rgba(241, 187, 76, 0.35);
 }
 .epb-act-gray {
-  --act-line: rgba(255, 255, 255, 0.08);
-  background:
-    radial-gradient(90% 160% at 100% 50%, rgba(255, 255, 255, 0.12), transparent 60%),
-    #1a1a1a;
+  --act-line: rgba(255, 255, 255, 0.07);
+  background: linear-gradient(90deg, #0e0e0e 0%, #181818 30%, #242424 60%, #333333 85%, #3c3c3c 100%);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 .epb-act-scam-word {
@@ -520,8 +517,8 @@
   font-weight: 800;
   line-height: 1;
   letter-spacing: 0.01em;
-  color: #f2be55;
-  opacity: 0.18;
+  color: #ffe2a0;
+  opacity: 0.2;
   /* fades out towards the label */
   -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 75%);
   mask-image: linear-gradient(90deg, transparent 0%, #000 75%);
