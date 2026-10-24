@@ -5204,6 +5204,14 @@ class PartialSendError extends Error {
   }
 }
 
+// The channel and the relay chats get one post: the text plus as much evidence
+// as fits in a single album (photos and videos first, up to 10). The arbiters'
+// chat still receives every file.
+function oneAlbum<T extends { type?: string; kind?: string }>(files: T[]): T[] {
+  const visual = files.filter((f) => (f.type || f.kind) !== "document");
+  return (visual.length ? visual : files).slice(0, 10);
+}
+
 async function sendPostToChat(chat_id: string, html: string, files: MediaRef[]): Promise<number[]> {
   const ids: number[] = [];
   try {
@@ -5220,6 +5228,7 @@ async function sendPostParts(chat_id: string, html: string, files: MediaRef[], i
       if (id) ids.push(id);
     }
   };
+  files = oneAlbum(files);
   const packed = packCaption(html);
   const parts = packed.leftover ? splitHtml(packed.leftover, 4090) : [];
   if (!files.length) {
