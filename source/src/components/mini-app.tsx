@@ -616,6 +616,7 @@ const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number; text?: "
   { src: "/partners/cookie.png", alt: "Cookie Blacklist", r: 1 },
   { src: "/partners/illidan.png", alt: "Illidan Blacklist Community", r: 129 / 128 },
   { src: "/partners/imperial.png", alt: "Imperial Black List", r: 89 / 128 },
+  { src: "/partners/shopping-avenue.png", alt: "Shopping Avenue скам-лист", r: 239 / 128, s: 0.95 },
 ];
 
 function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
