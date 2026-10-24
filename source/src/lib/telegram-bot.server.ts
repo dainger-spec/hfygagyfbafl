@@ -3820,12 +3820,12 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
 // ---------- /im: a member's card in a group ----------
 // The card of the app (metal by tier, the person's name, the base count) as a
 // short looping animation that tilts in 3D, with the person's numbers below.
-// Drawing one takes ~1 s of CPU, so cards are drawn one at a time and a
-// finished one is reused (by Telegram file id): as it is for 10 minutes, after
-// that it is drawn anew, unless the person had cards drawn just now (repeated
-// /im): then the last one is sent again. The bot draws at most 30 a minute
-// (about half of one core at the most); sending a saved card is not limited by
-// that.
+// Drawing one takes ~3 s of CPU (in worker threads, so the bot itself is not
+// held up; about 1 s on a 4-core server), so cards are drawn one at a time and
+// a finished one is reused (by Telegram file id): as it is for 10 minutes,
+// after that it is drawn anew, unless the person had cards drawn just now
+// (repeated /im): then the last one is sent again. The bot draws at most 30 a
+// minute; sending a saved card is not limited by that.
 const imCache = new Map<string, { fileId: string; at: number }>();
 let imQueue: Promise<unknown> = Promise.resolve();
 let imWaiting = 0;
@@ -3970,7 +3970,7 @@ function memberMarkup(uid: string, side: "front" | "back", menu = false) {
 // The animation of one side: Telegram file id when it was sent recently,
 // otherwise drawn now (one at a time). The front is the same for everyone with
 // that name and metal; the back is the person's own.
-async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { gif: Buffer } | null> {
+async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { video: Buffer } | null> {
   const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
   const cached = imCache.get(key);
   if (cached && Date.now() - cached.at < IM_FRESH_MS) return { fileId: cached.fileId };
@@ -3982,8 +3982,8 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
   imWaiting++;
   const job = imQueue.then(async () => {
     try {
-      const { renderMemberGif } = await import("@/lib/member-gif.server");
-      return await renderMemberGif({
+      const { renderMemberVideo } = await import("@/lib/member-gif.server");
+      return await renderMemberVideo({
         metal: info.metal,
         holder: info.holder,
         count: blacklistBaseCached() || null,
@@ -3994,7 +3994,13 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
     }
   });
   imQueue = job.catch(() => {});
-  return { gif: await job };
+  return { video: await job };
+}
+
+// The card is a short silent MP4, which Telegram plays as a looping animation.
+const CARD_VIDEO_SIZE = { width: 800, height: 550, duration: 3 };
+function cardFile(video: Buffer) {
+  return new File([new Uint8Array(video)], "card.mp4", { type: "video/mp4" });
 }
 
 function rememberAnimation(info: MemberInfo, side: "front" | "back", sent: { animation?: { file_id: string }; document?: { file_id: string } } | null) {
@@ -4024,23 +4030,24 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
   try {
     const anim = await memberAnimation(info, "front");
     if (!anim) return "busy";
-    let gif: Buffer | null = "gif" in anim ? anim.gif : null;
+    let video: Buffer | null = "video" in anim ? anim.video : null;
     if ("fileId" in anim) {
       const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption: info.caption, parse_mode: "HTML", ...reply, reply_markup: markup });
       if (sent) return "sent";
       // the saved file stopped working: draw it again
       imCache.delete(`${info.metal}|${info.holder}`);
       const again = await memberAnimation(info, "front");
-      gif = again && "gif" in again ? again.gif : null;
+      video = again && "video" in again ? again.video : null;
     }
-    if (!gif) throw new Error("no card");
+    if (!video) throw new Error("no card");
     const form = new FormData();
     form.set("chat_id", String(chatId));
     form.set("caption", info.caption);
     form.set("parse_mode", "HTML");
     if (opts.replyTo) form.set("reply_to_message_id", String(opts.replyTo));
     form.set("reply_markup", JSON.stringify(markup));
-    form.set("animation", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
+    form.set("animation", cardFile(video));
+    for (const [k, v] of Object.entries(CARD_VIDEO_SIZE)) form.set(k, String(v));
     rememberAnimation(info, "front", await tgForm("sendAnimation", form));
   } catch (err) {
     console.error("[epb] im", err);
@@ -4090,13 +4097,13 @@ async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
       const ok = await tgSoft("editMessageMedia", { chat_id: cb.message.chat.id, message_id: cb.message.message_id, media: { ...media, media: anim.fileId }, reply_markup: markup });
       if (ok) return;
     }
-    const gif = "gif" in anim ? anim.gif : null;
-    if (!gif) return;
+    const video = "video" in anim ? anim.video : null;
+    if (!video) return;
     const form = new FormData();
     form.set("chat_id", String(cb.message.chat.id));
     form.set("message_id", String(cb.message.message_id));
-    form.set("media", JSON.stringify({ ...media, media: "attach://card" }));
-    form.set("card", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
+    form.set("media", JSON.stringify({ ...media, ...CARD_VIDEO_SIZE, media: "attach://card" }));
+    form.set("card", cardFile(video));
     form.set("reply_markup", JSON.stringify(markup));
     rememberAnimation(info, side, await tgForm("editMessageMedia", form));
   } catch (err) {

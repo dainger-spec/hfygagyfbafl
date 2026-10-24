@@ -1,6 +1,6 @@
 """Builds the assets of the /im card animation (src/lib/member-gif-assets.ts).
 
-For each card metal: the card face at 600x378 with the parts that never change
+For each card metal: the card face at 750x472 with the parts that never change
 (the art, EUROPE PRIVATE, the ribbon) as raw RGBA, gzipped. Plus glyph bitmaps
 for the holder's name and the count, which the server draws per user before it
 tilts the card frame by frame (src/lib/member-gif.server.ts).
@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FONTS = os.path.join(HERE, "fonts")
 INTER = os.environ.get("INTER_DIR", "/usr/share/fonts/opentype/inter")
-CW, CH = 600, 378
+CW, CH = 750, 472
 K = CW / 1200  # the app's card is laid out on a 1200-wide box
 SS = 3  # text is drawn larger and reduced, for smooth edges
 
