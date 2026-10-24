@@ -207,7 +207,7 @@ function LanguageGate({ onPicked }: { onPicked: () => void }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
       <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem />
-      <h1 className="mt-7 font-display text-[clamp(30px,10.5vw,44px)] leading-[1.05] font-extrabold tracking-tight uppercase">
+      <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
           <span className="epb-gold-text block">Blacklist</span>
         </h1>
@@ -483,13 +483,14 @@ function Home({
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
         <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
-        <h1 className="mt-7 font-display text-[clamp(30px,10.5vw,44px)] leading-[1.05] font-extrabold tracking-tight uppercase">
+        <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
           <span className="epb-gold-text block">Blacklist</span>
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
-          <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
+          {/* solid gold, no gradient */}
+          <Button size="lg" className="w-full rounded-xl bg-none" onClick={onComplaint} disabled={!canUse}>
             {t(locale, "fileComplaint")}
           </Button>
           {checkOn ? (
