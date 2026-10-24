@@ -3749,10 +3749,10 @@ async function sendLargeVideo(
     );
     if (doc) return { message_id: doc.message_id, chat: doc.chat, fileId: doc.document?.file_id, kind: "video" };
   }
-  const link = url || file.name || "видео";
+  const link = escapeHtml(url || file.name || "видео");
   const sent = await tg<{ message_id: number; chat: { id: number } }>("sendMessage", {
     chat_id: chatId,
-    text: [opts.caption, `Видео: ${escapeHtml(file.name || "файл")}`, url ? `<a href="${url}">скачать</a>` : link]
+    text: [opts.caption, `Видео: ${escapeHtml(file.name || "файл")}`, url ? `<a href="${escapeHtml(url)}">скачать</a>` : link]
       .filter(Boolean)
       .join("\n"),
     parse_mode: "HTML",
@@ -3930,7 +3930,20 @@ export type MemberCardBack = {
 };
 
 // The app's card: the level and its back.
+// Kept for a few seconds per person: the app may ask often, and each answer
+// looks the person up in the base.
+const cardForCache = new Map<string, { at: number; value: { published: number; back: MemberCardBack } }>();
 export function memberCardFor(u: { id: string; username?: string; firstName?: string; lastName?: string }): { published: number; back: MemberCardBack } {
+  const memo = `${u.id}|${u.username || ""}|${u.firstName || ""}|${u.lastName || ""}`;
+  const hit = cardForCache.get(memo);
+  if (hit && Date.now() - hit.at < 20_000) return hit.value;
+  const value = memberCardForUncached(u);
+  if (cardForCache.size > 2000) cardForCache.clear();
+  cardForCache.set(memo, { at: Date.now(), value });
+  return value;
+}
+
+function memberCardForUncached(u: { id: string; username?: string; firstName?: string; lastName?: string }): { published: number; back: MemberCardBack } {
   const f = memberFacts({ id: Number(u.id), username: u.username, first_name: u.firstName, last_name: u.lastName });
   const r = registrationEstimate(f.uid);
   return {
@@ -7447,7 +7460,7 @@ async function botSponsorsText(locale: Locale): Promise<string> {
     return lines.join("\n");
   }
   for (const s of list.slice(0, 20)) {
-    lines.push(s.link ? `• <a href="${s.link}">${escapeHtml(s.title)}</a>` : `• ${escapeHtml(s.title)}`);
+    lines.push(s.link ? `• <a href="${escapeHtml(s.link)}">${escapeHtml(s.title)}</a>` : `• ${escapeHtml(s.title)}`);
   }
   if (list.length > 20) lines.push(`… +${list.length - 20}`);
   return lines.join("\n");
@@ -7564,7 +7577,7 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
       const wwh = /wwh/i.test(c.channelTitle || "");
       const name = wwh ? "WWH" : c.channelTitle || "источник";
       // WWH shown without a message link (same rule as the app).
-      lines.push(wwh ? `• ${escapeHtml(name)}` : `• <a href="${c.link}">${escapeHtml(name)}</a>`);
+      lines.push(wwh ? `• ${escapeHtml(name)}` : `• <a href="${escapeHtml(c.link)}">${escapeHtml(name)}</a>`);
     }
     lines.push("");
   }
