@@ -670,6 +670,10 @@
   background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 26%);
 }
 
+.epb-fade-in {
+  animation: epb-sheet-in 0.3s ease-out both;
+}
+
 /* a member card opened full screen from the tiers page */
 .epb-card-sheet {
   position: fixed;

@@ -183,6 +183,7 @@ export function MiniApp({
             onBack={() => onPage("home")}
             onComplaint={openComplaint}
             holder={identity.username || identity.firstName || "EPB Member"}
+            uid={identity.telegramId}
           />
         ) : null}
         {showApp && page === "done" ? (
@@ -325,43 +326,51 @@ function fetchBase(): Promise<BaseStats | null> {
   return baseReq;
 }
 // How many of the user's complaints became blacklists (picks the member card).
+// Cached per Telegram account, so a second account on the same phone never
+// shows the first one's card.
 const CARD_KEY = "epb-card-published";
-let cardMem: number | null = null;
+let cardMem: { id: string; n: number } | null = null;
 let cardReq: Promise<number | null> | null = null;
-function cachedPublished(): number | null {
-  if (cardMem == null) {
-    const v = readCache<number>(CARD_KEY);
-    cardMem = typeof v === "number" ? v : null;
-  }
-  return cardMem;
+function cachedPublished(uid: string): number | null {
+  cardMem ??= readCache<{ id: string; n: number }>(CARD_KEY);
+  return cardMem && cardMem.id === uid && typeof cardMem.n === "number" ? cardMem.n : null;
 }
-function fetchPublished(): Promise<number | null> {
+function fetchPublished(uid: string): Promise<number | null> {
   const initData = telegramInitData();
-  if (!initData) return Promise.resolve(cachedPublished());
+  if (!initData || !uid) return Promise.resolve(cachedPublished(uid));
   cardReq ??= getMyCard({ data: { initData } })
     .then((r) => {
-      if (!r?.ok) return cachedPublished();
-      cardMem = r.published;
-      writeCache(CARD_KEY, r.published);
+      if (!r?.ok) return cachedPublished(uid);
+      cardMem = { id: uid, n: r.published };
+      writeCache(CARD_KEY, cardMem);
       return r.published;
     })
-    .catch(() => cachedPublished())
+    .catch(() => cachedPublished(uid))
     .finally(() => setTimeout(() => (cardReq = null), 30_000));
   return cardReq;
 }
-function usePublished(ready = true): number | null {
-  const [value, setValue] = useState<number | null>(() => cachedPublished());
+// `settled`: the server answered (or failed), so the card can show even
+// without a number (then it is the starting one).
+function usePublished(uid: string): { value: number | null; settled: boolean } {
+  const [value, setValue] = useState<number | null>(() => cachedPublished(uid));
+  const [settled, setSettled] = useState(() => cachedPublished(uid) != null);
   useEffect(() => {
-    if (!ready) return;
+    if (!uid) return;
     let alive = true;
-    void fetchPublished().then((v) => {
-      if (alive && v != null) setValue(v);
+    setValue(cachedPublished(uid));
+    void fetchPublished(uid).then((v) => {
+      if (!alive) return;
+      if (v != null) setValue(v);
+      setSettled(true);
     });
+    // never keep the card hidden for long on a slow connection
+    const timer = setTimeout(() => alive && setSettled(true), 2500);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
-  }, [ready]);
-  return value;
+  }, [uid]);
+  return { value, settled };
 }
 
 if (typeof window !== "undefined") {
@@ -556,8 +565,10 @@ function Home({
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
   const [base, setBase] = useState<BaseStats | null>(() => cachedBase());
-  const published = usePublished(Boolean(identity.telegramId));
+  const { value: published, settled: cardSettled } = usePublished(identity.telegramId);
   const tier = tierFor(published ?? 0);
+  // until the level is known the card stays invisible (no flash of the wrong metal)
+  const cardShown = published != null || cardSettled;
   const holder = identity.username || identity.firstName || "EPB Member";
   useEffect(() => {
     let alive = true;
@@ -585,7 +596,10 @@ function Home({
             haptic("light");
             onTiers?.();
           }}
-          className="mt-5 inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm font-semibold text-muted transition-colors hover:text-fg"
+          className={cn(
+            "mt-5 inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm font-semibold text-muted transition-[color,opacity] duration-300 hover:text-fg",
+            !cardShown && "opacity-0",
+          )}
         >
           <span>
             {t(locale, "tierYou")}
@@ -595,15 +609,22 @@ function Home({
           <ChevronRight className="size-4" />
         </button>
         <div className="mt-3 w-full">
-          <MemberCard
-            metal={tier.metal}
-            holder={holder}
-            count={base?.accounts ?? null}
-            ribbon={t(locale, "cardRibbon")}
-            locale={locale}
-            onOpen={onBase}
-            width="min(290px, 76vw)"
-          />
+          {cardShown ? (
+            <div className="epb-fade-in">
+              <MemberCard
+                metal={tier.metal}
+                holder={holder}
+                count={base?.accounts ?? null}
+                ribbon={t(locale, "cardRibbon")}
+                locale={locale}
+                onOpen={onBase}
+                width="min(290px, 76vw)"
+              />
+            </div>
+          ) : (
+            // same size as the card, so nothing jumps when it appears
+            <div className="mx-auto" style={{ width: "min(290px, 76vw)", aspectRatio: "1200 / 756" }} />
+          )}
         </div>
         <h1 className="epb-title-heavy mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
@@ -1005,11 +1026,21 @@ const TIER_INFO: Record<Metal, Record<Locale, string>> = {
   },
 };
 
-function TiersPage({ onBack, onComplaint, holder }: { onBack: () => void; onComplaint: () => void; holder: string }) {
+function TiersPage({
+  onBack,
+  onComplaint,
+  holder,
+  uid,
+}: {
+  onBack: () => void;
+  onComplaint: () => void;
+  holder: string;
+  uid: string;
+}) {
   const locale = useBlacklistStore((s) => s.locale);
   const [opened, setOpened] = useState<Metal | null>(null);
   const [base] = useState<BaseStats | null>(() => cachedBase());
-  const published = usePublished();
+  const { value: published } = usePublished(uid);
   const n = published ?? 0;
   const current = tierFor(n);
   const next = nextTier(n);
@@ -1078,7 +1109,7 @@ function TiersPage({ onBack, onComplaint, holder }: { onBack: () => void; onComp
                 )}
               >
                 <img
-                  src={CARD_LOOKS[tier.metal].art}
+                  src={CARD_LOOKS[tier.metal].thumb}
                   alt=""
                   draggable={false}
                   className={cn("h-[52px] w-[82px] shrink-0 rounded-[6px] object-cover shadow-[0_4px_10px_rgba(0,0,0,0.5)]", !reached && "opacity-45 grayscale-[35%]")}

@@ -1,11 +1,12 @@
-"""Draws the gold card shown on the mini app home screen (public/brand/card.webp).
+"""Draws the member cards shown in the mini app (public/brand/card-<metal>.webp,
+plus a small card-<metal>-thumb.webp for lists).
 
 The art carries the engraved ground, the frame, the chip and the medallion;
 the words (EUROPE PRIVATE, BLACK LIST, the ribbon and the base count) are laid
 over it in the page so they stay sharp and the count stays live.
 
-    python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card.webp
-    python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-silver.webp silver
+    python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-gold.webp gold
+    python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-green.webp green
     (metals: green, gold, platinum, black — the American Express ladder)
 """
 import math
@@ -317,6 +318,10 @@ def main():
     out = img.resize((W, H), Image.LANCZOS).convert("RGB")
     out.save(OUT, quality=90, method=6) if OUT.endswith(".webp") else out.save(OUT)
     print(OUT, os.path.getsize(OUT), "bytes")
+    if OUT.endswith(".webp"):
+        thumb = OUT[: -len(".webp")] + "-thumb.webp"
+        out.resize((264, 166), Image.LANCZOS).save(thumb, quality=85, method=6)
+        print(thumb, os.path.getsize(thumb), "bytes")
 
 
 main()

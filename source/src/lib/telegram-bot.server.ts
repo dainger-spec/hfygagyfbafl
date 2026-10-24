@@ -404,6 +404,28 @@ function rememberPublished(key: string) {
     saveTiers();
   }
 }
+// A blacklist the admins deleted everywhere no longer counts for its author.
+function forgetPublished(key: string) {
+  const uid = pendingPosts[key]?.victimId;
+  const list = uid ? publishedByUser[uid] : undefined;
+  if (!uid || !list?.includes(key)) return;
+  publishedByUser[uid] = list.filter((k) => k !== key);
+  saveTiers();
+}
+// Blacklists published before the counter existed: copy them in once at start,
+// so pruning the complaint records later can't lower anyone's card.
+{
+  let added = false;
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    if (rec.status !== "published" || !rec.victimId || rec.deletedEverywhere) continue;
+    const list = (publishedByUser[rec.victimId] ||= []);
+    if (!list.includes(key)) {
+      list.push(key);
+      added = true;
+    }
+  }
+  if (added) saveTiers();
+}
 // Published blacklists filed by this user. A record deleted everywhere by the
 // admins stops counting; one pruned from the complaint list still counts.
 export function publishedCountFor(telegramId: string): number {
@@ -5662,6 +5684,7 @@ async function deletePublishedEverywhere(
   rec.deletedEverywhere = true;
   rec.channelPosted = false;
   rec.removedFromCheck = true;
+  forgetPublished(key);
   rec.relayDeliveries = [];
   rec.channelMsgIds = [];
   savePending();

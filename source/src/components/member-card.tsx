@@ -12,6 +12,8 @@ import type { Metal } from "@/lib/tiers";
 // rasterise such layers at low resolution and the small print goes blurry.)
 type Look = {
   art: string;
+  // small copy for lists
+  thumb: string;
   ink: string;
   ribbon: string;
   // raised lettering: a light edge above, a dark one below
@@ -21,10 +23,46 @@ type Look = {
   loOpacity: number;
 };
 export const CARD_LOOKS: Record<Metal, Look> = {
-  green: { art: "/brand/card-green.webp", ink: "#0e1d11", ribbon: "#8aa886", hi: "#e6f4e2", hiOpacity: 0.65, lo: "#0a1a0d", loOpacity: 0.5 },
-  gold: { art: "/brand/card.webp", ink: "#1d1810", ribbon: "#d2b468", hi: "#fff4d2", hiOpacity: 0.8, lo: "#3b2a06", loOpacity: 0.45 },
-  platinum: { art: "/brand/card-platinum.webp", ink: "#0e131b", ribbon: "#98a2b0", hi: "#eef3fa", hiOpacity: 0.6, lo: "#0b0f16", loOpacity: 0.5 },
-  black: { art: "/brand/card-black.webp", ink: "#d6d6dc", ribbon: "#1e1e21", hi: "#000000", hiOpacity: 0.9, lo: "#ffffff", loOpacity: 0.12 },
+  green: {
+    art: "/brand/card-green.webp",
+    thumb: "/brand/card-green-thumb.webp",
+    ink: "#0e1d11",
+    ribbon: "#8aa886",
+    hi: "#e6f4e2",
+    hiOpacity: 0.65,
+    lo: "#0a1a0d",
+    loOpacity: 0.5,
+  },
+  gold: {
+    art: "/brand/card-gold.webp",
+    thumb: "/brand/card-gold-thumb.webp",
+    ink: "#1d1810",
+    ribbon: "#d2b468",
+    hi: "#fff4d2",
+    hiOpacity: 0.8,
+    lo: "#3b2a06",
+    loOpacity: 0.45,
+  },
+  platinum: {
+    art: "/brand/card-platinum.webp",
+    thumb: "/brand/card-platinum-thumb.webp",
+    ink: "#0e131b",
+    ribbon: "#98a2b0",
+    hi: "#eef3fa",
+    hiOpacity: 0.6,
+    lo: "#0b0f16",
+    loOpacity: 0.5,
+  },
+  black: {
+    art: "/brand/card-black.webp",
+    thumb: "/brand/card-black-thumb.webp",
+    ink: "#d6d6dc",
+    ribbon: "#1e1e21",
+    hi: "#000000",
+    hiOpacity: 0.9,
+    lo: "#ffffff",
+    loOpacity: 0.12,
+  },
 };
 // the wide, flat-topped face of a charge card
 const CARD_FONT = "Archivo, Manrope, sans-serif";
@@ -164,12 +202,22 @@ export function MemberCard({
       shadow.style.opacity = (0.75 - lift * 0.2).toFixed(3);
       raf = requestAnimationFrame(frame);
     };
+    // the animation runs only while the card is on screen and the app is visible
+    let onScreen = true;
     const run = () => {
       cancelAnimationFrame(raf);
       last = 0;
-      if (!document.hidden) raf = requestAnimationFrame(frame);
+      if (!document.hidden && onScreen) raf = requestAnimationFrame(frame);
     };
     run();
+    const io =
+      typeof IntersectionObserver === "function"
+        ? new IntersectionObserver((entries) => {
+            onScreen = entries.some((e) => e.isIntersecting);
+            run();
+          })
+        : null;
+    io?.observe(el);
 
     const down = (e: PointerEvent) => {
       dragging = true;
@@ -206,6 +254,7 @@ export function MemberCard({
     document.addEventListener("visibilitychange", run);
     return () => {
       cancelAnimationFrame(raf);
+      io?.disconnect();
       el.removeEventListener("pointerdown", down);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
