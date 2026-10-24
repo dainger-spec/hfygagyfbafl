@@ -1,5 +1,5 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, RefreshCw, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, RefreshCw, Scale, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { CARD_LOOKS, MemberCard, type CardBackInfo } from "@/components/member-card";
 import { TIERS, nextTier, tierFor, type Metal } from "@/lib/tiers";
@@ -2154,9 +2154,9 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
               ) : null}
               {data.forum?.length ? (
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-sm font-bold text-gold">
-                    <ShieldAlert className="size-4" />
-                    {t(locale, "checkForumArb", { source: data.forum[0]!.source, n: String(data.forum.length) })}
+                  <div className="flex items-center gap-2 text-sm font-bold text-muted">
+                    <Scale className="size-4" />
+                    {t(locale, "checkForumArb", { n: String(data.forum.length) })}
                   </div>
                   {data.forum.map((f) => (
                     <a
@@ -2175,10 +2175,16 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                           {t(locale, "postOpen")} <ExternalLink className="size-3" />
                         </span>
                       </div>
-                      <p className="mt-1 text-xs text-muted">{[f.amount, f.status, fmtDate(f.date)].filter(Boolean).join(" · ")}</p>
+                      <p className="mt-1 text-xs text-muted">
+                        {f.amount}
+                        {f.status ? (
+                          // an open case stands out a little; a resolved one is just data
+                          <span className={cn(/решено|resolved/i.test(f.status) ? "" : "font-semibold text-gold")}> · {f.status}</span>
+                        ) : null}
+                        {fmtDate(f.date) ? ` · ${fmtDate(f.date)}` : ""} · {f.source}
+                      </p>
                     </a>
                   ))}
-                  <p className="text-[11px] leading-relaxed text-subtle">{t(locale, "forumArbNote")}</p>
                 </div>
               ) : null}
             </div>

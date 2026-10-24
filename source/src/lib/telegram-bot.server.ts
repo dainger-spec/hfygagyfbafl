@@ -5359,9 +5359,6 @@ export function checkSources(): { key: string; title: string }[] {
     if (!out.some((o) => o.key === `ch:${name}`)) out.push({ key: `ch:${name}`, title: name });
   }
   out.push({ key: "manual", title: "Сторонние блеклисты" });
-  if (forumArbs.length) {
-    for (const name of [...new Set(forumArbs.map((a) => a.source))]) out.push({ key: `forum:${name}`, title: `Арбитражи ${name}` });
-  }
   return out;
 }
 
@@ -5781,7 +5778,6 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   if (wallet) {
     const forum = matchForumArbs({ wallet });
     const sourceHits: Record<string, number> = {};
-    for (const f of forum) sourceHits[`forum:${f.source}`] = (sourceHits[`forum:${f.source}`] || 0) + 1;
     return { query: { username: "", id: "" }, epb: [], channels: [], manual: [], forum, sourceHits };
   }
   const parsed = parseTelegramInput(input);
@@ -5933,7 +5929,6 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
   const forum = excluded ? [] : matchForumArbs({ uname: [uname, ...oldNames].find(Boolean), nick });
   for (const o of excluded ? [] : oldNames) for (const f of matchForumArbs({ uname: o })) if (!forum.some((x) => x.key === f.key)) forum.push(f);
   const sourceHits: Record<string, number> = { epb: epb.length, manual: manual.length };
-  for (const f of forum) sourceHits[`forum:${f.source}`] = (sourceHits[`forum:${f.source}`] || 0) + 1;
   for (const h of hits) {
     const ch = isCheckChannel(h.channelId);
     const key =
@@ -5979,7 +5974,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       channel: profile?.channel,
     };
     // Our own data: when this account first showed up in a blacklist, and in how many sources.
-    const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000)), ...forum.map((f) => Math.floor(f.date / 1000))].filter((d) => d > 0);
+    const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000))].filter((d) => d > 0);
     if (dates.length) result.account.firstListed = Math.min(...dates);
     const srcCount = Object.values(sourceHits).filter((n) => n > 0).length;
     if (srcCount) result.account.listedIn = srcCount;
@@ -7779,7 +7774,7 @@ function forumArbLines(locale: Locale, list: ForumArbHit[]): string[] {
   const bySource = new Map<string, ForumArbHit[]>();
   for (const f of list) bySource.set(f.source, [...(bySource.get(f.source) || []), f]);
   for (const [source, cases] of bySource) {
-    out.push(`⚖️ <b>${en ? `${escapeHtml(source)} arbitrations` : `Арбитражи ${escapeHtml(source)}`}</b> — ${en ? "named as defendant" : "был ответчиком"}: ${cases.length}`);
+    out.push(`⚖️ <b>${en ? "Arbitrations" : "Арбитражи"}</b> (${escapeHtml(source)}): ${cases.length}`);
     for (const f of cases.slice(0, 6)) {
       const bits = [f.amount, f.status, parsDate(f.date)].filter(Boolean).map((b) => escapeHtml(b));
       const via = f.via === "contact" ? (en ? " (contact in the claim)" : " (контакт из жалобы)") : f.via === "wallet" ? (en ? " (wallet in the claim)" : " (кошелёк из жалобы)") : "";
@@ -7787,7 +7782,7 @@ function forumArbLines(locale: Locale, list: ForumArbHit[]): string[] {
     }
     if (cases.length > 6) out.push(en ? `… and ${cases.length - 6} more` : `… и ещё ${cases.length - 6}`);
   }
-  out.push(en ? "<i>“Resolved” means the case is closed; the outcome is in the case itself.</i>" : "<i>«Решено» — арбитраж закрыт; в чью пользу, смотрите в теме.</i>", "");
+  out.push("");
   return out;
 }
 
