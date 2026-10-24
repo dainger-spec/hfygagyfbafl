@@ -152,6 +152,9 @@ type Bindings = {
   bannedUsers?: BannedUser[];
   webhookStamp?: string;
   offsiteBackupAt?: number;
+  // /pars changed something in a chat (userbot joined / got a temporary admin
+  // right); kept until undone, so a restart mid-check still cleans up.
+  parsCleanup?: { chatId: string; userbotId: string; joined: boolean; promoted: boolean };
   lastBroadcast?: { at: number; total: number; sent: number; noRights: number; gone: number; failed: number };
 };
 
@@ -360,6 +363,12 @@ type PendingPost = {
   removedFromCheck?: boolean;
   // Post body edited by an arbiter (Telegram HTML); replaces the summary in the post.
   postHtml?: string;
+  // Media chosen by the arbiters for the post (photos removed or added);
+  // when set it replaces the complaint's own files.
+  postFiles?: MediaRef[];
+  // Where it was filed (mini app or bot) and, if rejected, the arbiters' reason.
+  source?: "app" | "bot";
+  rejectReason?: string;
   // Where the review message with the buttons is, so the admin panel can point to it.
   reviewChatId?: string;
   reviewMessageId?: number;
@@ -3426,6 +3435,7 @@ function applicationBriefHtml(app: Application): string {
   const brief = (app.summary || app.story).trim();
   return [
     `<b>Заявка ${escapeHtml(app.id)}</b>`,
+    ...(app.source ? [`Подана через: ${sourceLabel(app.source)}`] : []),
     "",
     `<b>Пострадавший</b>\n${victim}`,
     `<b>Аккаунт</b>\n${scammer}`,
@@ -3499,7 +3509,7 @@ function applicationCaption(app: Application): string {
     .join("\n");
   const victimUser = app.victim.username.replace(/^@/, "");
   return [
-    `<b>Жалоба ${escapeHtml(app.id)}</b>`,
+    `<b>Жалоба ${escapeHtml(app.id)}</b>${app.source ? ` · ${sourceLabel(app.source)}` : ""}`,
     `Пострадавший: ${victimUser ? `@${escapeHtml(victimUser)} · ` : ""}<code>${escapeHtml(app.victim.telegramId)}</code>`,
     `Аккаунт:\n${scamLine}`,
     `Ущерб: ${escapeHtml(app.damageAmount)} ${escapeHtml(app.damageCurrency)}`,
@@ -3573,11 +3583,13 @@ function publishChoiceKeyboard(key = "") {
     [{ text: "Опубликовать без рассылки", callback_data: `pubch${suffix}`.slice(0, 64) }],
   ];
   if (key && pendingPosts[key]) {
+    const rec = pendingPosts[key]!;
     rows.push([
       { text: "✏ Изменить текст", callback_data: `pedit:${key}` },
-      { text: "👁 Предпросмотр", callback_data: `pview:${key}` },
+      { text: `🖼 Фото (${postMedia(rec).length})`, callback_data: `pfoto:${key}` },
     ]);
-    if (pendingPosts[key]!.postHtml) rows.push([{ text: "↩ Вернуть исходный текст", callback_data: `porig:${key}` }]);
+    rows.push([{ text: "👁 Предпросмотр", callback_data: `pview:${key}` }]);
+    if (rec.postHtml) rows.push([{ text: "↩ Вернуть исходный текст", callback_data: `porig:${key}` }]);
   }
   return { inline_keyboard: rows };
 }
@@ -3614,7 +3626,7 @@ async function sendMediaFile(
   chatId: string,
   file: EvidenceItem,
   opts: { caption?: string; replyMarkup?: unknown; replyTo?: number } = {},
-): Promise<{ message_id: number; chat: { id: number }; fileId?: string; kind: "photo" | "video" }> {
+): Promise<{ message_id: number; chat: { id: number }; fileId?: string; kind: "photo" | "video" | "document" }> {
   const size = mediaSize(file);
   if (file.kind === "video" && size > TG_UPLOAD_MAX) {
     return sendLargeVideo(chatId, file, opts);
@@ -3641,11 +3653,26 @@ async function sendMediaFile(
     return { ...sent, fileId: sent.video?.file_id, kind: "video" };
   }
   form.set("photo", blob, file.name || "photo.jpg");
-  const sent = await tgForm<{ message_id: number; chat: { id: number }; photo?: { file_id: string }[] }>(
-    "sendPhoto",
-    form,
-  );
-  return { ...sent, fileId: sent.photo?.at(-1)?.file_id, kind: "photo" };
+  try {
+    const sent = await tgForm<{ message_id: number; chat: { id: number }; photo?: { file_id: string }[] }>(
+      "sendPhoto",
+      form,
+    );
+    return { ...sent, fileId: sent.photo?.at(-1)?.file_id, kind: "photo" };
+  } catch (err) {
+    // Telegram refuses some pictures as photos (a very long screenshot, an odd
+    // format): the same file goes as a document instead of being lost.
+    if (!isPhotoRefused(err)) throw err;
+    form.delete("photo");
+    form.set("document", blob, (file.name || "photo").replace(/\.[^.]+$/, "") + ".jpg");
+    const sent = await tgForm<{ message_id: number; chat: { id: number }; document?: { file_id: string } }>("sendDocument", form);
+    return { ...sent, fileId: sent.document?.file_id, kind: "document" };
+  }
+}
+
+function isPhotoRefused(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return /PHOTO_INVALID_DIMENSIONS|PHOTO_SAVE_FILE_INVALID|IMAGE_PROCESS_FAILED|PHOTO_EXT_INVALID|PHOTO_INVALID|wrong file identifier|failed to get HTTP URL content|IMAGE_INVALID/i.test(text);
 }
 
 async function sendLargeVideo(
@@ -3716,8 +3743,13 @@ function storePending(app: Application, files: MediaRef[]) {
     victimUsername: app.victim.username,
     createdAt: app.createdAt || Date.now(),
     status: "pending",
+    source: app.source,
   };
   savePending();
+}
+
+function sourceLabel(source?: "app" | "bot"): string {
+  return source === "app" ? "📱 приложение" : source === "bot" ? "🤖 бот" : "";
 }
 
 function scamLabel(record: PendingPost | undefined) {
@@ -3739,7 +3771,8 @@ async function notifyApplicant(record: PendingPost | undefined, appId: string, k
       : kind === "published"
         ? btUser(chatId, "publishedNotice", { id: appId, scam })
         : btUser(chatId, "rejectedNotice", { id: appId, scam });
-  await tgSoft("sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
+  const reason = kind === "rejected" && record?.rejectReason ? `\n\n${btUser(chatId, "rejectReason")} ${record.rejectReason}` : "";
+  await tgSoft("sendMessage", { chat_id: chatId, text: text + reason, disable_web_page_preview: true });
 }
 
 export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[] {
@@ -3761,6 +3794,7 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
       currency: c.currency || "",
       status: c.status || "pending",
       createdAt: c.createdAt || 0,
+      ...(c.status === "rejected" && c.rejectReason ? { rejectReason: c.rejectReason } : {}),
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
 }
@@ -3837,7 +3871,8 @@ async function parsOffer(chatId: number | string, token: string) {
     t.members ? `Участников: ${t.members}` : "",
     "",
     "Юзербот спокойно, с паузами выгрузит список участников (юзернеймы и ID) и сверит каждого с базой: жалобы EPB, копии блеклист-каналов и ручной список. Отчёт придёт сюда.",
-    "В самом чате ничего не появится, никому ничего не отправится.",
+    "В самом чате никому ничего не отправится.",
+    "Если юзербота нет в чате, бот пригласит его по одноразовой ссылке, а после проверки он выйдет. Если список участников скрыт, юзербот на время проверки получит только право «Управление чатом», потом оно снимается.",
     "",
     t.members && t.members > PARS_MAX ? `В больших чатах Telegram отдаёт не больше ${PARS_MAX} участников — проверятся они.` : "",
     t.members ? `Займёт примерно ${parsMinutes(t.members)} мин.` : "",
@@ -3911,8 +3946,148 @@ async function handleParsCallback(cb: NonNullable<TgUpdate["callback_query"]>): 
     });
 }
 
+let userbotSelfId = "";
+async function userbotSelf(): Promise<string> {
+  if (userbotSelfId) return userbotSelfId;
+  const { client, Api } = await userbot();
+  const me = (await withTimeout(client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] })), 12_000, "timeout")) as {
+    id?: { toString(): string };
+  }[];
+  userbotSelfId = me?.[0]?.id?.toString() || "";
+  if (!userbotSelfId) throw new Error("userbot id");
+  return userbotSelfId;
+}
+
+const PARS_ADMIN_OFF = {
+  is_anonymous: false,
+  can_manage_chat: false,
+  can_delete_messages: false,
+  can_manage_video_chats: false,
+  can_restrict_members: false,
+  can_promote_members: false,
+  can_change_info: false,
+  can_invite_users: false,
+  can_pin_messages: false,
+  can_post_stories: false,
+  can_edit_stories: false,
+  can_delete_stories: false,
+  can_manage_topics: false,
+};
+
+// Makes sure the userbot can read the member list. Not in the chat: the bot
+// makes a one-time invite link and the userbot joins with it. Member list
+// hidden: the userbot gets a single admin right, "manage chat" (it lets him see
+// members and nothing else that changes the chat). Both are undone afterwards
+// (parsRestore), also after a restart.
+async function parsPrepare(t: ParsTarget, say: (text: string) => Promise<void>): Promise<unknown | null> {
+  const uid = await userbotSelf();
+  const member = await tgSoft<{ status?: string; is_member?: boolean }>("getChatMember", { chat_id: t.chatId, user_id: uid });
+  const status = member?.status || "left";
+  if (status === "kicked") throw new Error("USERBOT_BANNED");
+  const inChat = status === "creator" || status === "administrator" || status === "member" || (status === "restricted" && member?.is_member !== false);
+  let peer: unknown | null = null;
+  const cleanup = { chatId: t.chatId, userbotId: uid, joined: false, promoted: false };
+  if (!inChat) {
+    await say(`⏳ «${t.title}»: юзербота нет в чате — приглашаю по одноразовой ссылке…`);
+    const link = await tgSoft<{ invite_link?: string }>("createChatInviteLink", {
+      chat_id: t.chatId,
+      name: "EPB check",
+      member_limit: 1,
+      expire_date: Math.floor(Date.now() / 1000) + 600,
+    });
+    if (!link?.invite_link) throw new Error("BOT_CANT_INVITE");
+    const hash = link.invite_link.replace(/^.*\/(?:\+|joinchat\/)?/, "");
+    bindings.parsCleanup = { ...cleanup, joined: true };
+    saveBindings();
+    const { client, Api } = await userbot();
+    try {
+      const res = (await withTimeout(client.invoke(new Api.messages.ImportChatInvite({ hash })), 20_000, "timeout")) as {
+        chats?: { className?: string; id?: unknown; accessHash?: unknown }[];
+      };
+      const chat = res?.chats?.[0];
+      if (chat?.className === "Channel") peer = new Api.InputPeerChannel({ channelId: chat.id, accessHash: chat.accessHash });
+      else if (chat?.className === "Chat") peer = new Api.InputPeerChat({ chatId: chat.id });
+    } catch (err) {
+      const text = (err as { errorMessage?: string })?.errorMessage || (err as Error)?.message || "";
+      if (/INVITE_REQUEST_SENT/.test(text)) {
+        // the chat asks to approve joiners: the bot approves its own invite
+        await tgSoft("approveChatJoinRequest", { chat_id: t.chatId, user_id: uid });
+      } else if (!/USER_ALREADY_PARTICIPANT/.test(text)) {
+        bindings.parsCleanup = undefined;
+        saveBindings();
+        throw err;
+      }
+    } finally {
+      void tgSoft("revokeChatInviteLink", { chat_id: t.chatId, invite_link: link.invite_link });
+    }
+    cleanup.joined = true;
+    await sleep(1500);
+  }
+  const chat = await tgSoft<{ has_hidden_members?: boolean }>("getChat", { chat_id: t.chatId });
+  const isAdmin = status === "creator" || status === "administrator";
+  if (chat?.has_hidden_members && !isAdmin) {
+    await say(`⏳ «${t.title}»: список участников скрыт — на время проверки даю юзерботу право «управление чатом»…`);
+    bindings.parsCleanup = { ...cleanup, promoted: true };
+    saveBindings();
+    const ok = await tgSoft("promoteChatMember", { chat_id: t.chatId, user_id: uid, ...PARS_ADMIN_OFF, can_manage_chat: true });
+    if (!ok) {
+      bindings.parsCleanup = cleanup.joined ? cleanup : undefined;
+      saveBindings();
+      throw new Error("BOT_CANT_PROMOTE");
+    }
+    cleanup.promoted = true;
+    await sleep(1500);
+  }
+  bindings.parsCleanup = cleanup.joined || cleanup.promoted ? cleanup : undefined;
+  saveBindings();
+  return peer;
+}
+
+// Undoes what parsPrepare changed: the admin right is taken back and, if the
+// userbot joined only for the check, it leaves the chat.
+async function parsRestore() {
+  const c = bindings.parsCleanup;
+  if (!c) return;
+  if (c.promoted) await tgSoft("promoteChatMember", { chat_id: c.chatId, user_id: c.userbotId, ...PARS_ADMIN_OFF });
+  if (c.joined) {
+    try {
+      const { client, Api } = await userbot();
+      const peer = (await withTimeout(userInputPeer(client, Number(c.chatId)), 20_000, "timeout")) as { className?: string; chatId?: unknown };
+      if (peer?.className === "InputPeerChat") {
+        await withTimeout(client.invoke(new Api.messages.DeleteChatUser({ chatId: peer.chatId, userId: new Api.InputUserSelf() })), 15_000, "timeout");
+      } else {
+        await withTimeout(client.invoke(new Api.channels.LeaveChannel({ channel: peer })), 15_000, "timeout");
+      }
+    } catch (err) {
+      // already gone is fine; anything else is retried on the next start
+      const text = (err as { errorMessage?: string })?.errorMessage || (err as Error)?.message || "";
+      if (!/USER_NOT_PARTICIPANT|CHANNEL_PRIVATE|CHAT_ID_INVALID|PEER_ID_INVALID/.test(text)) return;
+    }
+  }
+  // keep the record a moment so the "left" service message is still cleaned up
+  setTimeout(() => {
+    if (bindings.parsCleanup === c) {
+      bindings.parsCleanup = undefined;
+      saveBindings();
+    }
+  }, 15_000);
+}
+if (process.env.NODE_ENV !== "test") {
+  // a check cut short by a restart: undo its changes once the bot is up
+  setTimeout(() => {
+    if (bindings.parsCleanup && hasUserbot() && !parsRunning) void parsRestore().catch(() => {});
+  }, 20_000);
+}
+
 function parsErrorText(err: unknown): string {
   const text = (err as { errorMessage?: string; message?: string })?.errorMessage || (err as Error)?.message || String(err);
+  if (/USERBOT_BANNED/.test(text)) return "Аккаунт юзербота заблокирован в этом чате — снимите блокировку и повторите /pars.";
+  if (/BOT_CANT_INVITE/.test(text)) {
+    return "Юзербота нет в чате, а у бота нет права приглашать по ссылке. Дайте боту в этом чате право «Пригласительные ссылки» (или добавьте юзербота вручную) и повторите /pars.";
+  }
+  if (/BOT_CANT_PROMOTE/.test(text)) {
+    return "Список участников в чате скрыт, а у бота нет права назначать админов. Дайте боту право «Назначение администраторов» (юзербот на время проверки получит только «Управление чатом») или сделайте юзербота админом вручную, и повторите /pars.";
+  }
   if (/CHAT_ADMIN_REQUIRED/i.test(text)) {
     return "В этом чате список участников скрыт — его видят только админы. Сделайте аккаунт юзербота администратором (можно без прав) и повторите /pars.";
   }
@@ -3929,10 +4104,11 @@ function parsErrorText(err: unknown): string {
 async function parsFetchMembers(
   t: ParsTarget,
   onProgress: (got: number) => void,
+  known: unknown | null = null,
 ): Promise<{ members: ParsMember[]; partial: string }> {
   const { client, Api } = await userbot();
   const ref = t.username ? t.username : Number(t.chatId);
-  const peer = (await withTimeout(userInputPeer(client, ref), 30_000, "resolve timeout")) as { className?: string; chatId?: unknown };
+  const peer = (known || (await withTimeout(userInputPeer(client, ref), 30_000, "resolve timeout"))) as { className?: string; chatId?: unknown };
   const out = new Map<string, ParsMember>();
   const take = (users: unknown[]) => {
     for (const raw of users || []) {
@@ -4135,12 +4311,16 @@ async function parsScan(t: ParsTarget, ownerChat: number | string) {
   let members: ParsMember[];
   let partial = "";
   try {
-    const got = await parsFetchMembers(t, (n) => void say(`⏳ «${t.title}»: выгружено участников: ${n}${t.members ? ` из ~${Math.min(t.members, PARS_MAX)}` : ""}…`));
+    const peer = await parsPrepare(t, (text) => say(text, true));
+    const got = await parsFetchMembers(t, (n) => void say(`⏳ «${t.title}»: выгружено участников: ${n}${t.members ? ` из ~${Math.min(t.members, PARS_MAX)}` : ""}…`), peer);
     members = got.members;
     partial = got.partial;
   } catch (err) {
     await say(`⚠️ «${t.title}»: ${parsErrorText(err)}`, true);
     return;
+  } finally {
+    // the chat is left as it was before the check
+    await parsRestore().catch(() => {});
   }
   await say(`⏳ «${t.title}»: сверяю ${members.length} участников с базой…`, true);
   const channels = checkChannels();
@@ -5443,9 +5623,20 @@ async function sendAlbumFromBlobs(
       });
     });
     form.set("media", JSON.stringify(media));
-    const result = await tgForm<
-      { message_id: number; photo?: { file_id: string }[]; video?: { file_id: string } }[]
-    >("sendMediaGroup", form);
+    let result: { message_id: number; photo?: { file_id: string }[]; video?: { file_id: string } }[];
+    try {
+      result = await tgForm("sendMediaGroup", form);
+    } catch (err) {
+      // one picture Telegram won't take as a photo spoils the whole album:
+      // send this part one by one (the odd picture goes as a document)
+      if (!isPhotoRefused(err)) throw err;
+      for (const [idx, file] of chunk.entries()) {
+        const sent = await sendMediaFile(chatId, file, i === 0 && idx === 0 && packed.caption ? { caption: packed.caption } : {});
+        if (sent.fileId) files.push({ type: sent.kind, file_id: sent.fileId });
+        if (i === 0 && idx === 0) firstId = sent.message_id;
+      }
+      continue;
+    }
     if (i === 0) firstId = result[0]?.message_id || 0;
     for (const msg of result) {
       if (msg.video?.file_id) files.push({ type: "video", file_id: msg.video.file_id });
@@ -6217,7 +6408,9 @@ async function sendPostPreview(chatId: number | string, key: string, replyTo?: n
   if (!rec) return;
   const repeat = previousPosts(pendingAccounts(rec), key);
   const head = `<b>Предпросмотр поста ${escapeHtml(key)}</b>${rec.postHtml ? " (текст изменён)" : ""}` +
-    (rec.files?.length ? `\nК посту приложится доказательств: ${rec.files.length}` : "") +
+    (postMedia(rec).length
+      ? `\nК посту приложится: ${Math.min(10, postMedia(rec).length)} (в канал уходит не больше 10)${rec.postFiles ? " — фото изменены" : ""}`
+      : "\nБез фото") +
     (repeat ? `\n${repeat}` : "");
   await tgSoft("sendMessage", {
     chat_id: chatId,
@@ -6288,6 +6481,231 @@ async function handlePostEditReply(msg: TgMessage): Promise<boolean> {
   return true;
 }
 
+// ---- Rejecting with a reason ----
+function rejectChoiceKeyboard(key: string) {
+  return {
+    inline_keyboard: [
+      [{ text: "✍ Указать причину", callback_data: `rejr:${key}` }],
+      [{ text: "Отклонить без причины", callback_data: `rejn:${key}` }],
+      [{ text: "↩ Назад", callback_data: `rejb:${key}` }],
+    ],
+  };
+}
+
+type ReviewCard = { chatId: number | string; messageId: number; text: string; isMedia: boolean };
+// prompt (chat:message) -> the complaint and its review card
+const rejectPrompts = new Map<string, { key: string; card: ReviewCard; at: number }>();
+
+async function askRejectReason(card: NonNullable<NonNullable<TgUpdate["callback_query"]>["message"]>, key: string, text: string) {
+  const prompt = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: card.chat.id,
+    text: `<b>Причина отказа по заявке ${escapeHtml(key)}</b>\n\nОтветьте на это сообщение причиной — она уйдёт заявителю.`,
+    parse_mode: "HTML",
+    reply_to_message_id: card.message_id,
+    reply_markup: { force_reply: true, selective: false, input_field_placeholder: "Причина отказа" },
+  });
+  if (!prompt?.message_id) return;
+  for (const [k, v] of rejectPrompts) if (Date.now() - v.at > 60 * 60_000) rejectPrompts.delete(k);
+  rejectPrompts.set(`${card.chat.id}:${prompt.message_id}`, {
+    key,
+    card: { chatId: card.chat.id, messageId: card.message_id, text, isMedia: Boolean((card as { photo?: unknown }).photo || (card as { video?: unknown }).video || (card as { caption?: string }).caption) },
+    at: Date.now(),
+  });
+}
+
+async function handleRejectReasonReply(msg: TgMessage): Promise<boolean> {
+  const replyTo = msg.reply_to_message?.message_id;
+  if (!replyTo) return false;
+  const pending = rejectPrompts.get(`${msg.chat.id}:${replyTo}`);
+  if (!pending) return false;
+  const reason = (msg.text || msg.caption || "").replace(/\s+\n/g, "\n").trim();
+  if (reason.length < 2) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Причина пустая. Ответьте на сообщение бота ещё раз.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  rejectPrompts.delete(`${msg.chat.id}:${replyTo}`);
+  const rec = pendingPosts[pending.key];
+  if (rec?.status === "published" || publishing.has(pending.key)) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Заявка уже опубликована.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  await rejectComplaint(pending.key, reason.slice(0, 600), pending.card);
+  void tgSoft("deleteMessage", { chat_id: msg.chat.id, message_id: replyTo });
+  return true;
+}
+
+async function rejectComplaint(key: string, reason: string, card: ReviewCard) {
+  const record = key ? pendingPosts[key] : undefined;
+  if (record && record.status !== "rejected") {
+    record.status = "rejected";
+    if (reason) record.rejectReason = reason;
+    savePending();
+    await notifyApplicant(record, key, "rejected");
+  }
+  const next = `${escapeHtml(stripServiceMarker(card.text))}\n\nСтатус: отклонено${reason ? `\nПричина: ${escapeHtml(reason)}` : ""}`;
+  await replaceReplyMarkup(
+    { chat: { id: Number(card.chatId), type: "supergroup" }, message_id: card.messageId, ...(card.isMedia ? { caption: card.text } : { text: card.text }) } as never,
+    { inline_keyboard: [] },
+    next,
+  );
+}
+
+// ---- The post's photos: remove some, add the arbiters' own ----
+function postMedia(rec: PendingPost): MediaRef[] {
+  return rec.postFiles ?? rec.files ?? [];
+}
+
+// reply prompt (chat:message) -> complaint key; album id -> complaint key
+const photoPrompts = new Map<string, { key: string; at: number }>();
+const photoAlbums = new Map<string, { key: string; at: number }>();
+const POST_MEDIA_MAX = 30;
+
+function photoManagerKeyboard(key: string) {
+  const rec = pendingPosts[key];
+  const list = rec ? postMedia(rec) : [];
+  const rows: { text: string; callback_data: string }[][] = [];
+  for (let i = 0; i < list.length; i += 5) {
+    rows.push(list.slice(i, i + 5).map((_, j) => ({ text: `✖ ${i + j + 1}`, callback_data: `pfdel:${key}:${i + j}` })));
+  }
+  rows.push([{ text: "➕ Добавить свои", callback_data: `pfadd:${key}` }]);
+  if (rec?.postFiles) rows.push([{ text: "↩ Вернуть фото из заявки", callback_data: `pforig:${key}` }]);
+  rows.push([{ text: "✅ Готово — предпросмотр", callback_data: `pview:${key}` }]);
+  return { inline_keyboard: rows };
+}
+
+function photoManagerText(key: string): string {
+  const rec = pendingPosts[key];
+  const n = rec ? postMedia(rec).length : 0;
+  return [
+    `<b>Фото поста ${escapeHtml(key)}</b>`,
+    "",
+    n ? `Сейчас в посте: ${n}. Номера — как подписи на фото выше.` : "Сейчас пост без фото.",
+    n > 10 ? "В канал и рассылку уйдут первые 10." : "",
+    "✖ — убрать фото из поста (из заявки оно не удаляется). ➕ — прислать свои.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// The current media as numbered albums, so the arbiters see what each number is.
+async function showPostMedia(chatId: number | string, key: string) {
+  const rec = pendingPosts[key];
+  if (!rec) return;
+  const list = postMedia(rec);
+  for (let i = 0; i < list.length; i += 10) {
+    const part = list.slice(i, i + 10);
+    const visual = part.every((f) => f.type !== "document");
+    if (part.length > 1 && visual) {
+      await tgSoft("sendMediaGroup", {
+        chat_id: chatId,
+        media: part.map((f, j) => ({ type: f.type, media: f.file_id, caption: `№${i + j + 1}` })),
+      });
+    } else {
+      for (const [j, f] of part.entries()) {
+        const method = f.type === "video" ? "sendVideo" : f.type === "document" ? "sendDocument" : "sendPhoto";
+        await tgSoft(method, { chat_id: chatId, [f.type === "video" ? "video" : f.type === "document" ? "document" : "photo"]: f.file_id, caption: `№${i + j + 1}` });
+      }
+    }
+  }
+  await tgSoft("sendMessage", { chat_id: chatId, text: photoManagerText(key), parse_mode: "HTML", reply_markup: photoManagerKeyboard(key) });
+}
+
+async function handlePostPhotoCallback(cb: NonNullable<TgUpdate["callback_query"]>) {
+  const [action, key = "", idxRaw = ""] = (cb.data || "").split(":");
+  const rec = pendingPosts[key];
+  const chatId = cb.message!.chat.id;
+  if (!rec || (rec.status || "pending") !== "pending") {
+    await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Заявка уже обработана", show_alert: true });
+    return;
+  }
+  if (action === "pfoto") {
+    await tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+    await showPostMedia(chatId, key);
+    return;
+  }
+  if (action === "pfdel") {
+    const idx = Number(idxRaw);
+    const list = [...postMedia(rec)];
+    if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) {
+      await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Этого фото уже нет" });
+      return;
+    }
+    list.splice(idx, 1);
+    rec.postFiles = list;
+    savePending();
+    await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: `Фото №${idx + 1} убрано` });
+    // numbers shift after a removal: show the post's media again
+    await showPostMedia(chatId, key);
+    return;
+  }
+  if (action === "pforig") {
+    delete rec.postFiles;
+    savePending();
+    await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Вернули фото из заявки" });
+    await showPostMedia(chatId, key);
+    return;
+  }
+  // pfadd
+  await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Ответьте на сообщение бота фото или видео" });
+  const prompt = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text: `<b>Добавить фото в пост ${escapeHtml(key)}</b>\n\nОтветьте на это сообщение фото или видео (можно альбомом).`,
+    parse_mode: "HTML",
+    reply_markup: { force_reply: true, selective: false, input_field_placeholder: "Фото или видео" },
+  });
+  if (prompt?.message_id) {
+    for (const [k, v] of photoPrompts) if (Date.now() - v.at > 60 * 60_000) photoPrompts.delete(k);
+    photoPrompts.set(`${chatId}:${prompt.message_id}`, { key, at: Date.now() });
+  }
+}
+
+const photoAlbumTimers = new Map<string, ReturnType<typeof setTimeout>>();
+async function handlePostPhotoReply(msg: TgMessage): Promise<boolean> {
+  const replyTo = msg.reply_to_message?.message_id;
+  let target = replyTo ? photoPrompts.get(`${msg.chat.id}:${replyTo}`) : undefined;
+  // the rest of an album sent as the answer (only its first part may carry the reply)
+  if (!target && msg.media_group_id) target = photoAlbums.get(`${msg.chat.id}:${msg.media_group_id}`);
+  if (!target) return false;
+  const rec = pendingPosts[target.key];
+  if (!rec || (rec.status || "pending") !== "pending") {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Заявка уже обработана, фото не добавлены.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  const media: MediaRef | null = msg.photo?.length
+    ? { type: "photo", file_id: msg.photo.at(-1)!.file_id }
+    : msg.video?.file_id
+      ? { type: "video", file_id: msg.video.file_id }
+      : null;
+  if (!media) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: "Нужны фото или видео. Ответьте на сообщение бота ещё раз.", reply_to_message_id: msg.message_id });
+    return true;
+  }
+  const list = [...postMedia(rec)];
+  if (list.length >= POST_MEDIA_MAX) {
+    await tgSoft("sendMessage", { chat_id: msg.chat.id, text: `В посте уже ${POST_MEDIA_MAX} файлов — сначала уберите лишние.`, reply_to_message_id: msg.message_id });
+    return true;
+  }
+  list.push(media);
+  rec.postFiles = list;
+  savePending();
+  const albumKey = msg.media_group_id ? `${msg.chat.id}:${msg.media_group_id}` : "";
+  if (albumKey) photoAlbums.set(albumKey, { key: target.key, at: Date.now() });
+  // one summary after the whole album has arrived
+  const timerKey = albumKey || `${msg.chat.id}:${msg.message_id}`;
+  const prev = photoAlbumTimers.get(timerKey);
+  if (prev) clearTimeout(prev);
+  const key = target.key;
+  photoAlbumTimers.set(
+    timerKey,
+    setTimeout(() => {
+      photoAlbumTimers.delete(timerKey);
+      if (albumKey) photoAlbums.delete(albumKey);
+      void showPostMedia(msg.chat.id, key);
+    }, 1500),
+  );
+  return true;
+}
+
 const publishing = new Set<string>();
 let broadcastQueue: Promise<void> = Promise.resolve();
 
@@ -6343,7 +6761,7 @@ async function publishFromMessage(
     stored?.currency,
     stored?.postHtml,
   );
-  const files = stored?.files?.length ? stored.files : extraFiles;
+  const files = stored?.postFiles ? stored.postFiles : stored?.files?.length ? stored.files : extraFiles;
   if (!channelCandidates().length) {
     publishing.delete(lock);
     await tgSoft("answerCallbackQuery", {
@@ -6433,6 +6851,8 @@ type TgMessage = {
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;
   media_group_id?: string;
+  new_chat_members?: TgUser[];
+  left_chat_member?: TgUser;
 };
 
 type TgChannelPost = {
@@ -7748,6 +8168,7 @@ async function submitSession(chatId: number, userId: string, session: ApplySessi
     damageAmount: session.amount,
     damageCurrency: session.currency,
     evidence: [],
+    source: "bot",
   };
   const result = await sendApplicationToArbiters(app, session.evidence);
   if (!result.ok) {
@@ -9892,6 +10313,16 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (groupMsg && (groupMsg.chat.type === "group" || groupMsg.chat.type === "supergroup")) {
     if (groupMsg.migrate_to_chat_id) onChatMigrated(String(groupMsg.chat.id), String(groupMsg.migrate_to_chat_id));
     if (groupMsg.migrate_from_chat_id) onChatMigrated(String(groupMsg.migrate_from_chat_id), String(groupMsg.chat.id));
+    // the userbot joining/leaving for a check leaves no trace in the chat
+    const cleanup = bindings.parsCleanup;
+    if (
+      cleanup &&
+      sameChat(cleanup.chatId, groupMsg.chat.id) &&
+      (groupMsg.new_chat_members?.some((u) => String(u.id) === cleanup.userbotId) || String(groupMsg.left_chat_member?.id || "") === cleanup.userbotId)
+    ) {
+      void tgSoft("deleteMessage", { chat_id: groupMsg.chat.id, message_id: groupMsg.message_id });
+      return;
+    }
     // /pars from the bot owner: check this chat's members (continues in private)
     if (commandName(groupMsg.text) === "pars") {
       if (isOwner(groupMsg.from?.id) && !tooMany(`pars:${groupMsg.chat.id}`, 3, 60_000)) await parsAskInGroup(groupMsg);
@@ -10057,7 +10488,7 @@ async function handleTelegramUpdate(update: TgUpdate) {
       await handleRelayDecision(cb, cb.data.startsWith("rel:y:"));
       return;
     }
-    if ((cb.data === "pub" || cb.data.startsWith("pub:") || cb.data.startsWith("puball") || cb.data.startsWith("pubch") || cb.data === "rej" || cb.data.startsWith("rej:") || /^p(edit|view|orig):/.test(cb.data)) && !isOfficialArbiterChat(cb.message.chat.id)) {
+    if ((cb.data === "pub" || cb.data.startsWith("pub:") || cb.data.startsWith("puball") || cb.data.startsWith("pubch") || cb.data === "rej" || cb.data.startsWith("rej:") || /^rej[rnb]:/.test(cb.data) || /^p(edit|view|orig|foto|fdel|fadd|forig):/.test(cb.data)) && !isOfficialArbiterChat(cb.message.chat.id)) {
       await tgSoft("answerCallbackQuery", {
         callback_query_id: cb.id,
         text: "Чат не авторизован",
@@ -10087,6 +10518,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
         });
       }
       await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Выберите тип публикации" });
+      return;
+    }
+    if (/^p(foto|fdel|fadd|forig):/.test(cb.data)) {
+      await handlePostPhotoCallback(cb);
       return;
     }
     if (/^p(edit|view|orig):/.test(cb.data)) {
@@ -10138,20 +10573,36 @@ async function handleTelegramUpdate(update: TgUpdate) {
       return;
     }
     if (cb.data === "rej" || cb.data.startsWith("rej:")) {
+      // first a choice: give a reason, reject without one, or go back
       const key = parseAppKey(text, cb.data);
       const record = key ? pendingPosts[key] : undefined;
       if (record?.status === "published" || (key && publishing.has(key))) {
         await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Заявка уже опубликована", show_alert: true });
         return;
       }
-      if (record && record.status !== "rejected") {
-        record.status = "rejected";
-        savePending();
-        await notifyApplicant(record, key, "rejected");
+      await tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      await replaceReplyMarkup(cb.message, rejectChoiceKeyboard(key));
+      return;
+    }
+    if (/^rej[rnb]:/.test(cb.data)) {
+      const [action, key = ""] = cb.data.split(":");
+      const record = key ? pendingPosts[key] : undefined;
+      if (record?.status === "published" || publishing.has(key)) {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Заявка уже опубликована", show_alert: true });
+        return;
+      }
+      if (action === "rejb") {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+        await replaceReplyMarkup(cb.message, reviewKeyboard(key));
+        return;
+      }
+      if (action === "rejr") {
+        await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Напишите причину ответом на сообщение бота" });
+        await askRejectReason(cb.message, key, text);
+        return;
       }
       await tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text: "Отклонено" });
-      const next = `${escapeHtml(stripServiceMarker(text))}\n\nСтатус: отклонено`;
-      await replaceReplyMarkup(cb.message, { inline_keyboard: [] }, next);
+      await rejectComplaint(key, "", { chatId: cb.message.chat.id, messageId: cb.message.message_id, text, isMedia });
       return;
     }
     const userId = String(cb.from?.id || "");
@@ -10347,6 +10798,8 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && collectDmAlbumItem(msg)) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleDmReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostEditReply(msg))) return;
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handleRejectReasonReply(msg))) return;
+  if (isOfficialArbiterChat(msg.chat.id) && !cmd && (await handlePostPhotoReply(msg))) return;
   if (isOfficialArbiterChat(msg.chat.id) && removeFromCheckSetup.has(String(msg.chat.id)) && msg.text && !cmd) {
     await applyRemoveFromCheck(msg.chat.id, msg.text);
     return;

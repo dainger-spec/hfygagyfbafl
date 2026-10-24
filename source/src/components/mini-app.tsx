@@ -2158,6 +2158,7 @@ function autoLinks(text: string, from = 0, to = text.length): { o: number; l: nu
   }
   return out;
 }
+const SAFE_LINK_RE = /^(https?:\/\/|tg:\/\/)/i;
 function LinkedText({ text, links }: { text: string; links?: { o: number; l: number; u: string }[] }) {
   const own = (links || []).filter((x) => x.o >= 0 && x.l > 0 && x.o + x.l <= text.length).sort((a, b) => a.o - b.o);
   // the gaps between the post's own links get plain-text detection
@@ -2174,6 +2175,13 @@ function LinkedText({ text, links }: { text: string; links?: { o: number; l: num
   all.forEach((x, i) => {
     if (x.o < at) return;
     if (x.o > at) parts.push(text.slice(at, x.o));
+    // only web and Telegram links become links (never javascript:, data: …),
+    // also for a long-press "open" that skips the click handler
+    if (!SAFE_LINK_RE.test(x.u)) {
+      parts.push(text.slice(x.o, x.o + x.l));
+      at = x.o + x.l;
+      return;
+    }
     parts.push(
       <a
         key={i}
@@ -2458,6 +2466,11 @@ function HistoryCard({ item }: { item: ComplaintHistoryItem }) {
             {item.amount ? ` · ${item.amount} ${item.currency}` : ""}
           </p>
           {when ? <p className="mt-1 text-xs text-subtle">{when}</p> : null}
+          {item.status === "rejected" && item.rejectReason ? (
+            <p className="mt-1.5 text-xs leading-snug break-words text-muted">
+              {t(locale, "rejectReasonLabel")} {item.rejectReason}
+            </p>
+          ) : null}
         </div>
         <span
           className={cn(

@@ -36,6 +36,8 @@ export type Application = {
   evidence: EvidenceItem[];
   publishedAt?: number;
   rejectedAt?: number;
+  // where the complaint was filed: the mini app or the bot chat
+  source?: "app" | "bot";
 };
 
 export function scammerAccounts(app: Pick<Application, "scammer" | "scammers">): PersonRef[] {
@@ -57,6 +59,8 @@ export type ComplaintHistoryItem = {
   currency: string;
   status: ApplicationStatus;
   createdAt: number;
+  // the arbiters' reason, when they gave one
+  rejectReason?: string;
 };
 
 export type ChatId = "bot" | "arbiters" | "channel";

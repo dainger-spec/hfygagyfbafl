@@ -75,6 +75,7 @@ export const submitToTelegram = createServerFn({ method: "POST" })
       damageAmount: data.damageAmount,
       damageCurrency: data.damageCurrency,
       evidence: data.evidence,
+      source: "app" as const,
     };
     const res = await bot.sendApplicationToArbiters(app);
     if (res.ok) bot.consumeSubmitPass(authed.id);

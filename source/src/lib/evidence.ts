@@ -24,29 +24,99 @@ export function isEvidenceFile(file: File) {
   return isVideoFile(file) || isImageFile(file);
 }
 
-function resizeImage(file: File, max = 960, quality = 0.8): Promise<string> {
+// Long screenshots stay readable: the longest side is capped at 2560 px (what
+// Telegram keeps for photos) and the picture at ~4.5 MP (phones run out of
+// canvas memory above that and hand back a black frame).
+const MAX_SIDE = 2560;
+const MAX_PIXELS = 4_500_000;
+
+// A canvas that failed to draw (memory pressure in the Telegram webview, an
+// image not decoded yet) comes back all black; such a result is not used.
+function looksBlank(canvas: HTMLCanvasElement): boolean {
+  try {
+    const probe = document.createElement("canvas");
+    probe.width = 16;
+    probe.height = 16;
+    const p = probe.getContext("2d");
+    if (!p) return false;
+    p.drawImage(canvas, 0, 0, 16, 16);
+    const d = p.getImageData(0, 0, 16, 16).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i]! > 10 || d[i + 1]! > 10 || d[i + 2]! > 10) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A long chat screenshot shrunk into one photo becomes a thin unreadable strip
+// (Telegram scales photos to 2560 px on the long side). Taller than this ratio,
+// it is cut into readable parts that overlap a little.
+const LONG_RATIO = 3.2;
+const PART_RATIO = 2.1;
+const MAX_PARTS = 8;
+
+function drawJpeg(img: HTMLImageElement, sx: number, sy: number, sw: number, sh: number, quality: number): string {
+  const scale = Math.min(1, MAX_SIDE / Math.max(sw, sh), Math.sqrt(MAX_PIXELS / (sw * sh)));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sw * scale));
+  canvas.height = Math.max(1, Math.round(sh * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canvas");
+  // JPEG has no transparency: transparent parts of a PNG would turn black
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  if (looksBlank(canvas)) throw new Error("blank");
+  const url = canvas.toDataURL("image/jpeg", quality);
+  // free the canvas memory right away (iOS keeps it otherwise)
+  canvas.width = 0;
+  canvas.height = 0;
+  if (!url.startsWith("data:image/jpeg")) throw new Error("encode");
+  return url;
+}
+
+// The picture as one JPEG, or as a few overlapping parts when it is a very
+// long screenshot.
+function resizeImage(file: File, quality = 0.86): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
-    img.onload = () => {
-      const scale = Math.min(1, max / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(img.width * scale));
-      canvas.height = Math.max(1, Math.round(img.height * scale));
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        URL.revokeObjectURL(objectUrl);
-        reject(new Error("canvas"));
-        return;
+    const done = (fn: () => void) => {
+      URL.revokeObjectURL(objectUrl);
+      fn();
+    };
+    img.onload = async () => {
+      try {
+        // wait until the picture is fully decoded before drawing it
+        await img.decode?.().catch(() => {});
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (!w || !h) throw new Error("image");
+        if (h / w <= LONG_RATIO || w < 200) {
+          done(() => resolve([drawJpeg(img, 0, 0, w, h, quality)]));
+          return;
+        }
+        const overlap = Math.round(w * 0.08);
+        let partH = Math.round(w * PART_RATIO);
+        let count = Math.ceil((h - overlap) / (partH - overlap));
+        if (count > MAX_PARTS) {
+          count = MAX_PARTS;
+          partH = Math.ceil((h - overlap) / count) + overlap;
+        }
+        const step = (h - partH) / Math.max(1, count - 1);
+        const parts: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const y = Math.round(i * step);
+          parts.push(drawJpeg(img, 0, y, w, Math.min(partH, h - y), quality));
+        }
+        done(() => resolve(parts));
+      } catch (err) {
+        done(() => reject(err instanceof Error ? err : new Error("image")));
       }
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(objectUrl);
-      resolve(canvas.toDataURL("image/jpeg", quality));
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("image"));
-    };
+    img.onerror = () => done(() => reject(new Error("image")));
     img.src = objectUrl;
   });
 }
@@ -124,53 +194,60 @@ function dataUrlToJpegFile(dataUrl: string, name: string): File {
   return new File([bytes], safe, { type: "image/jpeg" });
 }
 
+// One picked file as evidence: a video as it is, a picture as a JPEG (or a few,
+// for a very long screenshot).
 export async function fileToEvidence(
   file: File,
   onProgress?: (done: number, total: number) => void,
-): Promise<EvidenceItem> {
-  const id = uid("ev");
+): Promise<EvidenceItem[]> {
   if (isVideoFile(file)) {
+    const id = uid("ev");
     sessionBlobs.set(id, URL.createObjectURL(file));
     const storageKey = await uploadEvidenceFile(file, onProgress);
-    return {
-      id,
-      kind: "video",
-      name: file.name,
-      size: file.size,
-      mime: file.type || "video/mp4",
-      dataUrl: "",
-      storageKey,
-    };
+    return [
+      {
+        id,
+        kind: "video",
+        name: file.name,
+        size: file.size,
+        mime: file.type || "video/mp4",
+        dataUrl: "",
+        storageKey,
+      },
+    ];
   }
 
-  let dataUrl = "";
+  let parts: string[] = [];
   try {
-    dataUrl = await resizeImage(file);
+    parts = await resizeImage(file);
   } catch {
+    // the browser could not draw it (HEIC, out of memory): the original goes up
+    const id = uid("ev");
     sessionBlobs.set(id, URL.createObjectURL(file));
     const storageKey = await uploadEvidenceFile(file, onProgress);
-    return {
-      id,
-      kind: "image",
-      name: file.name,
-      size: file.size,
-      mime: file.type || "application/octet-stream",
-      dataUrl: "",
-      storageKey,
-    };
+    return [
+      {
+        id,
+        kind: "image",
+        name: file.name,
+        size: file.size,
+        mime: file.type || "application/octet-stream",
+        dataUrl: "",
+        storageKey,
+      },
+    ];
   }
-  sessionBlobs.set(id, dataUrl);
-  const jpeg = dataUrlToJpegFile(dataUrl, file.name);
-  const storageKey = await uploadEvidenceFile(jpeg, onProgress);
-  return {
-    id,
-    kind: "image",
-    name: file.name,
-    size: jpeg.size,
-    mime: "image/jpeg",
-    dataUrl: "",
-    storageKey,
-  };
+  const out: EvidenceItem[] = [];
+  for (const [i, dataUrl] of parts.entries()) {
+    const id = uid("ev");
+    sessionBlobs.set(id, dataUrl);
+    const name = parts.length > 1 ? (file.name || "screenshot").replace(/\.[^.]+$/, "") + `-${i + 1}.jpg` : file.name;
+    const jpeg = dataUrlToJpegFile(dataUrl, name);
+    const storageKey = await uploadEvidenceFile(jpeg, parts.length > 1 ? undefined : onProgress);
+    onProgress?.(i + 1, parts.length);
+    out.push({ id, kind: "image", name, size: jpeg.size, mime: "image/jpeg", dataUrl: "", storageKey });
+  }
+  return out;
 }
 
 export async function persistEvidence(files: EvidenceItem[]): Promise<EvidenceItem[]> {

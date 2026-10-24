@@ -48,16 +48,17 @@ export function EvidencePicker({
               : t(locale, "uploadingFile"),
         );
         next.push(
-          await fileToEvidence(file, (done, total) => {
+          ...(await fileToEvidence(file, (done, total) => {
             setProgress(
               incoming.length > 1
                 ? t(locale, "uploadingNProgress", { i: i + 1, n: incoming.length, done, total })
                 : t(locale, "uploadingVideoProgress", { done, total }),
             );
-          }),
+          })),
         );
       }
-      onChange([...files, ...next]);
+      // a long screenshot cut into parts can go past the limit: keep the first ones
+      onChange([...files, ...next].slice(0, EVIDENCE_MAX));
     } catch {
       setError(t(locale, "uploadFail"));
     } finally {
