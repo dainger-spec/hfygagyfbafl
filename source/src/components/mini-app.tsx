@@ -811,6 +811,7 @@ const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number; text?: "
   { src: "/partners/chernyi-spisok.png", alt: "Чёрный список — арбитраж трафика", r: 210 / 128, s: 0.9 },
   { src: "/partners/btc-detective.png", alt: "Crypto detective blacklist", r: 119 / 128 },
   { src: "/partners/skam-desk.png", alt: "SKAM DESK", r: 115 / 128 },
+  { src: "/partners/kolbasa.png", alt: "Колбаса", r: 209 / 128, s: 0.85 },
 ];
 
 function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
