@@ -431,13 +431,13 @@ function BaseCard() {
         />
         <div className="relative flex items-center justify-between gap-3">
           <div className="text-[10px] font-bold tracking-[0.14em] text-muted uppercase">{t(locale, "baseTitle")}</div>
-          <div className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-300">
-            <span className="size-1.5 rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(110,231,183,0.9)]" />
+          <div className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-gold">
+            <span className="size-1.5 rounded-full bg-gold shadow-[0_0_6px_rgba(242,190,85,0.9)]" />
             {updated}
           </div>
         </div>
         <div className="relative mt-0.5 flex items-baseline gap-2">
-          <span className="epb-gold-text font-display text-2xl leading-tight font-extrabold tracking-tight">
+          <span className="font-display text-gold text-2xl leading-tight font-extrabold tracking-tight">
             {stats.accounts.toLocaleString(locale === "en" ? "en-US" : "ru-RU")}
           </span>
           <span className="truncate text-xs text-muted">{t(locale, "baseSub", { n, src })}</span>
@@ -485,7 +485,7 @@ function Home({
         <EuStarsLogo size={150} title="Europe Private Blacklist" spin emblem big className="mt-4" />
         <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
-          <span className="epb-gold-text block">Blacklist</span>
+          <span className="block text-gold">Blacklist</span>
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
