@@ -826,6 +826,19 @@ function verifyInitDataRaw(initData: string): { id: string; username?: string; f
   }
 }
 
+// At most 8 GB of uploads, and never more than 40 % of the disk (a small
+// server's disk also holds the system and the bot's own data).
+function evidenceMaxBytes(): number {
+  const cap = 8 * 1024 * 1024 * 1024;
+  try {
+    const st = statfsSync(DATA_DIR);
+    const disk = Number(st.blocks) * Number(st.bsize);
+    return disk > 0 ? Math.min(cap, disk * 0.4) : cap;
+  } catch {
+    return cap;
+  }
+}
+
 // Files of one upload (data, .own, .part, .idx) are removed together, oldest first,
 // and uploads touched in the last 30 minutes are never removed mid-transfer.
 function pruneEvidenceDir() {
@@ -844,7 +857,7 @@ function pruneEvidenceDir() {
     }
     const list = [...groups.values()].sort((a, b) => a.mtime - b.mtime);
     let total = list.reduce((sum, g) => sum + g.size, 0);
-    const maxBytes = 8 * 1024 * 1024 * 1024;
+    const maxBytes = evidenceMaxBytes();
     const maxUploads = 400;
     const fresh = Date.now() - 30 * 60 * 1000;
     let count = list.length;
