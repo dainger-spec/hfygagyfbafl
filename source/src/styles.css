@@ -462,8 +462,8 @@
 }
 
 /* The gold card on the home screen (components/gold-card.tsx): a thin metal
-   plate tilted in 3D from script (--gx/--gy/--sheen/--shade-* on the card,
-   --sh-* for the shadow on the stage). */
+   plate tilted in 3D from script. Only transform and opacity are animated
+   (each moving part is its own layer), so nothing is repainted per frame. */
 .epb-card-stage {
   position: relative;
   margin: 0 auto;
@@ -486,8 +486,9 @@
   border-radius: 18px;
   background: rgba(0, 0, 0, 0.9);
   filter: blur(16px);
-  opacity: var(--sh-o, 0.75);
-  transform: translate(var(--sh-x, 0px), var(--sh-y, 16px)) scale(var(--sh-s, 0.92));
+  opacity: 0.75;
+  transform: translate3d(0, 16px, 0) scale(0.92);
+  will-change: transform, opacity;
 }
 .epb-card {
   position: relative;
@@ -509,6 +510,7 @@
   border-radius: 4.2% / 6.6%;
   background: linear-gradient(135deg, #f0d791 0%, #a8822f 35%, #e6c776 55%, #7c5c1d 100%);
   pointer-events: none;
+  will-change: transform;
 }
 .epb-card-face {
   position: absolute;
@@ -523,9 +525,7 @@
 }
 .epb-card-art,
 .epb-card-words,
-.epb-card-foil,
-.epb-card-shade,
-.epb-card-glare {
+.epb-card-shade {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -535,34 +535,54 @@
 .epb-card-art {
   object-fit: cover;
 }
-/* brushed-metal bands that slide as the card turns */
+/* brushed-metal bands, a wide strip slid sideways as the card turns */
 .epb-card-foil {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 320%;
+  height: 100%;
+  pointer-events: none;
+  transform: translate3d(-34%, 0, 0);
+  will-change: transform;
   background: linear-gradient(
     112deg,
     rgba(255, 255, 255, 0) 18%,
-    rgba(255, 244, 205, 0.55) 30%,
+    rgba(255, 246, 214, 0.3) 30%,
     rgba(255, 255, 255, 0) 40%,
-    rgba(120, 80, 10, 0.25) 50%,
+    rgba(110, 76, 12, 0.12) 50%,
     rgba(255, 255, 255, 0) 58%,
-    rgba(255, 236, 180, 0.4) 68%,
+    rgba(255, 240, 196, 0.24) 68%,
     rgba(255, 255, 255, 0) 80%
   );
-  background-size: 320% 100%;
-  background-position: var(--sheen, 50%) 0;
-  mix-blend-mode: overlay;
 }
-/* the side turned away from the viewer gets darker */
+/* the side turned away from the viewer gets darker (opacity set from script) */
 .epb-card-shade {
-  background:
-    linear-gradient(90deg, rgba(40, 26, 4, var(--shade-l, 0)), rgba(40, 26, 4, 0) 60%),
-    linear-gradient(270deg, rgba(40, 26, 4, var(--shade-r, 0)), rgba(40, 26, 4, 0) 60%),
-    linear-gradient(180deg, rgba(40, 26, 4, var(--shade-t, 0)), rgba(40, 26, 4, 0) 60%),
-    linear-gradient(0deg, rgba(40, 26, 4, var(--shade-b, 0)), rgba(40, 26, 4, 0) 60%);
-  mix-blend-mode: multiply;
+  opacity: 0;
+  will-change: opacity;
 }
+.epb-card-shade-l {
+  background: linear-gradient(90deg, rgba(40, 26, 4, 0.42), rgba(40, 26, 4, 0) 60%);
+}
+.epb-card-shade-r {
+  background: linear-gradient(270deg, rgba(40, 26, 4, 0.42), rgba(40, 26, 4, 0) 60%);
+}
+.epb-card-shade-t {
+  background: linear-gradient(180deg, rgba(40, 26, 4, 0.36), rgba(40, 26, 4, 0) 60%);
+}
+.epb-card-shade-b {
+  background: linear-gradient(0deg, rgba(40, 26, 4, 0.36), rgba(40, 26, 4, 0) 60%);
+}
+/* a soft highlight, a big spot moved around under the face */
 .epb-card-glare {
-  background: radial-gradient(circle at var(--gx, 50%) var(--gy, 30%), rgba(255, 252, 235, 0.55), rgba(255, 252, 235, 0) 42%);
-  mix-blend-mode: soft-light;
+  position: absolute;
+  left: -50%;
+  top: -70%;
+  width: 200%;
+  height: 200%;
+  pointer-events: none;
+  will-change: transform;
+  background: radial-gradient(circle at 50% 50%, rgba(255, 252, 235, 0.32), rgba(255, 252, 235, 0) 26%);
 }
 
 /* one search step replacing the previous one */

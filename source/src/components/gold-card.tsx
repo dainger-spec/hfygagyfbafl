@@ -41,7 +41,7 @@ function ribbonPaths() {
 }
 const RIBBON = ribbonPaths();
 // edge layers behind the face, each shifted a fraction of the rim offset
-const EDGES = [0.2, 0.4, 0.6, 0.8, 1];
+const EDGES = [0.34, 0.67, 1];
 // how thick the plate looks, px
 const THICK = 4;
 
@@ -57,14 +57,22 @@ export function GoldCard({
   onOpen?: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
-  const stageRef = useRef<HTMLDivElement>(null);
+  const shadowRef = useRef<HTMLDivElement>(null);
+  const glareRef = useRef<HTMLDivElement>(null);
+  const foilRef = useRef<HTMLDivElement>(null);
+  const shadeRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const edgeRefs = useRef<(HTMLDivElement | null)[]>([]);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
 
   useEffect(() => {
     const el = cardRef.current;
-    const stage = stageRef.current;
-    if (!el || !stage) return;
+    const shadow = shadowRef.current;
+    const glare = glareRef.current;
+    const foil = foilRef.current;
+    if (!el || !shadow || !glare || !foil) return;
+    const shades = shadeRefs.current;
+    const edges = edgeRefs.current;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     let rx = 0;
     let ry = 0;
@@ -78,38 +86,54 @@ export function GoldCard({
     let by = 0;
     let raf = 0;
     let lift = 0;
+    let last = 0;
     const start = performance.now();
     const clamp = (v: number, m: number) => Math.max(-m, Math.min(m, v));
 
+    // Every frame only transforms and opacity change, each on its own layer,
+    // so the card face (art, engraved letters) is never repainted.
     const frame = (now: number) => {
       const t = (now - start) / 1000;
+      const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+      last = now;
       const gx = dragging ? tx : reduce ? 0 : 5 * Math.sin(t * 0.7);
       const gy = dragging ? ty : reduce ? 0 : 13 * Math.sin(t * 0.45);
-      const k = dragging ? 0.3 : 0.05;
+      // the same easing at any frame rate
+      const k = 1 - Math.pow(1 - (dragging ? 0.3 : 0.05), dt * 60);
       rx += (gx - rx) * k;
       ry += (gy - ry) * k;
-      lift += ((dragging ? 1 : 0) - lift) * 0.15;
+      lift += ((dragging ? 1 : 0) - lift) * (1 - Math.pow(0.85, dt * 60));
       el.style.transform = `translateZ(${(lift * 26).toFixed(1)}px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
-      // light: highlight and sheen follow the tilt, the far side darkens
-      el.style.setProperty("--gx", `${(50 + ry * 2.6).toFixed(1)}%`);
-      el.style.setProperty("--gy", `${(30 - rx * 3.2).toFixed(1)}%`);
-      el.style.setProperty("--sheen", `${(50 - ry * 3.2 + rx * 1.2).toFixed(1)}%`);
-      el.style.setProperty("--shade-r", (Math.max(0, ry) * 0.014).toFixed(3));
-      el.style.setProperty("--shade-l", (Math.max(0, -ry) * 0.014).toFixed(3));
-      el.style.setProperty("--shade-t", (Math.max(0, rx) * 0.016).toFixed(3));
-      el.style.setProperty("--shade-b", (Math.max(0, -rx) * 0.016).toFixed(3));
-      // the shadow on the "table" slides away from the raised side and spreads when lifted
-      stage.style.setProperty("--sh-x", `${(-ry * 0.7).toFixed(1)}px`);
-      stage.style.setProperty("--sh-y", `${(16 + rx * 0.5 + lift * 10).toFixed(1)}px`);
-      stage.style.setProperty("--sh-s", (0.92 + lift * 0.06).toFixed(3));
-      stage.style.setProperty("--sh-o", (0.75 - lift * 0.2).toFixed(3));
+      // light: the highlight and the sheen bands follow the tilt
+      glare.style.transform = `translate3d(${(ry * 1.3).toFixed(1)}%, ${(-rx * 1.6).toFixed(1)}%, 0)`;
+      foil.style.transform = `translate3d(${(-34 + ry * 1.5 - rx * 0.5).toFixed(1)}%, 0, 0)`;
+      // the side turned away darkens
+      const sh = [
+        Math.max(0, -ry) / 32,
+        Math.max(0, ry) / 32,
+        Math.max(0, rx) / 24,
+        Math.max(0, -rx) / 24,
+      ];
+      for (let i = 0; i < 4; i++) {
+        const node = shades[i];
+        if (node) node.style.opacity = sh[i]!.toFixed(3);
+      }
       // the rim shows on the side that turns towards the viewer
-      el.style.setProperty("--ex", `${(-THICK * Math.sin((ry * Math.PI) / 180)).toFixed(2)}px`);
-      el.style.setProperty("--ey", `${(THICK * Math.sin((rx * Math.PI) / 180)).toFixed(2)}px`);
+      const ex = -THICK * Math.sin((ry * Math.PI) / 180);
+      const ey = THICK * Math.sin((rx * Math.PI) / 180);
+      edges.forEach((node, i) => {
+        const f = EDGES[i]!;
+        if (node)
+          node.style.transform = `translate3d(${(ex * f).toFixed(2)}px, ${(ey * f).toFixed(2)}px, 0)`;
+      });
+      // the shadow on the "table" slides away from the raised side and spreads when lifted
+      shadow.style.transform = `translate3d(${(-ry * 0.7).toFixed(1)}px, ${(16 + rx * 0.5 + lift * 10).toFixed(1)}px, 0) scale(${(0.92 + lift * 0.06).toFixed(3)})`;
+      shadow.style.opacity = (0.75 - lift * 0.2).toFixed(3);
       raf = requestAnimationFrame(frame);
     };
     const run = () => {
       cancelAnimationFrame(raf);
+      last = 0;
       if (!document.hidden) raf = requestAnimationFrame(frame);
     };
     run();
@@ -189,8 +213,8 @@ export function GoldCard({
   const shown = count == null ? "—" : count.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
 
   return (
-    <div ref={stageRef} className="epb-card-stage">
-      <div className="epb-card-shadow" aria-hidden />
+    <div className="epb-card-stage">
+      <div ref={shadowRef} className="epb-card-shadow" aria-hidden />
       <div
         ref={cardRef}
         className="epb-card"
@@ -198,13 +222,13 @@ export function GoldCard({
         aria-label={`Europe Private Blacklist — ${ribbon} ${shown}`}
       >
         {/* the thickness of the plate: edge layers stacked behind the face */}
-        {EDGES.map((k) => (
+        {EDGES.map((k, i) => (
           <div
             key={k}
-            className="epb-card-edge"
-            style={{
-              transform: `translate(calc(var(--ex, 0px) * ${k}), calc(var(--ey, 0px) * ${k}))`,
+            ref={(node) => {
+              edgeRefs.current[i] = node;
             }}
+            className="epb-card-edge"
             aria-hidden
           />
         ))}
@@ -297,9 +321,18 @@ export function GoldCard({
               © EPB
             </text>
           </svg>
-          <div className="epb-card-foil" aria-hidden />
-          <div className="epb-card-shade" aria-hidden />
-          <div className="epb-card-glare" aria-hidden />
+          <div ref={foilRef} className="epb-card-foil" aria-hidden />
+          {(["l", "r", "t", "b"] as const).map((side, i) => (
+            <div
+              key={side}
+              ref={(node) => {
+                shadeRefs.current[i] = node;
+              }}
+              className={`epb-card-shade epb-card-shade-${side}`}
+              aria-hidden
+            />
+          ))}
+          <div ref={glareRef} className="epb-card-glare" aria-hidden />
         </div>
       </div>
     </div>
