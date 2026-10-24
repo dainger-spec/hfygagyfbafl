@@ -9434,7 +9434,17 @@ async function handleTelegramUpdate(update: TgUpdate) {
       if (!checkEnabled() || cb.message.chat.type !== "private") return;
       const locale = langOf(cb.from?.id);
       checkWait.add(String(cb.message.chat.id));
-      await editCard(cb, tb(locale, "checkPrompt"), backToMenuKeyboard(locale));
+      // the same check in the app (opens straight on the check page)
+      const appUrl = publicMiniAppUrl();
+      const keyboard = appUrl
+        ? {
+            inline_keyboard: [
+              [{ text: tb(locale, "checkOpenApp"), web_app: { url: `${appUrl.replace(/\/$/, "")}/?page=check` } }],
+              ...backToMenuKeyboard(locale).inline_keyboard,
+            ],
+          }
+        : backToMenuKeyboard(locale);
+      await editCard(cb, `${tb(locale, "checkPrompt")}${appUrl ? `\n\n${tb(locale, "checkAppHint")}` : ""}`, keyboard);
       return;
     }
     if (cb.data === "lang") {

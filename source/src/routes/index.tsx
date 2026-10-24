@@ -11,6 +11,13 @@ function Home() {
   const [canClose, setCanClose] = useState(false);
 
   useEffect(() => {
+    // opened from the bot's "Open in the app" on the check screen
+    try {
+      const start = new URLSearchParams(window.location.search).get("page") || (window.Telegram?.WebApp?.initDataUnsafe as { start_param?: string } | undefined)?.start_param || "";
+      if (start === "check") setPage("check");
+    } catch {
+      /* ignore */
+    }
     bootTelegramWebApp();
     setCanClose(Boolean(window.Telegram?.WebApp?.close));
     void configureTelegram({ data: { origin: window.location.origin } }).catch(() => {});
