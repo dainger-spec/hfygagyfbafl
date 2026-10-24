@@ -148,7 +148,7 @@ type Bindings = {
   // Premium custom emoji in private-chat messages (default on).
   customEmoji?: boolean;
   // Extra icons looked up in the owner's emoji pack: plain emoji -> custom_emoji_id.
-  packEmoji?: { at: number; set: string; map: Record<string, string> };
+  packEmoji?: { at: number; set: string; map: Record<string, string>; sig?: string };
   // Recently found counterparty checks, shared across all users (newest first,
   // capped). Shown in the app's "recent blacklists" list.
   recentFinds?: RecentFind[];
@@ -1304,7 +1304,11 @@ function isNotModified(err: unknown): boolean {
 const PACK_WANTED = [
   "✅", "✔️", "⛔", "⛔️", "🚫", "❌", "❗", "⏳", "⌛", "🔄", "🤖", "📛", "⚠️", "🔍", "🔎", "📍",
   "⭐", "▫️", "◽", "◽️", "⚪", "⚪️", "🔘", "🆔", "📅", "🗓", "🕐", "💬", "🔗", "ℹ️", "🎉", "🔒",
+  // the member card's caption
+  "💳", "🎴", "📨", "📩", "✉️", "🏆", "👑",
 ];
+// which list the saved pack map was made for (a longer list looks the pack up again)
+const PACK_SIG = PACK_WANTED.join("");
 const noVs = (e: string) => e.replace(/\uFE0F/g, "");
 let packLoading: Promise<void> | null = null;
 let packFailedAt = 0;
@@ -1315,7 +1319,7 @@ function loadPackEmoji(force = false): Promise<void> {
   const cached = bindings.packEmoji;
   if (cached?.map && !force) registerPackEmoji(cached.map);
   if (!botToken() || !customEmojiEnabled()) return Promise.resolve();
-  if (!force && cached && Date.now() - cached.at < 7 * 86_400_000) return Promise.resolve();
+  if (!force && cached && cached.sig === PACK_SIG && Date.now() - cached.at < 7 * 86_400_000) return Promise.resolve();
   if (!force && Date.now() - packFailedAt < 3_600_000) return Promise.resolve();
   if (packLoading) return packLoading;
   packLoading = (async () => {
@@ -1333,7 +1337,7 @@ function loadPackEmoji(force = false): Promise<void> {
         const id = byBase.get(noVs(want));
         if (id) map[want] = id;
       }
-      bindings.packEmoji = { at: Date.now(), set, map };
+      bindings.packEmoji = { at: Date.now(), set, map, sig: PACK_SIG };
       saveBindings();
       registerPackEmoji(map);
     } catch (err) {
@@ -3861,7 +3865,9 @@ type MemberInfo = {
   uid: string;
   holder: string;
   metal: string;
+  // under the front: who and which card; under the back: the numbers too
   caption: string;
+  captionBack: string;
   back: { signature: string; lines: [string, string][] };
 };
 
@@ -3925,14 +3931,15 @@ function memberInfo(from: TgUser): MemberInfo {
   const next = nextTier(published);
   const holder = from.username || name || "EPB Member";
   const who = from.username ? `@${escapeHtml(from.username)}` : escapeHtml(holder);
-  const caption = [
-    `🎴 ${who} — карта <b>${tier.name}</b>`,
+  const caption = `${pickEmoji("💳", "🎴")} ${who} — карта <b>${tier.name}</b>`;
+  const captionBack = [
+    caption,
     "",
-    `📨 Подано жалоб: <b>${st.filed}</b>`,
+    `${pickEmoji("📨", "📩", "✉️")} Подано жалоб: <b>${st.filed}</b>`,
     `✅ Принято: <b>${st.accepted}</b> · ❌ Отклонено: <b>${st.rejected}</b> · ⏳ На проверке: <b>${st.pending}</b>`,
     next
-      ? `До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
-      : "Высшая карта участника",
+      ? `${pickEmoji("🏆", "⭐")} До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
+      : `${pickEmoji("👑", "🏆")} Высшая карта участника`,
   ].join("\n");
   const listed = sources ? `ДА · ${sources} ${plural(sources, "ИСТОЧНИК", "ИСТОЧНИКА", "ИСТОЧНИКОВ")}` : "НЕТ";
   return {
@@ -3940,6 +3947,7 @@ function memberInfo(from: TgUser): MemberInfo {
     holder,
     metal: tier.metal,
     caption,
+    captionBack,
     back: {
       signature: name || holder,
       lines: [
@@ -3997,6 +4005,24 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
   return { video: await job };
 }
 
+// Card captions carry the owner's Premium emoji (in groups too); if Telegram
+// refuses them, the same call is made again with the plain emoji.
+// A chat that refused them gets plain emoji for a day (no second upload each time).
+const ceRefused = new Map<string, number>();
+async function withCardCaption<T>(chatId: number | string, text: string, call: (caption: string) => Promise<T>): Promise<T> {
+  const refusedAt = ceRefused.get(String(chatId));
+  const rich = customEmojiEnabled() && !(refusedAt && Date.now() - refusedAt < 86_400_000) ? applyCustomEmoji(text) : text;
+  if (rich === text) return call(text);
+  try {
+    return await call(rich);
+  } catch (err) {
+    if (!(err instanceof Error && /emoji|entit/i.test(err.message))) throw err;
+    if (ceRefused.size > 5000) ceRefused.clear();
+    ceRefused.set(String(chatId), Date.now());
+    return call(text);
+  }
+}
+
 // The card is a short silent MP4, which Telegram plays as a looping animation.
 const CARD_VIDEO_SIZE = { width: 800, height: 550, duration: 3 };
 function cardFile(video: Buffer) {
@@ -4032,7 +4058,9 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
     if (!anim) return "busy";
     let video: Buffer | null = "video" in anim ? anim.video : null;
     if ("fileId" in anim) {
-      const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption: info.caption, parse_mode: "HTML", ...reply, reply_markup: markup });
+      const sent = await withCardCaption(chatId, info.caption, (caption) =>
+        tg("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption, parse_mode: "HTML", ...reply, reply_markup: markup }),
+      ).catch(() => null);
       if (sent) return "sent";
       // the saved file stopped working: draw it again
       imCache.delete(`${info.metal}|${info.holder}`);
@@ -4040,19 +4068,23 @@ async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: nu
       video = again && "video" in again ? again.video : null;
     }
     if (!video) throw new Error("no card");
-    const form = new FormData();
-    form.set("chat_id", String(chatId));
-    form.set("caption", info.caption);
-    form.set("parse_mode", "HTML");
-    if (opts.replyTo) form.set("reply_to_message_id", String(opts.replyTo));
-    form.set("reply_markup", JSON.stringify(markup));
-    form.set("animation", cardFile(video));
-    for (const [k, v] of Object.entries(CARD_VIDEO_SIZE)) form.set(k, String(v));
-    rememberAnimation(info, "front", await tgForm("sendAnimation", form));
+    const file = video;
+    const sent = await withCardCaption(chatId, info.caption, (caption) => {
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("caption", caption);
+      form.set("parse_mode", "HTML");
+      if (opts.replyTo) form.set("reply_to_message_id", String(opts.replyTo));
+      form.set("reply_markup", JSON.stringify(markup));
+      form.set("animation", cardFile(file));
+      for (const [k, v] of Object.entries(CARD_VIDEO_SIZE)) form.set(k, String(v));
+      return tgForm<{ animation?: { file_id: string } }>("sendAnimation", form);
+    });
+    rememberAnimation(info, "front", sent);
   } catch (err) {
     console.error("[epb] im", err);
-    // without the picture the numbers still reach the chat
-    await tgSoft("sendMessage", { chat_id: chatId, text: info.caption, parse_mode: "HTML", ...reply, reply_markup: markup });
+    // without the picture the words still reach the chat
+    await withCardCaption(chatId, info.caption, (text) => tg("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...reply, reply_markup: markup })).catch(() => null);
   }
   return "sent";
 }
@@ -4092,20 +4124,28 @@ async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
       await answer("Сейчас рисую карты для других — попробуйте через минуту.", true);
       return;
     }
-    const media = { type: "animation", caption: info.caption, parse_mode: "HTML" };
+    // the numbers are under the back only
+    const text = side === "back" ? info.captionBack : info.caption;
+    const chatId = cb.message.chat.id;
+    const messageId = cb.message.message_id;
     if ("fileId" in anim) {
-      const ok = await tgSoft("editMessageMedia", { chat_id: cb.message.chat.id, message_id: cb.message.message_id, media: { ...media, media: anim.fileId }, reply_markup: markup });
+      const ok = await withCardCaption(chatId, text, (caption) =>
+        tg("editMessageMedia", { chat_id: chatId, message_id: messageId, media: { type: "animation", caption, parse_mode: "HTML", media: anim.fileId }, reply_markup: markup }),
+      ).catch(() => null);
       if (ok) return;
     }
     const video = "video" in anim ? anim.video : null;
     if (!video) return;
-    const form = new FormData();
-    form.set("chat_id", String(cb.message.chat.id));
-    form.set("message_id", String(cb.message.message_id));
-    form.set("media", JSON.stringify({ ...media, ...CARD_VIDEO_SIZE, media: "attach://card" }));
-    form.set("card", cardFile(video));
-    form.set("reply_markup", JSON.stringify(markup));
-    rememberAnimation(info, side, await tgForm("editMessageMedia", form));
+    const sent = await withCardCaption(chatId, text, (caption) => {
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("message_id", String(messageId));
+      form.set("media", JSON.stringify({ type: "animation", caption, parse_mode: "HTML", ...CARD_VIDEO_SIZE, media: "attach://card" }));
+      form.set("card", cardFile(video));
+      form.set("reply_markup", JSON.stringify(markup));
+      return tgForm<{ animation?: { file_id: string } }>("editMessageMedia", form);
+    });
+    rememberAnimation(info, side, sent);
   } catch (err) {
     console.error("[epb] im flip", err);
   }
