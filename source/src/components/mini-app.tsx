@@ -1,6 +1,7 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
+import { GoldCard } from "@/components/gold-card";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -504,6 +505,16 @@ function Home({
   const canUse = Boolean(identity.telegramId);
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
+  const [base, setBase] = useState<BaseStats | null>(() => cachedBase());
+  useEffect(() => {
+    let alive = true;
+    void fetchBase().then((value) => {
+      if (alive && value) setBase(value);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
@@ -515,7 +526,9 @@ function Home({
       {noBanners ? <BaseCard onOpen={onBase} /> : null}
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <EuStarsLogo size={150} title="Europe Private Blacklist" spin emblem big className="mt-4" />
+        <div className="mt-5 w-full">
+          <GoldCard count={base?.accounts ?? null} ribbon={t(locale, "cardRibbon")} locale={locale} onOpen={onBase} />
+        </div>
         <h1 className="epb-title-heavy mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
           <span className="block text-gold">Blacklist</span>
