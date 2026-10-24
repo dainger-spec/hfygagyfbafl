@@ -2061,7 +2061,7 @@ const ACCUSATION_LINE_RE =
 // fields only counts when it has some sign of a complaint somewhere: ads (a
 // casino's "@rainbetcom", a shop promo) mention handles too, but none of this.
 const SCAM_CONTEXT_RE =
-  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|блек|black\s*list|blacklist|арбитраж|arbitra|жалоб|доказ|пруф|proof|ущерб|сумм[аы]|не\s+верн|не\s+отда|заблокировал|пропал|ripper|ripped|\brip\b|stole|cheat|beware|warning|exit\s*scam|didn.?t\s+(pay|send|deliver|return)|never\s+(paid|sent|delivered|returned)|blocked\s+me|evidence|screenshots?|refund|chargeback|\bowes?\b|\bdebt|amount|🚫|❌|🤡|📛|🛑)/iu;
+  /(скам|scam|кидал|кинул|кидок|мошен|обман|развод|афер|швыр|непорядочн|должник|на[её]б|обул|ответчик|обвиняем|виновник|respondent|defendant|fraud|блек|black\s*list|blacklist|арбитраж|arbitra|жалоб|доказ|пруф|proof|ущерб|сумм[аы]|не\s+верн|не\s+отда|заблокировал|пропал|выдава\p{L}*\s+себя|под\s+видом|пострада\p{L}*|потерпевш\p{L}*|impersonat|ripper|ripped|\brip\b|stole|cheat|beware|warning|exit\s*scam|didn.?t\s+(pay|send|deliver|return)|never\s+(paid|sent|delivered|returned)|blocked\s+me|evidence|screenshots?|refund|chargeback|\bowes?\b|\bdebt|amount|🚫|❌|🤡|📛|🛑)/iu;
 export function postHasScamContext(body: string): boolean {
   return SCAM_CONTEXT_RE.test(body || "");
 }
@@ -2075,7 +2075,13 @@ const NOT_ACCUSED_CUE =
   "impersonat\\w*|pretend\\w*\\s+to\\s+be|posing\\s+as|credits?(?:\\s+go(?:es)?)?\\s+to|thanks?(?:\\s+to)?|thank\\s+you|shout\\s*outs?\\s+to|" +
   "send\\s+(?:it|them|this|(?:all\\s+)?info\\w*|proofs?|evidence)?\\s*to|contact|reach\\s+out\\s+to|message|\\bdm|write\\s+to|report\\s+(?:it\\s+|them\\s+)?to|" +
   "provided\\s+by|helped\\s+by|victims?|middlem[ae]n(?:\\s+like)?|escrow|scammed|ripped|" +
-  "выдава\\p{L}*\\s+себя\\s+за|представля\\p{L}*\\s+(?:себя\\s+)?как|спасибо|благодар\\p{L}*|пишите|обращайтесь(?:\\s+к)?|присылайте|отправляйте";
+  "выдава\\p{L}*\\s+себя\\s+за|представля\\p{L}*\\s+(?:себя\\s+)?(?:как\\s+)?|под\\s+видом|от\\s+имени|прикрыва\\p{L}*(?:\\s+\\p{L}+)?|" +
+  "жертв\\p{L}*|пострадавш\\p{L}*|потерпевш\\p{L}*|заявител\\p{L}*|истц\\p{L}*|истец|автор\\p{L}*|свидетел\\p{L}*|" +
+  "гарант\\p{L}*(?:\\s+сделки)?|посредник\\p{L}*|через\\s+(?:гаранта|посредника)|по\\s+рекомендаци\\p{L}*|" +
+  "спасибо|благодар\\p{L}*|с\\s+помощью|помог\\p{L}*|предостав\\p{L}*|" +
+  "пишите(?:\\s+(?:в|на))?|писать|обращайтесь(?:\\s+к)?|присылайте(?:\\s+(?:в|на))?|отправляйте(?:\\s+(?:в|на))?|" +
+  "подписывайтесь(?:\\s+на)?|переходите(?:\\s+(?:в|на))?|вступайте(?:\\s+в)?|наш\\p{L}*\\s+(?:канал|чат|бот)\\p{L}*|" +
+  "по\\s+(?:всем\\s+)?вопросам|контакт\\p{L}*|связь|связаться(?:\\s+с)?|админ\\p{L}*|модератор\\p{L}*|оспорить(?:\\s+можно)?(?:\\s+(?:у|через))?";
 const NOT_ACCUSED_BEFORE_RE = new RegExp(
   `(?:^|[^\\p{L}])(?:${NOT_ACCUSED_CUE})\\s*:?\\s*(?:@[A-Za-z0-9_]+[’'s]*\\s*(?:,|and|&|и|или)?\\s*)*@?$`,
   "iu",
@@ -2733,7 +2739,8 @@ async function confirmMirrorHits(
     .map((h) => h.messageId)
     .filter((id) => now - (mirrorVerified.get(`${m.key}:${id}`) || 0) > MIRROR_VERIFY_MS)
     .slice(0, 100);
-  if (!need.length || now < userBlockedUntil) return hits;
+  // no search account (switched off): the saved copy is trusted as it is
+  if (!need.length || now < userBlockedUntil || !hasUserbot()) return hits;
   try {
     const got = realMessages(await mirrorFetch(channel, { ids: need }));
     const alive = new Map(got.map((x) => [x.id!, x]));
@@ -4494,7 +4501,10 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     .map((k) => k.username)
     .filter((u) => u !== uname && !profile?.usernames.includes(u))
     .slice(0, 3);
-  if (hasUserbot() && channels.length && (uname || id || nick)) {
+  // The saved copies are searched even when the search account is switched off
+  // or gone: what was copied stays searchable.
+  const haveCopies = hasUserbot() || channels.some((c) => loadMirror(c).msgs.size > 0);
+  if (haveCopies && channels.length && (uname || id || nick)) {
     // postMatchesSubject then decides whether a post actually accuses this
     // username/id/nickname (vs mentions it as a contact/ad).
     // A handle like "dark_money" is often written "Dark Money" on the forum: also
@@ -4521,7 +4531,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     });
     for (const { channel, m, found, old } of scanned) {
       if (found.length) push(await confirmMirrorHits(channel, m, found, subject));
-      if (!m.complete) {
+      if (!m.complete && hasUserbot()) {
         // Copy not finished yet: older posts may be missing from it, so also ask
         // Telegram's search (the recent posts are already in the copy, so the
         // slow history scan is skipped once the copy has started).
@@ -4544,7 +4554,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       (a) => (uname && a.username.replace(/^@/, "").toLowerCase() === uname) || (id && a.id === id),
     ),
   );
-  if (epbChannel && hasUserbot() && (uname || id) && !hasBotRecord) {
+  if (epbChannel && (uname || id) && !hasBotRecord) {
     const m = loadMirror(epbChannel);
     if (m.msgs.size) {
       const botPosts = new Set<number>();
