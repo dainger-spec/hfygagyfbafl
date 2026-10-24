@@ -4093,10 +4093,28 @@ async function replyMemberCard(msg: TgMessage) {
   const from = msg.from!;
   const chatId = msg.chat.id;
   if (tooMany(`im:${from.id}`, 1, 3000) || tooMany(`im-chat:${chatId}`, 30, 60_000)) return;
-  if ((await sendMemberCard(chatId, from, { replyTo: msg.message_id })) === "busy") {
+  // a card that has to be drawn: a short "making" note meanwhile, removed when the card is there
+  const saved = imCache.get(animationKey(memberInfo(from), "front"));
+  let note: { message_id: number } | null = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  if (!saved || Date.now() - saved.at >= IM_FRESH_MS) {
+    note = await tgSoft<{ message_id: number }>("sendMessage", { chat_id: chatId, text: GROUP_STEPS[0], parse_mode: "HTML", reply_to_message_id: msg.message_id });
+    let step = 1;
+    if (note) {
+      const id = note.message_id;
+      timer = setInterval(() => {
+        if (step < GROUP_STEPS.length) void tgSoft("editMessageText", { chat_id: chatId, message_id: id, text: GROUP_STEPS[step++], parse_mode: "HTML" });
+      }, 900);
+    }
+  }
+  const result = await sendMemberCard(chatId, from, { replyTo: msg.message_id }).finally(() => timer && clearInterval(timer));
+  if (note) void tgSoft("deleteMessage", { chat_id: chatId, message_id: note.message_id });
+  if (result === "busy") {
     await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
   }
 }
+
+const GROUP_STEPS = ["💳 <b>Регистрируем карту…</b>", "✍️ <b>Ставим подпись…</b>", "✨ <b>Наносим гравировку…</b>"];
 
 // The card's front as a new message: in a chat (/im) or in private from the
 // menu ("Мой профиль").
