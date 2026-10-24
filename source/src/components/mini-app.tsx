@@ -78,6 +78,18 @@ export function MiniApp({
         } catch {
           /* ignore */
         }
+      } else {
+        // Telegram's script can arrive late on a slow connection: keep waiting
+        // in the background so the buttons unlock as soon as it does.
+        void waitForTelegramUser(30_000).then((late) => {
+          if (late && !cancelled) {
+            try {
+              setIdentity(late);
+            } catch {
+              /* ignore */
+            }
+          }
+        });
       }
       // A banned user gets a "closed" screen instead of the app.
       try {

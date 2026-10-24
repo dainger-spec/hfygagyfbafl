@@ -111,6 +111,29 @@ function installHttpGuards() {
     return origListen.apply(this, args);
   };
 
+  // A one-line traffic summary in the log once a minute when there is a lot of
+  // it or anything was turned away: tells a flood (many 429s, one busy address)
+  // from a slow hosting/network (normal counts, low lag, yet pages are slow).
+  const stats = { total: 0, r429: 0, r503: 0, r413: 0, maxLag: 0, maxInflight: 0 };
+  {
+    const t = setInterval(() => {
+      stats.maxLag = Math.max(stats.maxLag, loopLag);
+      if (stats.total > 600 || stats.r429 || stats.r503) {
+        let top = "";
+        let topN = 0;
+        for (const [ip, h] of floodHits) if (h.n > topN) [top, topN] = [ip, h.n];
+        console.log(
+          `[epb] http last minute: ${stats.total} requests, 429: ${stats.r429}, 503: ${stats.r503}, 413: ${stats.r413}, ` +
+            `max lag ${Math.round(stats.maxLag)} ms, max in flight ${stats.maxInflight}, busiest address ${top || "-"} (${topN}/10s)`,
+        );
+      }
+      stats.total = stats.r429 = stats.r503 = stats.r413 = stats.maxLag = stats.maxInflight = 0;
+    }, 60_000);
+    t.unref?.();
+    const lagT = setInterval(() => (stats.maxLag = Math.max(stats.maxLag, loopLag)), 1000);
+    lagT.unref?.();
+  }
+
   function reject(res: any, code: number, text: string, extra: Record<string, string> = {}): boolean {
     try {
       res.statusCode = code;
@@ -126,9 +149,17 @@ function installHttpGuards() {
   const origEmit = proto.emit;
   const guardedEmit = function (this: any, event: string, req: any, res: any, ...rest: unknown[]) {
     if (event === "request" && req && typeof req.url === "string") {
-      if (Number(req.headers["content-length"] || 0) > MAX_BODY_BYTES) return reject(res, 413, "too large");
-      if (shouldShed(req)) return reject(res, 503, "busy, try again shortly", { "retry-after": "10" });
+      stats.total += 1;
+      if (Number(req.headers["content-length"] || 0) > MAX_BODY_BYTES) {
+        stats.r413 += 1;
+        return reject(res, 413, "too large");
+      }
+      if (shouldShed(req)) {
+        stats.r503 += 1;
+        return reject(res, 503, "busy, try again shortly", { "retry-after": "10" });
+      }
       inflight += 1;
+      if (inflight > stats.maxInflight) stats.maxInflight = inflight;
       let done = false;
       const finish = () => {
         if (!done) {
@@ -139,6 +170,7 @@ function installHttpGuards() {
       res.once("close", finish);
       res.once("finish", finish);
       if (floodBlocked(req)) {
+        stats.r429 += 1;
         try {
           res.statusCode = 429;
           res.setHeader("retry-after", "60");
