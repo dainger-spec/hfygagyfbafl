@@ -158,7 +158,7 @@ export const getPostDetail = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384), channelId: z.string().max(40), messageId: z.number().int().positive() }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
-    const gate = bot.allowCheck(data.initData);
+    const gate = bot.allowView(data.initData);
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return bot.postDetail(gate.userId, data.channelId, data.messageId);
   });
@@ -167,7 +167,7 @@ export const getLatestParsed = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384) }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
-    const gate = bot.allowCheck(data.initData);
+    const gate = bot.allowView(data.initData);
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return { ok: true as const, items: bot.latestParsed(30) };
   });
@@ -176,7 +176,7 @@ export const getRecentBlacklist = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384) }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
-    const gate = bot.allowCheck(data.initData);
+    const gate = bot.allowView(data.initData);
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return { ok: true as const, items: bot.recentBlacklist() };
   });
@@ -185,7 +185,7 @@ export const getBlacklistEntry = createServerFn({ method: "POST" })
   .validator(z.object({ id: z.string().min(1).max(80), initData: z.string().max(16384) }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
-    const gate = bot.allowCheck(data.initData);
+    const gate = bot.allowView(data.initData);
     if (!gate.ok) return { ok: false as const, error: gate.error };
     return { ok: true as const, entry: bot.blacklistEntry(data.id) };
   });

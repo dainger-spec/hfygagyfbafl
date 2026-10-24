@@ -13,7 +13,8 @@ function installHttpGuards() {
   // address gets 429 for FLOOD_BLOCK, before any page is rendered. A normal visit
   // is a few dozen requests. Telegram's webhook calls are never limited.
   const FLOOD_WINDOW = 10_000;
-  const FLOOD_MAX = 300;
+  // Generous: mobile carriers put many people behind one address (CGNAT).
+  const FLOOD_MAX = Number(process.env.EPB_FLOOD_MAX || 500);
   const FLOOD_BLOCK = 60_000;
   const floodHits = new Map<string, { start: number; n: number; blockedUntil: number }>();
 
@@ -30,7 +31,12 @@ function installHttpGuards() {
       .filter(Boolean);
     // The right-most entry is the one our own proxy added (the others can be forged).
     if (xff.length) return xff[xff.length - 1];
-    return req.socket?.remoteAddress || "";
+    const direct = String(req.socket?.remoteAddress || "").replace(/^::ffff:/, "");
+    // Only a private/loopback address and no forwarding header: that is the
+    // hosting's own proxy, shared by every visitor. Limiting it would block
+    // everyone at once, so per-address limits are skipped (load shedding stays).
+    if (/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:)/i.test(direct)) return "";
+    return direct;
   }
 
   function floodBlocked(req: any): boolean {

@@ -265,6 +265,22 @@ function saveBindings() {
   }
 }
 
+// For frequent changes that don't affect checks (search history, card file
+// ids): one write a few seconds later instead of one per event, and the check
+// cache is left alone.
+let bindingsSoonTimer: ReturnType<typeof setTimeout> | null = null;
+function saveBindingsSoon() {
+  if (bindingsSoonTimer || bindingsLoadFailed) return;
+  bindingsSoonTimer = setTimeout(() => {
+    bindingsSoonTimer = null;
+    try {
+      writeJsonAtomic(BINDINGS_PATH, bindings);
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+}
+
 const ID_CACHE_PATH = join(DATA_DIR, "telegram-ids-verified.json");
 const PENDING_PATH = join(DATA_DIR, "telegram-pending.json");
 const LOCALES_PATH = join(DATA_DIR, "telegram-locales.json");
@@ -281,12 +297,17 @@ try {
   userLocales = {};
 }
 
+let localesTimer: ReturnType<typeof setTimeout> | null = null;
 function saveLocales() {
-  try {
-    writeJsonAtomic(LOCALES_PATH, userLocales);
-  } catch {
-    /* ignore */
-  }
+  if (localesTimer) return;
+  localesTimer = setTimeout(() => {
+    localesTimer = null;
+    try {
+      writeJsonAtomic(LOCALES_PATH, userLocales);
+    } catch {
+      /* ignore */
+    }
+  }, 2000);
 }
 
 function langOf(userId: string | number | undefined): Locale {
@@ -638,14 +659,19 @@ export function evidenceBytesOnDisk(id?: string): number {
 
 const rateHits = new Map<string, number[]>();
 
+let rateSweepAt = 0;
 function tooMany(key: string, max: number, windowMs: number) {
   const now = Date.now();
-  if (rateHits.size > 4000) {
+  // Old entries are swept at most once a minute (a sweep on every call would
+  // walk the whole table for each request once many people use the bot).
+  if (rateHits.size > 4000 && now - rateSweepAt > 60_000) {
+    rateSweepAt = now;
     for (const [k, hits] of rateHits) {
       const keep = hits.filter((t) => now - t < 6 * 60 * 60 * 1000);
       if (!keep.length) rateHits.delete(k);
       else rateHits.set(k, keep);
     }
+    if (rateHits.size > 200_000) rateHits.clear();
   }
   const keep = (rateHits.get(key) || []).filter((t) => now - t < windowMs);
   if (keep.length >= max) {
@@ -2312,7 +2338,8 @@ const MIRROR_REFRESH_MS = 6 * 60 * 60_000;
 const MIRROR_REFRESH_PAGES = 3; // x100 latest posts re-read
 const MIRROR_VERIFY_MS = 30 * 60_000;
 
-type MirrorMsg = { id: number; date: number; text: string; low: string };
+// acc: the accused names in the post, parsed once ("@a 12345"; "" = none).
+type MirrorMsg = { id: number; date: number; text: string; low: string; acc?: string };
 type Mirror = {
   key: string;
   complete: boolean;
@@ -2324,6 +2351,9 @@ type Mirror = {
   dirty: boolean;
   savedAt: number;
   version: number; // bumped on every change (admin stats are cached per version)
+  // word -> post ids containing it (latin words, handles, ids; 5+ chars), built
+  // on first search, then kept up to date as posts arrive
+  index?: Map<string, number[]>;
 };
 type MirrorFile = {
   v: 1;
@@ -2360,7 +2390,9 @@ function putMirrorMsg(m: Mirror, id: number, date: number, text: string) {
   }
   const prev = m.msgs.get(id);
   if (prev && prev.text === body) return;
-  m.msgs.set(id, { id, date: date || prev?.date || 0, text: body, low: body.toLowerCase() });
+  const msg = { id, date: date || prev?.date || 0, text: body, low: body.toLowerCase() };
+  m.msgs.set(id, msg);
+  indexPost(m, msg);
   touchMirror(m);
 }
 
@@ -2580,7 +2612,8 @@ function searchMirror(channel: CheckChannel, m: Mirror, subject: { username: str
   }
   if (!needles.length) return [];
   const out: CheckHit[] = [];
-  for (const msg of m.msgs.values()) {
+  // a forum nickname can be written many ways: those searches read every post
+  for (const msg of subject.nick ? m.msgs.values() : mirrorCandidates(m, needles)) {
     if (!needles.some((n) => msg.low.includes(n))) continue;
     if (!postMatchesSubject(msg.text, subject.username, subject.id, strict, subject.nick, channel.username)) continue;
     out.push({
@@ -2591,6 +2624,42 @@ function searchMirror(channel: CheckChannel, m: Mirror, subject: { username: str
       date: (msg.date || 0) * 1000,
       snippet: snippetAround(msg.text, subject.username || subject.id || subject.nick),
     });
+  }
+  return out;
+}
+
+// A word index of a copy, so a search by @username or ID looks at the few posts
+// that contain it instead of every post. Deleted/edited posts may leave stale
+// ids behind; candidates are always re-checked against the current text.
+const INDEX_WORD_RE = /[a-z0-9_]{5,}/g;
+function indexPost(m: Mirror, msg: MirrorMsg) {
+  if (!m.index) return;
+  // digit runs on their own too ("id9300777" is found by 9300777)
+  for (const w of new Set([...(msg.low.match(INDEX_WORD_RE) || []), ...(msg.low.match(/\d{5,}/g) || [])])) {
+    const list = m.index.get(w);
+    if (list) list.push(msg.id);
+    else m.index.set(w, [msg.id]);
+  }
+}
+function mirrorIndex(m: Mirror): Map<string, number[]> {
+  if (!m.index) {
+    m.index = new Map();
+    for (const msg of m.msgs.values()) indexPost(m, msg);
+  }
+  return m.index;
+}
+// The posts that may mention any of the needles: from the index when every
+// needle is an indexable word, otherwise (a Cyrillic nickname, a short word)
+// all posts.
+function mirrorCandidates(m: Mirror, needles: string[]): Iterable<MirrorMsg> {
+  if (!needles.length || !needles.every((n) => /^[a-z0-9_]{5,}$/.test(n))) return m.msgs.values();
+  const idx = mirrorIndex(m);
+  const ids = new Set<number>();
+  for (const n of needles) for (const id of idx.get(n) || []) ids.add(id);
+  const out: MirrorMsg[] = [];
+  for (const id of ids) {
+    const msg = m.msgs.get(id);
+    if (msg) out.push(msg);
   }
   return out;
 }
@@ -2693,29 +2762,34 @@ export function mirrorStats() {
 // with fields only the people in the fields, otherwise every name (minus the
 // channel's own handle and the signature line). A username and an id tied
 // together in one post are one account.
-// Posts are parsed once and remembered by text, so while a channel is still being
-// copied only the newly copied posts are parsed again.
-type AccusedEntry = { version: number; perMsg: Map<number, { text: string; hs: string[]; is: string[] }>; usernames: Set<string>; ids: Set<string>; paired: Set<string> };
+// Each post is parsed once; the result is kept on the post itself (a compact
+// string), so while a channel is still being copied only new posts are parsed,
+// and an edited post (a new object) is parsed again.
+type AccusedEntry = { version: number; usernames: Set<string>; ids: Set<string>; paired: Set<string> };
 const accusedCache = new Map<string, AccusedEntry>();
+function postAccused(ch: CheckChannel, msg: MirrorMsg, strict: boolean, self: string): { hs: string[]; is: string[] } {
+  if (msg.acc === undefined) {
+    const { hs, is } = accusedInPost(msg.text, strict, ch.username, self);
+    msg.acc = [...hs, ...is].join(" ");
+  }
+  const names = msg.acc ? msg.acc.split(" ") : [];
+  return { hs: names.filter((n) => n.startsWith("@")), is: names.filter((n) => !n.startsWith("@")) };
+}
 function mirrorAccused(ch: CheckChannel, m: Mirror) {
   const hit = accusedCache.get(m.key);
   if (hit && hit.version === m.version) return hit;
   const usernames = new Set<string>();
   const ids = new Set<string>();
   const paired = new Set<string>();
-  const perMsg: AccusedEntry["perMsg"] = new Map();
   const self = ch.username ? `@${ch.username.replace(/^@/, "").toLowerCase()}` : "";
   const strict = isStrictChannel(ch);
-  for (const [msgId, msg] of m.msgs) {
-    let parsed = hit?.perMsg.get(msgId);
-    if (!parsed || parsed.text !== msg.text) parsed = { text: msg.text, ...accusedInPost(msg.text, strict, ch.username, self) };
-    perMsg.set(msgId, parsed);
-    const { hs, is } = parsed;
+  for (const msg of m.msgs.values()) {
+    const { hs, is } = postAccused(ch, msg, strict, self);
     for (const h of hs) usernames.add(h);
     for (const i of is) ids.add(i);
     if (hs.length === 1 && is.length === 1) paired.add(hs[0]!);
   }
-  const value = { version: m.version, perMsg, usernames, ids, paired };
+  const value = { version: m.version, usernames, ids, paired };
   accusedCache.set(m.key, value);
   return value;
 }
@@ -3605,7 +3679,7 @@ async function sendOwnerPanel(chatId: string | number, editMessageId?: number) {
   ];
   const rows: { text: string; callback_data: string }[][] = [];
   if (hasUserbot()) {
-    const base = blacklistBase();
+    const base = blacklistBaseStats() || blacklistBase();
     const ms = mirrorStats();
     lines.push(
       "",
@@ -4011,7 +4085,7 @@ function postLinks(q: { username?: string; id?: string }): { username: string; i
   const out: { username: string; id: string; date: number; where: string }[] = [];
   for (const ch of mirrorChannels()) {
     const m = loadMirror(ch);
-    for (const msg of m.msgs.values()) {
+    for (const msg of mirrorCandidates(m, [needle])) {
       if (!msg.low.includes(needle)) continue;
       const fields = [...accusedFields(msg.text)];
       const handles = fields.filter((f) => f.startsWith("@"));
@@ -4226,6 +4300,24 @@ function matchManualBlacklist(uname: string, id: string): CheckResult["manual"] 
 // Recent results per query, so repeated checks of the same handle (by many
 // people, or someone hammering it) don't hit the userbot again.
 const checkCache = new Map<string, { at: number; res: CheckResult }>();
+const checkInflight = new Map<string, Promise<CheckResult>>();
+
+// At most a few scans of the channel copies run at the same time (pure CPU work);
+// the rest wait their turn. Same total speed, but the bot keeps answering other
+// people in between. Telegram requests are not held by this.
+const SEARCH_SLOTS = 4;
+let searchBusy = 0;
+const searchWaiters: (() => void)[] = [];
+async function withSearchSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (searchBusy >= SEARCH_SLOTS) await new Promise<void>((r) => searchWaiters.push(r));
+  searchBusy++;
+  try {
+    return await fn();
+  } finally {
+    searchBusy--;
+    searchWaiters.shift()?.();
+  }
+}
 const CHECK_CACHE_TTL = 5 * 60_000;
 
 // A forum nickname typed as plain text (WWH nicknames can contain spaces):
@@ -4246,7 +4338,15 @@ export async function checkCounterparty(input: string): Promise<CheckResult> {
   })();
   const hit = checkCache.get(cacheKey);
   if (hit && Date.now() - hit.at < CHECK_CACHE_TTL && cacheKey !== "||") return hit.res;
-  const res = await checkCounterpartyUncached(input);
+  // many people checking the same account at once: one search for all of them
+  const running = cacheKey !== "||" ? checkInflight.get(cacheKey) : undefined;
+  if (running) return running;
+  const job = checkCounterpartyUncached(input);
+  if (cacheKey !== "||") {
+    checkInflight.set(cacheKey, job);
+    void job.catch(() => {}).finally(() => checkInflight.delete(cacheKey));
+  }
+  const res = await job;
   if (cacheKey !== "||") {
     checkCache.set(cacheKey, { at: Date.now(), res });
     if (checkCache.size > 2000) checkCache.delete(checkCache.keys().next().value!);
@@ -4340,13 +4440,26 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     // look for it as a nickname (strict rules only, see postMatchesSubject).
     const subject = { username: uname, id: effectiveId, nick: nick || (/[_.]/.test(uname) ? uname : "") };
     const searchTerms = [uname, effectiveId, nick].filter(Boolean) as string[];
-    for (const channel of channels) {
-      const m = loadMirror(channel);
-      if (m.msgs.size) {
-        // The local copy: instant, whole history.
-        const found = searchMirror(channel, m, subject);
-        push(found.length ? await confirmMirrorHits(channel, m, found, subject) : []);
+    // The local copies first (instant, whole history), channel by channel with a
+    // pause in between so no single search holds the bot.
+    const scanned = await withSearchSlot(async () => {
+      const out: { channel: CheckChannel; m: Mirror; found: CheckHit[]; old: { sub: { username: string; id: string; nick: string }; found: CheckHit[] }[] }[] = [];
+      for (const channel of channels) {
+        await new Promise((r) => setImmediate(r));
+        const m = loadMirror(channel);
+        const found = m.msgs.size ? searchMirror(channel, m, subject) : [];
+        const old = m.msgs.size
+          ? oldNames.map((o) => {
+              const sub = { username: o, id: "", nick: "" };
+              return { sub, found: searchMirror(channel, m, sub) };
+            })
+          : [];
+        out.push({ channel, m, found, old });
       }
+      return out;
+    });
+    for (const { channel, m, found, old } of scanned) {
+      if (found.length) push(await confirmMirrorHits(channel, m, found, subject));
       if (!m.complete) {
         // Copy not finished yet: older posts may be missing from it, so also ask
         // Telegram's search (the recent posts are already in the copy, so the
@@ -4355,12 +4468,7 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
         // already holds at least that many posts.
         for (const term of searchTerms) push(await userSearchChannel(channel, term, subject, m.msgs.size >= 800));
       }
-      for (const old of oldNames) {
-        if (!m.msgs.size) break;
-        const sub = { username: old, id: "", nick: "" };
-        const found = searchMirror(channel, m, sub);
-        push(found.length ? await confirmMirrorHits(channel, m, found, sub) : []);
-      }
+      for (const o of old) if (o.found.length) push(await confirmMirrorHits(channel, m, o.found, o.sub));
     }
   } else if (uname || id) {
     // Fallback: posts indexed by the bot since each channel was connected.
@@ -4439,8 +4547,17 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
     if (srcCount) result.account.listedIn = srcCount;
   }
   const display = uname ? `@${parsed.username.replace(/^@/, "")}` : id ? `ID ${id}` : "";
-  recordFind(uname, id, display, result);
   return result;
+}
+
+// Viewing check data (latest list, a post, a complaint card) is cheap: it has its
+// own per-user budget and never uses up the search limits.
+export function allowView(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
+  if (!checkEnabled()) return { ok: false, error: "disabled" };
+  const user = verifyTelegramInitData(initData);
+  if (!user) return { ok: false, error: "telegram auth required" };
+  if (tooMany(`view:${user.id}`, 90, 60_000)) return { ok: false, error: "too many" };
+  return { ok: true, userId: user.id };
 }
 
 export function allowCheck(initData: string): { ok: true; userId: string } | { ok: false; error: string } {
@@ -4520,7 +4637,11 @@ export function newCaptchaImage(userId: string, purpose: CaptchaPurpose = "check
   if (tooMany(`capimg:${uid}`, 12, 10 * 60_000)) return null;
   const word = randomCaptchaWord();
   captchaPending.set(uid, { word, exp: Date.now() + 5 * 60_000, tries: 0, purpose });
-  if (captchaPending.size > 20_000) captchaPending.clear();
+  if (captchaPending.size > 20_000) {
+    const now = Date.now();
+    for (const [k, v] of captchaPending) if (v.exp < now) captchaPending.delete(k);
+    if (captchaPending.size > 50_000) captchaPending.clear();
+  }
   return renderCaptcha(word);
 }
 
@@ -6090,7 +6211,9 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
   const search = checkCounterparty(input).catch(() => empty);
   const sources = checkSources();
   let res: CheckResult;
-  if (sources.length) {
+  // Telegram allows a bot ~30 messages a second in total: with very many checks
+  // at once the live animation is skipped and only the result is sent.
+  if (sources.length && activeCheckAnimations < CHECK_ANIM_MAX) {
     await Promise.race([loadPackEmoji(), sleep(1500)]);
     res = await animateBotCheck(chatId, en, sources, search, input);
   } else {
@@ -6110,7 +6233,22 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
 // at a time in a quote, and the final message folds the list (expandable quote)
 // under a one-line verdict. Premium icons when the pack has them.
 const CHECK_FRAME_MS = 900;
-async function animateBotCheck(
+const CHECK_ANIM_MAX = 40;
+let activeCheckAnimations = 0;
+async function animateBotCheck(...args: Parameters<typeof runCheckAnimation>): Promise<CheckResult> {
+  activeCheckAnimations++;
+  try {
+    return await runCheckAnimation(...args);
+  } finally {
+    activeCheckAnimations--;
+  }
+}
+// Slower frames when many animations run together, so the edits stay well under
+// the bot's overall limit (12 at once: ~1 frame/s each; 36: one every ~3 s).
+function checkFrameMs() {
+  return CHECK_FRAME_MS * Math.max(1, Math.ceil(activeCheckAnimations / 12));
+}
+async function runCheckAnimation(
   chatId: number | string,
   en: boolean,
   sources: { key: string; title: string }[],
@@ -6166,8 +6304,11 @@ async function animateBotCheck(
   let messageId = 0;
   let pausedUntil = 0;
   // One edit, never retried or waited on: a frame Telegram refuses is skipped.
-  const show = async (text: string) => {
+  // In-between frames also share one budget for the whole bot (15 a second), so
+  // the answers people are waiting for always go first.
+  const show = async (text: string, must = false) => {
     if (Date.now() < pausedUntil) return;
+    if (!must && messageId && tooMany("anim:frames", 15, 1000)) return;
     for (let attempt = 0; attempt < 2; attempt++) {
       const body = { chat_id: chatId, text: useCe ? applyCustomEmoji(text) : text, parse_mode: "HTML", disable_web_page_preview: true };
       try {
@@ -6188,13 +6329,16 @@ async function animateBotCheck(
 
   const stepOut = Math.max(1, Math.ceil(n / 4)); // results revealed per frame
   const started = Date.now();
-  await show(frame(false));
-  void tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
+  await show(frame(false), true);
+  if (activeCheckAnimations <= 12) void tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
   while (done < n) {
-    await Promise.race([search, sleep(CHECK_FRAME_MS)]);
+    const frameMs = checkFrameMs();
+    await Promise.race([search, sleep(frameMs)]);
+    // busy: once the answer is in, go straight to the summary
+    if (res && activeCheckAnimations > 12) break;
     if (res) {
       // the answer can come early: still finish the current frame's pause
-      await sleep(Math.max(0, CHECK_FRAME_MS - ((Date.now() - started) % CHECK_FRAME_MS)));
+      await sleep(Math.max(0, frameMs - ((Date.now() - started) % frameMs)));
       done = Math.min(n, done + stepOut);
     } else {
       cursor = (cursor + 1) % n;
@@ -6209,7 +6353,7 @@ async function animateBotCheck(
   // the last frame must land, so it waits out a flood pause instead of skipping
   if (Date.now() < pausedUntil) await sleep(Math.min(10_000, pausedUntil - Date.now()));
   pausedUntil = 0;
-  await show(frame(true));
+  await show(frame(true), true);
   return result;
 }
 
@@ -6459,7 +6603,7 @@ export function publicBaseStats(): { accounts: number; sources: number; updatedA
 const POST_MEDIA_DIR = join(DATA_DIR, "post-media");
 const POST_MEDIA_MAX_BYTES = 40 * 1024 * 1024;
 const POST_PHOTOS_MAX = 6;
-const POST_PHOTO_MAX_BYTES = 600 * 1024;
+const POST_PHOTO_MAX_BYTES = 300 * 1024; // ~800 px photos are 60–150 KB
 export type PostDetail = { ok: true; text: string; date: number; source: string; photos: string[]; more: number; photosPending?: boolean } | { ok: false; error: string };
 type PostMeta = { text: string; date: number; photos: number; more: number; at: number };
 const postInflight = new Map<string, Promise<{ text: string; date: number; photos: Buffer[]; more: number } | null>>();
@@ -6593,13 +6737,15 @@ export function latestParsed(limit = 30): LatestParsed[] {
   for (const c of mirrorChannels()) {
     const m = mirrors.get(chatIdKey(c.id)) || loadMirror(c);
     if (!m.msgs.size) continue;
-    const parsed = mirrorAccused(c, m).perMsg;
-    const newest = [...m.msgs.values()].sort((x, y) => y.date - x.date || y.id - x.id);
+    const self = c.username ? `@${c.username.replace(/^@/, "").toLowerCase()}` : "";
+    const strict = isStrictChannel(c);
     let taken = 0;
-    for (const msg of newest) {
-      if (taken >= limit) break;
-      const p = parsed.get(msg.id);
-      if (!p || (!p.hs.length && !p.is.length)) continue;
+    // newest posts have the highest ids: walk down from the top, no sorting
+    for (let msgId = m.newest, steps = 0; msgId > 0 && taken < limit && steps < 5000; msgId--, steps++) {
+      const msg = m.msgs.get(msgId);
+      if (!msg) continue;
+      const p = postAccused(c, msg, strict, self);
+      if (!p.hs.length && !p.is.length) continue;
       const account = p.hs.length ? p.hs.slice(0, 2).join(", ") : `ID ${p.is[0]}`;
       const amount = msg.text.match(AMOUNT_RE)?.[1]?.replace(/\s+/g, " ").trim();
       rows.push({
@@ -6633,16 +6779,57 @@ export function latestParsed(limit = 30): LatestParsed[] {
 // sees the menu, the count only needs to be roughly current).
 let baseCountCache = { at: 0, n: 0 };
 function blacklistBaseCached(): number {
-  if (!checkEnabled()) return 0;
-  if (Date.now() - baseCountCache.at > 60_000) {
-    try {
-      baseCountCache = { at: Date.now(), n: blacklistBase().accounts };
-    } catch {
-      baseCountCache = { at: Date.now(), n: baseCountCache.n };
-    }
-  }
-  return baseCountCache.n;
+  return blacklistBaseStats()?.accounts || 0;
 }
+
+// The full base numbers, at most a minute old. Small copies are counted right
+// away; big ones (hundreds of thousands of posts) are first parsed in the
+// background in small slices, so the bot never freezes while counting — until
+// then the previous numbers (or none) are shown.
+let baseStatsCache: { at: number; value: ReturnType<typeof blacklistBase> | null } = { at: 0, value: null };
+let baseRefreshing = false;
+export function blacklistBaseStats(): ReturnType<typeof blacklistBase> | null {
+  if (!checkEnabled()) return null;
+  if (Date.now() - baseStatsCache.at <= 60_000 || baseRefreshing) return baseStatsCache.value;
+  const total = mirrorChannels().reduce((n, c) => n + loadMirror(c).msgs.size, 0);
+  if (total < 30_000) {
+    try {
+      baseStatsCache = { at: Date.now(), value: blacklistBase() };
+      baseCountCache = { at: Date.now(), n: baseStatsCache.value!.accounts };
+    } catch {
+      baseStatsCache = { at: Date.now(), value: baseStatsCache.value };
+    }
+    return baseStatsCache.value;
+  }
+  baseRefreshing = true;
+  void warmAccused()
+    .then(() => {
+      baseStatsCache = { at: Date.now(), value: blacklistBase() };
+      baseCountCache = { at: Date.now(), n: baseStatsCache.value!.accounts };
+    })
+    .catch(() => {})
+    .finally(() => (baseRefreshing = false));
+  return baseStatsCache.value;
+}
+
+// Parse every not-yet-parsed post, 1500 at a time, yielding to the bot between slices.
+async function warmAccused() {
+  for (const c of mirrorChannels()) {
+    const m = loadMirror(c);
+    const self = c.username ? `@${c.username.replace(/^@/, "").toLowerCase()}` : "";
+    const strict = isStrictChannel(c);
+    let n = 0;
+    for (const msg of [...m.msgs.values()]) {
+      if (msg.acc !== undefined) continue;
+      postAccused(c, msg, strict, self);
+      if (++n % 1500 === 0) await new Promise((r) => setImmediate(r));
+    }
+    await new Promise((r) => setImmediate(r));
+    mirrorIndex(m);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+if (botToken() && process.env.NODE_ENV !== "test") setTimeout(() => void blacklistBaseStats(), 4_000).unref?.();
 
 async function replyStart(chatId: number, userId?: string | number) {
   const locale = langOf(userId ?? chatId);
@@ -7946,7 +8133,7 @@ export function logSearch(who: { id: string | number; username?: string; first_n
     via,
   };
   bindings.searchLog = [entry, ...(bindings.searchLog || [])].slice(0, SEARCH_LOG_MAX);
-  saveBindings();
+  saveBindingsSoon();
 }
 
 function adminSearchLog(): AdminView {
@@ -8068,7 +8255,8 @@ function adminHome(): AdminView {
     `<b>Канал</b>: <code>${escapeHtml(bindings.channelId || PINNED_CHANNEL)}</code>`,
     ...(checkEnabled()
       ? (() => {
-          const b = blacklistBase();
+          const b = blacklistBaseStats();
+          if (!b) return [];
           const n = (v: number) => v.toLocaleString("ru-RU");
           return [
             `<b>База блеклиста</b>: ~${n(b.accounts)} аккаунтов (ников ${n(b.usernames)}, ID ${n(b.ids)}), постов ${n(b.posts)}` +
