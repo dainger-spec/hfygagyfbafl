@@ -330,13 +330,51 @@
     rgba(246, 200, 90, 0.3) 85%,
     rgba(255, 216, 110, 0.36) 100%
   );
-  /* thin lines, slightly tilted, with a soft glow rising from the bottom */
+  /* thin horizontal lines, with a soft glow rising from the bottom */
   -webkit-mask-image:
-    repeating-linear-gradient(174deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
+    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   -webkit-mask-composite: source-in;
   mask-image:
-    repeating-linear-gradient(174deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
+    repeating-linear-gradient(180deg, transparent 0, rgba(0, 0, 0, 0.9) 0.7px, #000 1.2px, rgba(0, 0, 0, 0.9) 1.7px, transparent 2.4px, transparent 4.2px),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
   mask-composite: intersect;
+}
+
+/* A soft golden light drifting slowly behind everything (moved with transform
+   only, so it costs the phone nothing to animate). */
+.epb-app-bg::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  left: -40%;
+  top: -20%;
+  width: 180%;
+  height: 140%;
+  background:
+    radial-gradient(35% 28% at 30% 70%, rgba(255, 205, 100, 0.16), transparent 70%),
+    radial-gradient(30% 22% at 72% 35%, rgba(241, 187, 76, 0.1), transparent 70%);
+  mix-blend-mode: screen;
+  will-change: transform;
+  animation: epb-glow-drift 26s ease-in-out infinite alternate;
+}
+@keyframes epb-glow-drift {
+  0% {
+    transform: translate3d(-6%, 4%, 0) scale(1);
+  }
+  35% {
+    transform: translate3d(8%, -6%, 0) scale(1.08);
+  }
+  70% {
+    transform: translate3d(-2%, -12%, 0) scale(0.96);
+  }
+  100% {
+    transform: translate3d(10%, 6%, 0) scale(1.05);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .epb-app-bg::after {
+    animation: none;
+  }
 }
