@@ -3,8 +3,12 @@ import { haptic } from "@/lib/telegram";
 
 // The gold card on the home screen. The art (public/brand/card.webp, drawn by
 // scripts/gen-card.py) carries the engraving, frame, chip and medallion; the
-// words are SVG on top so they stay sharp and the count stays live. It sways
-// gently on its own and can be tilted in 3D with a finger; a tap opens `onOpen`.
+// words are SVG on top so they stay sharp and the count stays live. It is
+// built like a thin metal plate: edge layers shifted against the tilt show its
+// rim, a shadow under it follows the tilt, a metallic sheen slides over the
+// face and the side turned away darkens. It sways on its own, tilts under a
+// finger and a tap opens `onOpen`. (No preserve-3d: browsers rasterise such
+// layers at low resolution and the small print goes blurry.)
 const DARK = "#1d1810";
 const VB_W = 1200;
 const VB_H = 756;
@@ -36,6 +40,10 @@ function ribbonPaths() {
   return { body, tails: [tail(a0, -1), tail(a1, 1)], text };
 }
 const RIBBON = ribbonPaths();
+// edge layers behind the face, each shifted a fraction of the rim offset
+const EDGES = [0.2, 0.4, 0.6, 0.8, 1];
+// how thick the plate looks, px
+const THICK = 7;
 
 export function GoldCard({
   count,
@@ -49,12 +57,14 @@ export function GoldCard({
   onOpen?: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
 
   useEffect(() => {
     const el = cardRef.current;
-    if (!el) return;
+    const stage = stageRef.current;
+    if (!el || !stage) return;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     let rx = 0;
     let ry = 0;
@@ -67,20 +77,35 @@ export function GoldCard({
     let bx = 0;
     let by = 0;
     let raf = 0;
+    let lift = 0;
     const start = performance.now();
     const clamp = (v: number, m: number) => Math.max(-m, Math.min(m, v));
 
     const frame = (now: number) => {
       const t = (now - start) / 1000;
-      const gx = dragging ? tx : reduce ? 0 : 3.5 * Math.sin(t * 0.7);
-      const gy = dragging ? ty : reduce ? 0 : 9 * Math.sin(t * 0.45);
+      const gx = dragging ? tx : reduce ? 0 : 5 * Math.sin(t * 0.7);
+      const gy = dragging ? ty : reduce ? 0 : 13 * Math.sin(t * 0.45);
       const k = dragging ? 0.3 : 0.05;
       rx += (gx - rx) * k;
       ry += (gy - ry) * k;
-      el.style.transform = `rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
-      el.style.setProperty("--gx", `${(50 + ry * 2.4).toFixed(1)}%`);
-      el.style.setProperty("--gy", `${(35 - rx * 3).toFixed(1)}%`);
-      el.style.setProperty("--sheen", `${(50 - ry * 4).toFixed(1)}%`);
+      lift += ((dragging ? 1 : 0) - lift) * 0.15;
+      el.style.transform = `translateZ(${(lift * 26).toFixed(1)}px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
+      // light: highlight and sheen follow the tilt, the far side darkens
+      el.style.setProperty("--gx", `${(50 + ry * 2.6).toFixed(1)}%`);
+      el.style.setProperty("--gy", `${(30 - rx * 3.2).toFixed(1)}%`);
+      el.style.setProperty("--sheen", `${(50 - ry * 3.2 + rx * 1.2).toFixed(1)}%`);
+      el.style.setProperty("--shade-r", (Math.max(0, ry) * 0.014).toFixed(3));
+      el.style.setProperty("--shade-l", (Math.max(0, -ry) * 0.014).toFixed(3));
+      el.style.setProperty("--shade-t", (Math.max(0, rx) * 0.016).toFixed(3));
+      el.style.setProperty("--shade-b", (Math.max(0, -rx) * 0.016).toFixed(3));
+      // the shadow on the "table" slides away from the raised side and spreads when lifted
+      stage.style.setProperty("--sh-x", `${(-ry * 0.7).toFixed(1)}px`);
+      stage.style.setProperty("--sh-y", `${(16 + rx * 0.5 + lift * 10).toFixed(1)}px`);
+      stage.style.setProperty("--sh-s", (0.92 + lift * 0.06).toFixed(3));
+      stage.style.setProperty("--sh-o", (0.75 - lift * 0.2).toFixed(3));
+      // the rim shows on the side that turns towards the viewer
+      el.style.setProperty("--ex", `${(-THICK * Math.sin((ry * Math.PI) / 180)).toFixed(2)}px`);
+      el.style.setProperty("--ey", `${(THICK * Math.sin((rx * Math.PI) / 180)).toFixed(2)}px`);
       raf = requestAnimationFrame(frame);
     };
     const run = () => {
@@ -90,6 +115,7 @@ export function GoldCard({
     run();
 
     const down = (e: PointerEvent) => {
+      haptic("light");
       dragging = true;
       moved = 0;
       sx = e.clientX;
@@ -115,10 +141,8 @@ export function GoldCard({
     const up = () => {
       if (!dragging) return;
       dragging = false;
-      if (moved < 6) {
-        haptic("light");
-        onOpenRef.current?.();
-      }
+      if (moved >= 6) haptic("light");
+      if (moved < 6) onOpenRef.current?.();
     };
     el.addEventListener("pointerdown", down);
     el.addEventListener("pointermove", move);
@@ -138,52 +162,118 @@ export function GoldCard({
   const shown = count == null ? "—" : count.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
 
   return (
-    <div className="epb-card-stage">
+    <div ref={stageRef} className="epb-card-stage">
+      <div className="epb-card-shadow" aria-hidden />
       <div
         ref={cardRef}
         className="epb-card"
         role={onOpen ? "button" : undefined}
         aria-label={`Europe Private Blacklist — ${ribbon} ${shown}`}
       >
-        <img src="/brand/card.webp" alt="" draggable={false} className="epb-card-art" />
-        <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
-          <text
-            x={600}
-            y={162}
-            textAnchor="middle"
-            textLength={680}
-            lengthAdjust="spacingAndGlyphs"
-            fontFamily="Manrope, sans-serif"
-            fontWeight={800}
-            fontSize={60}
-            letterSpacing={2}
-            fill={DARK}
-          >
-            EUROPE PRIVATE
-          </text>
-          <text x={122} y={704} fontFamily="Manrope, sans-serif" fontWeight={500} fontSize={56} letterSpacing={1} fill={DARK}>
-            BLACK LIST
-          </text>
-          <g fill="#d2b468" stroke={DARK} strokeWidth={3.2} strokeLinejoin="round">
-            {RIBBON.tails.map((d) => (
-              <path key={d} d={d} />
-            ))}
-            <path d={RIBBON.body} />
-          </g>
-          <path id="epb-ribbon-line" d={RIBBON.text} fill="none" />
-          <text fontFamily="Manrope, sans-serif" fontWeight={700} fontSize={20} letterSpacing={3} fill={DARK}>
-            <textPath href="#epb-ribbon-line" startOffset="50%" textAnchor="middle">
-              {ribbon}
-            </textPath>
-          </text>
-          <text x={RX + 6} y={604} textAnchor="middle" fontFamily="Manrope, sans-serif" fontWeight={500} fontSize={46} letterSpacing={2} fill={DARK}>
-            {shown}
-          </text>
-          <text x={RX + 6} y={746} textAnchor="middle" fontFamily="Manrope, sans-serif" fontWeight={800} fontSize={15} fill={DARK}>
-            © EPB
-          </text>
-        </svg>
-        <div className="epb-card-glare" aria-hidden />
+        {/* the thickness of the plate: edge layers stacked behind the face */}
+        {EDGES.map((k) => (
+          <div
+            key={k}
+            className="epb-card-edge"
+            style={{
+              transform: `translate(calc(var(--ex, 0px) * ${k}), calc(var(--ey, 0px) * ${k}))`,
+            }}
+            aria-hidden
+          />
+        ))}
+        <div className="epb-card-face">
+          <img src="/brand/card.webp" alt="" draggable={false} className="epb-card-art" />
+          <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
+            <defs>
+              {/* raised lettering: a light edge above, a soft dark one below */}
+              <filter id="epb-emboss" x="-5%" y="-30%" width="110%" height="160%">
+                <feOffset in="SourceAlpha" dx="-2" dy="-2.5" result="up" />
+                <feFlood floodColor="#fff4d2" floodOpacity="0.8" />
+                <feComposite in2="up" operator="in" result="hi" />
+                <feOffset in="SourceAlpha" dx="2" dy="3.5" result="down" />
+                <feFlood floodColor="#3b2a06" floodOpacity="0.45" />
+                <feComposite in2="down" operator="in" result="lo" />
+                <feMerge>
+                  <feMergeNode in="lo" />
+                  <feMergeNode in="hi" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
+            <g filter="url(#epb-emboss)">
+              <text
+                x={600}
+                y={162}
+                textAnchor="middle"
+                textLength={680}
+                lengthAdjust="spacingAndGlyphs"
+                fontFamily="Manrope, sans-serif"
+                fontWeight={800}
+                fontSize={60}
+                letterSpacing={2}
+                fill={DARK}
+              >
+                EUROPE PRIVATE
+              </text>
+              <text
+                x={122}
+                y={704}
+                fontFamily="Manrope, sans-serif"
+                fontWeight={500}
+                fontSize={56}
+                letterSpacing={1}
+                fill={DARK}
+              >
+                BLACK LIST
+              </text>
+            </g>
+            <g fill="#d2b468" stroke={DARK} strokeWidth={3.2} strokeLinejoin="round">
+              {RIBBON.tails.map((d) => (
+                <path key={d} d={d} />
+              ))}
+              <path d={RIBBON.body} />
+            </g>
+            <path id="epb-ribbon-line" d={RIBBON.text} fill="none" />
+            <text
+              fontFamily="Manrope, sans-serif"
+              fontWeight={700}
+              fontSize={20}
+              letterSpacing={3}
+              fill={DARK}
+            >
+              <textPath href="#epb-ribbon-line" startOffset="50%" textAnchor="middle">
+                {ribbon}
+              </textPath>
+            </text>
+            <text
+              x={RX + 6}
+              y={604}
+              textAnchor="middle"
+              fontFamily="Manrope, sans-serif"
+              fontWeight={500}
+              fontSize={46}
+              letterSpacing={2}
+              fill={DARK}
+              filter="url(#epb-emboss)"
+            >
+              {shown}
+            </text>
+            <text
+              x={RX + 6}
+              y={746}
+              textAnchor="middle"
+              fontFamily="Manrope, sans-serif"
+              fontWeight={800}
+              fontSize={15}
+              fill={DARK}
+            >
+              © EPB
+            </text>
+          </svg>
+          <div className="epb-card-foil" aria-hidden />
+          <div className="epb-card-shade" aria-hidden />
+          <div className="epb-card-glare" aria-hidden />
+        </div>
       </div>
     </div>
   );
