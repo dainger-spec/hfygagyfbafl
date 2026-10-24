@@ -127,7 +127,7 @@ type Bindings = {
   arbiterChatId?: string;
   channelId?: string;
   miniAppUrl?: string;
-  cards?: Partial<Record<"welcome" | "welcomeAnim3" | "submitted" | "published", string>>;
+  cards?: Partial<Record<"welcome" | "welcomeAnim4" | "submitted" | "published", string>>;
   cardStamp?: string;
   relayChats?: RelayChat[];
   checkChannels?: { id: string; title?: string; username?: string; addedAt: number }[];
@@ -6537,10 +6537,11 @@ async function sendCard(
     }
   };
 
-  // The /start card is an animation (medallion + circling stars); the still
+  // The /start card is an animation (a dark card with the medallion and its
+  // circling stars); the still
   // picture below stays as the fallback if Telegram refuses it.
   if (kind === "welcome") {
-    const cachedAnim = bindings.cards?.welcomeAnim3;
+    const cachedAnim = bindings.cards?.welcomeAnim4;
     if (cachedAnim) {
       const sent = await trySend("sendAnimation", (c, markup) => ({
         chat_id: chatId,
@@ -6550,7 +6551,7 @@ async function sendCard(
         ...rest(markup),
       }));
       if (sent) return;
-      if (bindings.cards) delete bindings.cards.welcomeAnim3;
+      if (bindings.cards) delete bindings.cards.welcomeAnim4;
       saveBindings();
     }
     let mp4: Buffer | null = null;
@@ -6566,7 +6567,7 @@ async function sendCard(
         form.set("caption", c);
         form.set("parse_mode", "HTML");
         form.set("width", "960");
-        form.set("height", "540");
+        form.set("height", "606");
         form.set("duration", "15");
         if (markup) form.set("reply_markup", JSON.stringify(markup));
         form.set("animation", new File([new Uint8Array(mp4!)], "welcome.mp4", { type: "video/mp4" }));
@@ -6582,7 +6583,7 @@ async function sendCard(
         }
         const fileId = sent.animation?.file_id || sent.document?.file_id;
         if (fileId) {
-          bindings.cards = { ...bindings.cards, welcomeAnim3: fileId };
+          bindings.cards = { ...bindings.cards, welcomeAnim4: fileId };
           saveBindings();
         }
         return;
