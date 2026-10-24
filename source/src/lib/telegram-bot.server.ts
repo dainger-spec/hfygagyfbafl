@@ -3849,15 +3849,31 @@ function plural(n: number, one: string, few: string, many: string) {
   return many;
 }
 
-async function replyMemberCard(msg: TgMessage) {
-  const from = msg.from!;
-  const chatId = msg.chat.id;
-  if (tooMany(`im:${from.id}`, 1, 30_000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+type MemberInfo = {
+  uid: string;
+  holder: string;
+  metal: string;
+  caption: string;
+  back: { signature: string; lines: [string, string][] };
+};
+
+function regLabel(id: string): string {
+  const r = registrationEstimate(id);
+  if (!r) return "—";
+  if (r.later) return `${r.year} ИЛИ ПОЗЖЕ`;
+  return `${["НАЧАЛО", "СЕРЕДИНА", "КОНЕЦ"][r.part]} ${r.year}`;
+}
+
+// Everything the card shows for one person: the caption under it, the metal,
+// and the details engraved on its back.
+function memberInfo(from: TgUser): MemberInfo {
   const uid = String(from.id);
-  const tier = tierFor(publishedCountFor(uid));
-  const next = nextTier(publishedCountFor(uid));
+  const published = publishedCountFor(uid);
+  const tier = tierFor(published);
+  const next = nextTier(published);
   const st = memberStats(uid);
-  const holder = from.username || [from.first_name, from.last_name].filter(Boolean).join(" ") || "EPB Member";
+  const name = [from.first_name, from.last_name].filter(Boolean).join(" ").trim();
+  const holder = from.username || name || "EPB Member";
   const who = from.username ? `@${escapeHtml(from.username)}` : escapeHtml(holder);
   const caption = [
     `🎴 ${who} — карта <b>${tier.name}</b>`,
@@ -3868,47 +3884,152 @@ async function replyMemberCard(msg: TgMessage) {
       ? `До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
       : "Высшая карта участника",
   ].join("\n");
-  const markup = { inline_keyboard: [[{ text: "Подать жалобу", url: `https://t.me/${BOT_USERNAME}?start=im` }]] };
-  const base = blacklistBaseCached() || null;
-  const key = `${tier.metal}|${holder}`;
+  // is the person in the blacklist base? (local base only, no lookups)
+  const botPosts = new Set<number>();
+  for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
+  const find = parsLookup({ id: uid, usernames: from.username ? [from.username.toLowerCase()] : [], name }, checkChannels(), botPosts);
+  const sources = find ? find.epb.length + find.manual.length + new Set(find.posts.map((p) => p.channelTitle)).size : 0;
+  const listed = find ? `ДА · ${sources} ${plural(sources, "ИСТОЧНИК", "ИСТОЧНИКА", "ИСТОЧНИКОВ")}` : "НЕТ";
+  return {
+    uid,
+    holder,
+    metal: tier.metal,
+    caption,
+    back: {
+      signature: name || holder,
+      lines: [
+        ["НИК", name || "—"],
+        ["USERNAME", from.username ? `@${from.username}` : "—"],
+        ["ID", uid],
+        ["РЕГИСТРАЦИЯ", regLabel(uid)],
+        ["В БАЗЕ БЛЕКЛИСТА", listed],
+        ["КАРТА", `${tier.name} · ПРИНЯТО ${st.accepted} ИЗ ${st.filed}`],
+      ],
+    },
+  };
+}
+
+function memberMarkup(uid: string, side: "front" | "back") {
+  return {
+    inline_keyboard: [
+      [{ text: "🔄 Перевернуть", callback_data: `imf:${uid}:${side === "front" ? "b" : "f"}` }],
+      [{ text: "Подать жалобу", url: `https://t.me/${BOT_USERNAME}?start=im` }],
+    ],
+  };
+}
+
+// The animation of one side: Telegram file id when it was sent recently,
+// otherwise drawn now (one at a time). The front is the same for everyone with
+// that name and metal; the back is the person's own.
+async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { gif: Buffer } | null> {
+  const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
   const cached = imCache.get(key);
-  if (cached && Date.now() - cached.at < IM_CACHE_MS) {
-    const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: cached.fileId, caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
-    if (sent) return;
-    imCache.delete(key);
-  }
-  if (imWaiting >= 4) {
-    await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
-    return;
-  }
+  if (cached && Date.now() - cached.at < IM_CACHE_MS) return { fileId: cached.fileId };
+  if (imWaiting >= 4) return null;
   imWaiting++;
   const job = imQueue.then(async () => {
     try {
-      void tgSoft("sendChatAction", { chat_id: chatId, action: "upload_video" });
       const { renderMemberGif } = await import("@/lib/member-gif.server");
-      const gif = await renderMemberGif({ metal: tier.metal, holder, count: base });
-      const form = new FormData();
-      form.set("chat_id", String(chatId));
-      form.set("caption", caption);
-      form.set("parse_mode", "HTML");
-      form.set("reply_to_message_id", String(msg.message_id));
-      form.set("reply_markup", JSON.stringify(markup));
-      form.set("animation", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
-      const sent = await tgForm<{ animation?: { file_id: string }; document?: { file_id: string } }>("sendAnimation", form);
-      const fileId = sent.animation?.file_id || sent.document?.file_id;
-      if (fileId) {
-        imCache.set(key, { fileId, at: Date.now() });
-        if (imCache.size > 500) imCache.delete(imCache.keys().next().value!);
-      }
-    } catch (err) {
-      console.error("[epb] im", err);
-      // without the picture the numbers still reach the chat
-      await tgSoft("sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+      return await renderMemberGif({
+        metal: info.metal,
+        holder: info.holder,
+        count: blacklistBaseCached() || null,
+        ...(side === "back" ? { back: info.back } : {}),
+      });
     } finally {
       imWaiting--;
     }
   });
   imQueue = job.catch(() => {});
+  return { gif: await job };
+}
+
+function rememberAnimation(info: MemberInfo, side: "front" | "back", sent: { animation?: { file_id: string }; document?: { file_id: string } } | null) {
+  const fileId = sent?.animation?.file_id || sent?.document?.file_id;
+  if (!fileId) return;
+  const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
+  imCache.set(key, { fileId, at: Date.now() });
+  if (imCache.size > 500) imCache.delete(imCache.keys().next().value!);
+}
+
+async function replyMemberCard(msg: TgMessage) {
+  const from = msg.from!;
+  const chatId = msg.chat.id;
+  if (tooMany(`im:${from.id}`, 1, 30_000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+  const info = memberInfo(from);
+  const markup = memberMarkup(info.uid, "front");
+  void tgSoft("sendChatAction", { chat_id: chatId, action: "upload_video" });
+  try {
+    const anim = await memberAnimation(info, "front");
+    if (!anim) {
+      await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
+      return;
+    }
+    let gif: Buffer | null = "gif" in anim ? anim.gif : null;
+    if ("fileId" in anim) {
+      const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption: info.caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+      if (sent) return;
+      // the saved file stopped working: draw it again
+      imCache.delete(`${info.metal}|${info.holder}`);
+      const again = await memberAnimation(info, "front");
+      gif = again && "gif" in again ? again.gif : null;
+    }
+    if (!gif) throw new Error("no card");
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("caption", info.caption);
+    form.set("parse_mode", "HTML");
+    form.set("reply_to_message_id", String(msg.message_id));
+    form.set("reply_markup", JSON.stringify(markup));
+    form.set("animation", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
+    rememberAnimation(info, "front", await tgForm("sendAnimation", form));
+  } catch (err) {
+    console.error("[epb] im", err);
+    // without the picture the numbers still reach the chat
+    await tgSoft("sendMessage", { chat_id: chatId, text: info.caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+  }
+}
+
+// "Перевернуть": only the person who asked for the card can turn it over.
+async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
+  const [, uid = "", to = "b"] = (cb.data || "").split(":");
+  const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+  if (!cb.message || !cb.from) return answer();
+  if (String(cb.from.id) !== uid) {
+    await answer("Перевернуть карту может только её владелец — напишите /im, чтобы получить свою.", true);
+    return;
+  }
+  if (tooMany(`imflip:${uid}`, 1, 4000)) {
+    await answer("Секунду…");
+    return;
+  }
+  const side = to === "f" ? "front" : "back";
+  await answer(side === "back" ? "Переворачиваю…" : "Обратно на лицевую сторону…");
+  const info = memberInfo(cb.from);
+  const markup = memberMarkup(uid, side);
+  try {
+    const anim = await memberAnimation(info, side);
+    if (!anim) {
+      await answer("Сейчас рисую карты для других — попробуйте через минуту.", true);
+      return;
+    }
+    const media = { type: "animation", caption: info.caption, parse_mode: "HTML" };
+    if ("fileId" in anim) {
+      const ok = await tgSoft("editMessageMedia", { chat_id: cb.message.chat.id, message_id: cb.message.message_id, media: { ...media, media: anim.fileId }, reply_markup: markup });
+      if (ok) return;
+    }
+    const gif = "gif" in anim ? anim.gif : null;
+    if (!gif) return;
+    const form = new FormData();
+    form.set("chat_id", String(cb.message.chat.id));
+    form.set("message_id", String(cb.message.message_id));
+    form.set("media", JSON.stringify({ ...media, media: "attach://card" }));
+    form.set("card", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
+    form.set("reply_markup", JSON.stringify(markup));
+    rememberAnimation(info, side, await tgForm("editMessageMedia", form));
+  } catch (err) {
+    console.error("[epb] im flip", err);
+  }
 }
 
 // ---------- /pars: check a chat's members against the blacklist base ----------
@@ -10584,6 +10705,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
         return;
       }
       await editCard(cb, await startCaption(locale), applyKeyboard(locale));
+      return;
+    }
+    if (cb.data.startsWith("imf:")) {
+      await flipMemberCard(cb);
       return;
     }
     if (cb.data.startsWith("pars:")) {

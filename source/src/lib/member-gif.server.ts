@@ -1,10 +1,12 @@
 import { gunzipSync } from "node:zlib";
 // @ts-expect-error gifenc ships no types
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
-import { CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS, CARD_INKS, type GlyphAtlas } from "@/lib/member-gif-assets";
+import { CARD_BACKS, CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS, CARD_INKS, type GlyphAtlas } from "@/lib/member-gif-assets";
 
 // The /im animation: the member card of the app, with the person's name and the
-// base count, gently tilting in 3D, as a looping GIF. Drawn here without any
+// base count, gently tilting in 3D over the drifting engraved texture and a warm
+// moving light, as a looping GIF. The reverse carries the person's details,
+// engraved. Drawn here without any
 // image library: the flat face is composed once, then every frame projects it
 // with perspective (inverse mapping per pixel), adds the rim, the light and the
 // shadow, and the frames share one 256-colour palette.
@@ -20,11 +22,13 @@ const RADIUS = 25; // rounded corners, face pixels
 const K = CARD_FACE_W / 1200; // the app lays the card out on a 1200-wide box
 
 const faceCache = new Map<string, Uint8Array>();
-function baseFace(metal: string): Uint8Array {
-  let f = faceCache.get(metal);
+function baseFace(metal: string, side: "front" | "back"): Uint8Array {
+  const key = `${side}:${metal}`;
+  let f = faceCache.get(key);
   if (!f) {
-    f = new Uint8Array(gunzipSync(Buffer.from(CARD_FACES[metal] || CARD_FACES.gold!, "base64")));
-    faceCache.set(metal, f);
+    const src = side === "back" ? CARD_BACKS : CARD_FACES;
+    f = new Uint8Array(gunzipSync(Buffer.from(src[metal] || src.gold!, "base64")));
+    faceCache.set(key, f);
   }
   return f;
 }
@@ -46,31 +50,43 @@ function hexRgb(h: string): [number, number, number] {
 }
 
 // Text from the glyph atlas onto the face: left-aligned or centred on x, shrunk
-// to fit maxWidth, raised like the app's lettering (light edge up, dark down).
+// to fit maxWidth. "raised" is the app's lettering (light edge up, dark down),
+// "engraved" the reverse (cut into the metal), "flat" plain ink. Returns where
+// the text ends.
 function drawText(
   face: Uint8Array,
-  fontName: "name" | "count",
+  fontName: "name" | "count" | "info",
   text: string,
   x: number,
   baseline: number,
   maxWidth: number,
   align: "left" | "center",
   metal: string,
-) {
+  style: { relief?: "raised" | "engraved" | "flat"; color?: [number, number, number]; alpha?: number } = {},
+): number {
   const font: GlyphAtlas = CARD_FONTS[fontName];
   const chars = [...text.toUpperCase()].filter((c) => font.glyphs[c]);
-  if (!chars.length) return;
+  if (!chars.length) return x;
   const track = 1;
   const width = chars.reduce((s, c) => s + font.glyphs[c]!.a + track, -track);
   const scale = Math.min(1, maxWidth / Math.max(1, width));
   const start = align === "center" ? x - (width * scale) / 2 : x;
   const look = CARD_INKS[metal] || CARD_INKS.gold!;
-  const ink = hexRgb(look.ink);
-  const passes: [number, number, number[], number][] = [
-    [1, 1.5, look.lo.slice(0, 3), (look.lo[3] ?? 0) / 255],
-    [-1, -1, look.hi.slice(0, 3), (look.hi[3] ?? 0) / 255],
-    [0, 0, ink, 1],
-  ];
+  const ink = style.color || hexRgb(look.ink);
+  const alpha = style.alpha ?? 1;
+  const hi: [number, number, number[], number] = [-1, -1, look.hi.slice(0, 3), ((look.hi[3] ?? 0) / 255) * alpha];
+  const lo: [number, number, number[], number] = [1, 1.5, look.lo.slice(0, 3), ((look.lo[3] ?? 0) / 255) * alpha];
+  const relief = style.relief || "raised";
+  const passes: [number, number, number[], number][] =
+    relief === "flat"
+      ? [[0, 0, ink, alpha]]
+      : relief === "engraved"
+        ? [
+            [-1, -1, lo[2], lo[3]],
+            [1, 1, hi[2], hi[3]],
+            [0, 0, ink, alpha],
+          ]
+        : [lo, hi, [0, 0, ink, alpha]];
   for (const [ox, oy, col, strength] of passes) {
     let pen = start;
     for (const c of chars) {
@@ -101,6 +117,7 @@ function drawText(
       pen += (g.a + track) * scale;
     }
   }
+  return start + (width + track) * scale;
 }
 
 function insideRounded(u: number, v: number): boolean {
@@ -112,27 +129,63 @@ function insideRounded(u: number, v: number): boolean {
   return dx * dx + dy * dy <= RADIUS * RADIUS;
 }
 
-// The warm dark ground behind the card, drawn once.
-let ground: Float32Array | null = null;
-function backdrop(): Float32Array {
-  if (ground) return ground;
-  ground = new Float32Array(W * H * 3);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const dx = (x - W / 2) / (W * 0.55);
-      const dy = (y - H / 2) / (H * 0.6);
-      const glow = Math.exp(-(dx * dx + dy * dy) * 1.6);
-      const i = (y * W + x) * 3;
-      ground[i] = 10 + 58 * glow;
-      ground[i + 1] = 9 + 40 * glow;
-      ground[i + 2] = 7 + 12 * glow;
+// The background: the drifting engraved "banknote" lines of the app (two
+// copies, the second mirrored, sliding against each other so the moire moves)
+// under a warm yellowish light that wanders around. The line pattern is drawn
+// once, a little larger than the frame; frames only shift it.
+const PAD = 48;
+const TW = W + 2 * PAD;
+const TH = H + 2 * PAD;
+let lines: Float32Array | null = null;
+function lineTexture(): Float32Array {
+  if (lines) return lines;
+  lines = new Float32Array(TW * TH);
+  const ts = 2.2;
+  for (let y = 0; y < TH; y++) {
+    for (let x = 0; x < TW; x++) {
+      const u = x / ts;
+      const v = y / ts;
+      const flow =
+        7 * Math.sin(u / 41 + v / 67) + 4.5 * Math.sin(u / 23 - v / 49 + 1.3) + 3 * Math.sin((u + 2 * v) / 31 + 0.7) + 2 * Math.sin(u / 11 + v / 90 + 2.1);
+      const phase = (v - flow) / 3.4;
+      const dist = Math.abs(phase - Math.round(phase)) * 3.4 * ts;
+      lines[y * TW + x] = Math.max(0, Math.min(1, 1 - (dist - 0.55) / 0.9));
     }
   }
-  return ground;
+  return lines;
 }
 
-function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, out: Uint8Array) {
-  const bg = backdrop();
+function backdrop(a: number, out: Float32Array) {
+  const tex = lineTexture();
+  const ax = Math.round(PAD + PAD * 0.8 * Math.sin(a));
+  const ay = Math.round(PAD + PAD * 0.5 * Math.cos(a));
+  const bx = Math.round(PAD - PAD * 0.7 * Math.sin(a + 1.1));
+  const by = Math.round(PAD + PAD * 0.6 * Math.sin(a));
+  const lx = W / 2 + 170 * Math.cos(a);
+  const ly = H / 2 - 20 + 95 * Math.sin(a * 2);
+  for (let y = 0; y < H; y++) {
+    const fy = Math.pow(y / H, 1.4);
+    for (let x = 0; x < W; x++) {
+      const dx = x - lx;
+      const dy = y - ly;
+      const light = 0.34 * Math.exp(-(dx * dx + dy * dy) / (2 * 230 * 230));
+      const cx = (x - W / 2) / (W * 0.6);
+      const cy = (y - H / 2) / (H * 0.7);
+      const vign = Math.max(0, 1 - (cx * cx + cy * cy) * 0.55);
+      const la = tex[(y + ay) * TW + (x + ax)]!;
+      const lb = tex[(y + by) * TW + (W - 1 - x + bx)]!;
+      const t = 1 - (1 - la) * (1 - 0.45 * lb);
+      const k = (0.05 + 0.17 * fy) * (0.75 + 2.2 * light) * vign;
+      const i = (y * W + x) * 3;
+      // warm yellowish light, the engraving in gold over it
+      out[i] = (8 + 205 * light) * (0.45 + 0.55 * vign) + 246 * t * k;
+      out[i + 1] = (7 + 150 * light) * (0.45 + 0.55 * vign) + 200 * t * k;
+      out[i + 2] = (5 + 38 * light) * (0.45 + 0.55 * vign) + 90 * t * k;
+    }
+  }
+}
+
+function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, bg: Float32Array, out: Uint8Array) {
   const ax = (rx * Math.PI) / 180;
   const ay = (ry * Math.PI) / 180;
   // CSS rotateX(rx) rotateY(ry): p' = Rx · Ry · p (y down, z towards the viewer)
@@ -249,20 +302,42 @@ function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, ou
   }
 }
 
+export type CardBack = {
+  // signed in the signature panel
+  signature: string;
+  // engraved below: label and value
+  lines: [string, string][];
+};
+
 // Builds the GIF. Each frame is followed by a pause in the event loop, so the
 // bot keeps answering everyone while a card is drawn.
-export async function renderMemberGif(opts: { metal: string; holder: string; count: number | null }): Promise<Buffer> {
-  const face = new Uint8Array(baseFace(opts.metal));
-  drawText(face, "name", opts.holder.replace(/^@/, "").slice(0, 32) || "EPB MEMBER", 122 * K, 704 * K, 900 * K, "left", opts.metal);
-  if (opts.count != null) {
-    drawText(face, "count", opts.count.toLocaleString("ru-RU").replace(/ /g, " "), (890 + 6) * K, 604 * K, 260 * K, "center", opts.metal);
+export async function renderMemberGif(opts: { metal: string; holder: string; count: number | null; back?: CardBack }): Promise<Buffer> {
+  const side = opts.back ? "back" : "front";
+  const face = new Uint8Array(baseFace(opts.metal, side));
+  if (opts.back) {
+    drawText(face, "name", opts.back.signature.slice(0, 40) || "EPB MEMBER", 104 * K, 345 * K, 630 * K, "left", opts.metal, {
+      relief: "flat",
+      color: [28, 28, 30],
+    });
+    opts.back.lines.slice(0, 6).forEach(([label, value], i) => {
+      const y = (448 + i * 32) * K;
+      const end = drawText(face, "info", `${label}: `, 84 * K, y, 360 * K, "left", opts.metal, { relief: "engraved", alpha: 0.72 });
+      drawText(face, "info", value, end, y, (1040 - 84) * K - (end - 84 * K), "left", opts.metal, { relief: "engraved" });
+    });
+  } else {
+    drawText(face, "name", opts.holder.replace(/^@/, "").slice(0, 32) || "EPB MEMBER", 122 * K, 704 * K, 900 * K, "left", opts.metal);
+    if (opts.count != null) {
+      drawText(face, "count", opts.count.toLocaleString("ru-RU").replace(/\u00a0/g, " "), (890 + 6) * K, 604 * K, 260 * K, "center", opts.metal);
+    }
   }
   const rim = (CARD_INKS[opts.metal] || CARD_INKS.gold!).rim;
+  const bg = new Float32Array(W * H * 3);
   const frames: Uint8Array[] = [];
   for (let i = 0; i < FRAMES; i++) {
     const a = (2 * Math.PI * i) / FRAMES;
     const out = new Uint8Array(W * H * 4);
-    renderFrame(face, rim, 5 * Math.sin(2 * a), 14 * Math.sin(a), out);
+    backdrop(a, bg);
+    renderFrame(face, rim, 5 * Math.sin(2 * a), 14 * Math.sin(a), bg, out);
     frames.push(out);
     await new Promise((r) => setImmediate(r));
   }

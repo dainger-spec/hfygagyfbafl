@@ -8,6 +8,7 @@ over it in the page so they stay sharp and the count stays live.
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-gold.webp gold
     python3 scripts/gen-card.py public/brand/emblem-v2.png public/brand/card-green.webp green
     (metals: green, gold, platinum, black — the American Express ladder)
+    python3 scripts/gen-card.py public/brand/emblem-v2.png /tmp/back-gold.png gold back   (reverse ground)
 """
 import math
 import os
@@ -18,6 +19,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 EMBLEM, OUT = sys.argv[1], sys.argv[2]
 METAL = sys.argv[3] if len(sys.argv) > 3 else "gold"
+# "back": only the metal and the engraving, for the reverse of the /im card
+BACK = len(sys.argv) > 4 and sys.argv[4] == "back"
 PAL = {
     "gold": {
         "base": (214, 186, 108), "ink": (118, 90, 34), "band": (22, 18, 12), "lace": (206, 176, 100),
@@ -283,6 +286,14 @@ def main():
     ink = np.array(PAL["ink"], np.float32)
     g = np.asarray(ground()).astype(np.float32)[..., None] / 255
     # the engraving fills the inside of the frame only; the margin stays plain
+    if BACK:
+        g[: S(28)], g[S(H - 28):] = 0, 0
+        g[:, : S(28)], g[:, S(W - 28):] = 0, 0
+        col = col * (1 - 0.22 * g) + ink * 0.22 * g
+        out = Image.fromarray(np.clip(col, 0, 255).astype(np.uint8), "RGB").resize((W, H), Image.LANCZOS)
+        out.save(OUT)
+        print(OUT, os.path.getsize(OUT), "bytes")
+        return
     g[: S(TOP1)], g[S(BOT):] = 0, 0
     g[:, : S(FX1)], g[:, S(W - FX1):] = 0, 0
     col = col * (1 - 0.32 * g) + ink * 0.32 * g
