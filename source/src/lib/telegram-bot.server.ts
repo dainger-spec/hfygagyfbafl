@@ -1318,7 +1318,7 @@ const PACK_WANTED = [
   "✅", "✔️", "⛔", "⛔️", "🚫", "❌", "❗", "⏳", "⌛", "🔄", "🤖", "📛", "⚠️", "🔍", "🔎", "📍",
   "⭐", "▫️", "◽", "◽️", "⚪", "⚪️", "🔘", "🆔", "📅", "🗓", "🕐", "💬", "🔗", "ℹ️", "🎉", "🔒",
   // the member card's caption
-  "💳", "🎴", "📨", "📩", "✉️", "🏆", "👑",
+  "🏆", "👑",
 ];
 // which list the saved pack map was made for (a longer list looks the pack up again)
 const PACK_SIG = PACK_WANTED.join("");
@@ -3955,12 +3955,11 @@ function memberInfo(from: TgUser): MemberInfo {
   const next = nextTier(published);
   const holder = from.username || name || "EPB Member";
   const who = from.username ? `@${escapeHtml(from.username)}` : escapeHtml(holder);
-  const caption = `${pickEmoji("💳", "🎴")} ${who} — карта <b>${tier.name}</b>`;
+  const caption = `${who} — карта <b>${tier.name}</b>`;
   const captionBack = [
     caption,
     "",
-    `${pickEmoji("📨", "📩", "✉️")} Подано жалоб: <b>${st.filed}</b>`,
-    `✅ Принято: <b>${st.accepted}</b> · ❌ Отклонено: <b>${st.rejected}</b> · ⏳ На проверке: <b>${st.pending}</b>`,
+    `✅ Принято: <b>${st.accepted}</b> · ❌ Отклонено: <b>${st.rejected}</b>`,
     next
       ? `${pickEmoji("🏆", "⭐")} До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
       : `${pickEmoji("👑", "🏆")} Высшая карта участника`,
