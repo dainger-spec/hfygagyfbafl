@@ -8117,10 +8117,28 @@ async function handleDmCallback(cb: NonNullable<TgUpdate["callback_query"]>, act
 type AdminView = { text: string; keyboard: { text: string; callback_data: string }[][] };
 
 // ---- Search history for /admin: who searched whom, when, and the outcome. ----
-type SearchLogEntry = { at: number; userId: string; username?: string; name?: string; query: string; found: boolean; via: "app" | "bot" };
+type SearchLogEntry = { at: number; userId: string; username?: string; name?: string; query: string; found: boolean; via: "app" | "bot"; platform?: string };
+// Telegram app the mini app was opened in (Telegram.WebApp.platform).
+const PLATFORM_NAMES: Record<string, string> = {
+  ios: "iOS",
+  android: "Android",
+  android_x: "Android",
+  tdesktop: "Telegram Desktop",
+  macos: "macOS",
+  weba: "Telegram Web",
+  webk: "Telegram Web",
+  web: "Telegram Web",
+  unigram: "Unigram",
+};
 const SEARCH_LOG_MAX = 10;
 
-export function logSearch(who: { id: string | number; username?: string; first_name?: string }, query: string, res: CheckResult, via: "app" | "bot") {
+export function logSearch(
+  who: { id: string | number; username?: string; first_name?: string },
+  query: string,
+  res: CheckResult,
+  via: "app" | "bot",
+  platform?: string,
+) {
   const found = Boolean(res.epb.length || res.manual.length || res.channels.length);
   const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : query.trim();
   const entry: SearchLogEntry = {
@@ -8131,6 +8149,7 @@ export function logSearch(who: { id: string | number; username?: string; first_n
     query: q.slice(0, 80),
     found,
     via,
+    ...(via === "app" && platform && PLATFORM_NAMES[platform.toLowerCase()] ? { platform: PLATFORM_NAMES[platform.toLowerCase()] } : {}),
   };
   bindings.searchLog = [entry, ...(bindings.searchLog || [])].slice(0, SEARCH_LOG_MAX);
   saveBindingsSoon();
@@ -8138,13 +8157,18 @@ export function logSearch(who: { id: string | number; username?: string; first_n
 
 function adminSearchLog(): AdminView {
   const list = bindings.searchLog || [];
-  const lines = [`<b>🔍 История поиска</b> (последние ${SEARCH_LOG_MAX})`, ""];
+  const lines = [
+    `<b>🔍 История поиска</b> (последние ${SEARCH_LOG_MAX})`,
+    "📱 — поиск в мини-приложении (запрос подписан Telegram), 🤖 — поиск в чате с ботом.",
+    "",
+  ];
   if (!list.length) lines.push("Пока никто ничего не искал.");
   list.forEach((e, i) => {
     const who = e.username ? `@${escapeHtml(e.username)}` : escapeHtml(e.name || "без ника");
     const when = new Date(e.at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
     lines.push(
-      `${i + 1}. ${when} МСК (${ago(e.at)}) · ${e.via === "bot" ? "бот" : "приложение"}`,
+      `${i + 1}. ${when} МСК (${ago(e.at)})`,
+      `   Откуда: ${e.via === "bot" ? "🤖 бот" : `📱 мини-приложение${e.platform ? ` · ${escapeHtml(e.platform)}` : ""}`}`,
       `   Кто: ${who} · <code>${escapeHtml(e.userId)}</code>`,
       `   Искал: <code>${escapeHtml(e.query)}</code> — ${e.found ? "⛔ найдено" : "✅ чисто"}`,
     );

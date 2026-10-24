@@ -108,7 +108,7 @@ export const saveUserLocale = createServerFn({ method: "POST" })
   });
 
 export const checkCounterparty = createServerFn({ method: "POST" })
-  .validator(z.object({ input: z.string().min(1).max(200), initData: z.string().max(16384) }))
+  .validator(z.object({ input: z.string().min(1).max(200), initData: z.string().max(16384), platform: z.string().max(24).optional() }))
   .handler(async ({ data }) => {
     const bot = await import("@/lib/telegram-bot.server");
     const gate = bot.allowCheck(data.initData);
@@ -117,7 +117,7 @@ export const checkCounterparty = createServerFn({ method: "POST" })
     if (bot.captchaRequired(gate.userId)) return { ok: false as const, error: "captcha" };
     const result = await bot.checkCounterparty(data.input);
     const who = bot.verifyTelegramInitData(data.initData);
-    bot.logSearch({ id: gate.userId, username: who?.username, first_name: who?.firstName }, data.input, result, "app");
+    bot.logSearch({ id: gate.userId, username: who?.username, first_name: who?.firstName }, data.input, result, "app", data.platform);
     return { ok: true as const, result };
   });
 

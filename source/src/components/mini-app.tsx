@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ExternalLink, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Gavel, LoaderCircle, Search, ShieldAlert, ShieldCheck, UserSearch, type LucideIcon } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import {
   openExternal,
   readTelegramWebUser,
   telegramInitData,
+  telegramPlatform,
   waitForTelegramUser,
 } from "@/lib/telegram";
 import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
@@ -470,6 +471,17 @@ function Home({
   const canUse = Boolean(identity.telegramId);
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
+  // how many blacklists a check searches (for the button's subtitle)
+  const [srcCount, setSrcCount] = useState(() => cachedBase()?.sources || 0);
+  useEffect(() => {
+    let alive = true;
+    void fetchBase().then((v) => {
+      if (alive && v?.sources) setSrcCount(v.sources);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 [touch-action:pan-y]">
@@ -488,13 +500,20 @@ function Home({
         </h1>
         {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
-          <Button size="lg" className="w-full rounded-xl" onClick={onComplaint} disabled={!canUse}>
-            {t(locale, "fileComplaint")}
-          </Button>
+          <HomeAction tone="gold" icon={Gavel} title={t(locale, "fileComplaint")} sub={t(locale, "fileComplaintSub")} onClick={onComplaint} disabled={!canUse} />
           {checkOn ? (
-            <Button size="lg" variant="secondary" className="w-full rounded-xl" onClick={onCheck} disabled={!canUse}>
-              {t(locale, "checkBtn")}
-            </Button>
+            <HomeAction
+              tone="dark"
+              icon={UserSearch}
+              title={t(locale, "checkBtn")}
+              sub={
+                srcCount
+                  ? t(locale, "checkBtnSub", { n: srcCount, bl: t(locale, srcCount % 10 === 1 && srcCount % 100 !== 11 ? "blOne" : "blMany") })
+                  : t(locale, "checkBtnSubAll")
+              }
+              onClick={onCheck}
+              disabled={!canUse}
+            />
           ) : null}
         </div>
         <a
@@ -514,6 +533,45 @@ function Home({
         {t(locale, "ownersLink")}
       </button>
     </div>
+  );
+}
+
+// The two main actions on the home screen, styled after the medallion: a gold
+// "coin" with engraved lines and a passing glint, and a dark one with a gold rim.
+function HomeAction({
+  tone,
+  icon: Icon,
+  title,
+  sub,
+  onClick,
+  disabled,
+}: {
+  tone: "gold" | "dark";
+  icon: LucideIcon;
+  title: string;
+  sub?: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        haptic("light");
+        onClick();
+      }}
+      className={cn("epb-cta", tone === "gold" ? "epb-cta-gold" : "epb-cta-dark")}
+    >
+      <span className="epb-cta-badge">
+        <Icon className="size-[22px]" strokeWidth={2.1} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-display text-[16px] leading-tight font-extrabold tracking-tight">{title}</span>
+        {sub ? <span className="epb-cta-sub mt-0.5 block truncate text-[12px] font-medium">{sub}</span> : null}
+      </span>
+      <ChevronRight className="epb-cta-arrow size-5 shrink-0" strokeWidth={2.4} />
+    </button>
   );
 }
 
@@ -597,11 +655,13 @@ const SPONSORS_CACHE_KEY = "epb-sponsors";
 // the scrolling track never changes width mid-animation (which made it jump).
 // r = width/height of the logo file; s = optional height scale (the wide WWH
 // wordmark reads bigger than the round logos, so it's drawn a bit shorter).
-const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number }[] = [
+// A logo can also be plain lettering (text): drawn in the app's font, no file.
+const PARTNER_LOGOS: { src: string; alt: string; r: number; s?: number; text?: "1tc" }[] = [
   { src: "/partners/wwh.png", alt: "WWH Club", r: 740 / 128, s: 0.62 },
   { src: "/partners/animal-planet.png", alt: "Animal Planet Blacklist", r: 1 },
   { src: "/partners/kidalam.png", alt: "KidaLam NeT", r: 1 },
   { src: "/partners/z-black.png", alt: "Z-BLACK", r: 122 / 128 },
+  { src: "text:1tc", alt: "1TC", r: 1.7, s: 0.82, text: "1tc" },
   { src: "/partners/pi.png", alt: "π", r: 107 / 128 },
   { src: "/partners/ws-blacklist.png", alt: "WS Blacklist", r: 1 },
   { src: "/partners/cookie.png", alt: "Cookie Blacklist", r: 1 },
@@ -615,6 +675,16 @@ function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
       {PARTNER_LOGOS.map((l) => {
         const h = Math.round(size * (l.s ?? 1));
         const w = Math.round(h * l.r);
+        if (l.text === "1tc") {
+          return (
+            <span key={l.src} className="inline-flex shrink-0 items-center" style={{ height: size }}>
+              <span role="img" aria-label={l.alt} className="epb-logo-1tc" style={{ width: w, height: h, fontSize: Math.round(h * 0.92) }}>
+                <span className="epb-logo-1tc-one">1</span>TC
+              </span>
+              {gap ? <span className="w-5 shrink-0" /> : <span className="mx-3 text-gold/40">·</span>}
+            </span>
+          );
+        }
         return (
           <span key={l.src} className="inline-flex shrink-0 items-center" style={{ height: size }}>
             <img
@@ -1337,7 +1407,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     try {
       // Hold the loader for at least 1.5 s so the scan never just flashes.
       const [res, sources] = await Promise.all([
-        checkCounterparty({ data: { input, initData: telegramInitData() } }),
+        checkCounterparty({ data: { input, initData: telegramInitData(), platform: telegramPlatform() } }),
         loadSources(),
         new Promise((r) => window.setTimeout(r, 1500)),
       ]);
