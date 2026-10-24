@@ -6092,7 +6092,7 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
   let res: CheckResult;
   if (sources.length) {
     await Promise.race([loadPackEmoji(), sleep(1500)]);
-    res = await animateBotCheck(chatId, en, sources, search);
+    res = await animateBotCheck(chatId, en, sources, search, input);
   } else {
     await tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
     res = await search;
@@ -6104,67 +6104,62 @@ async function runBotCheck(chatId: number | string, input: string, skipGate = fa
   });
 }
 
-// The live progress message of a check, edited in place about once a second:
-// a progress bar, sources taken a few at a time ("checking…"), and once the
-// search is back their results revealed in the same order, ending in a summary.
-// Premium icons when the pack has them, plain emoji otherwise.
+// The live progress message of a check, edited in place about once a second.
+// While the search runs it names the source being checked ("⏳ Animal Planet
+// Blacklist · 2 of 15"); once the answer is in, the results appear a few lines
+// at a time in a quote, and the final message folds the list (expandable quote)
+// under a one-line verdict. Premium icons when the pack has them.
 const CHECK_FRAME_MS = 900;
 async function animateBotCheck(
   chatId: number | string,
   en: boolean,
   sources: { key: string; title: string }[],
   search: Promise<CheckResult>,
+  query = "",
 ): Promise<CheckResult> {
   const I = {
     head: "🔎",
     ok: pickEmoji("✅", "✔️"),
     hit: pickEmoji("⛔", "⛔️", "🚫", "❌", "❗"),
     busy: pickEmoji("⏳", "⌛", "🔄", "🔍"),
-    wait: pickEmoji("▫️", "◽️", "◽", "⚪️", "⚪", "🔘"),
   };
   const n = sources.length;
+  const who = escapeHtml(query.trim().slice(0, 64));
   let res: CheckResult | null = null;
   void search.then((r) => (res = r));
-  let done = 0; // sources with a result shown
-  let pos = 0; // sources started (done..pos are "checking…")
+  let done = 0; // results shown
+  let cursor = 0; // the source named while waiting
   let slow = false;
-  let dots = 0;
-  const bar = (part: number) => {
-    const f = Math.round(Math.min(1, part) * 10);
-    return `${"▰".repeat(f)}${"▱".repeat(10 - f)} ${Math.round(Math.min(1, part) * 100)}%`;
-  };
   const frame = (final: boolean) => {
     const hits = (res as CheckResult | null)?.sourceHits || {};
-    const lines = sources.map((src, i) => {
-      const title = escapeHtml(src.title);
-      if (i < done) {
-        const k = hits[src.key] || 0;
-        return k ? `${I.hit} <b>${title}</b> — ${en ? "found" : "найдено"}: ${k}` : `${I.ok} ${title} — ${en ? "clean" : "чисто"}`;
-      }
-      if (i < pos) return `${I.busy} <b>${title}</b> — ${en ? "checking" : "проверяем"}…`;
-      return `${I.wait} <i>${title}</i>`;
-    });
-    const out = [
-      final
-        ? `${I.head} <b>${en ? "Sources checked" : "Источники проверены"}</b>`
-        : `${I.head} <b>${en ? "Checking sources" : "Проверяем источники"}${".".repeat(1 + (dots % 3))}</b>`,
-      // half for sources started, half for results shown: it only ever grows
-      bar(final ? 1 : (done + pos) / (2 * n)),
-      "",
-      ...lines,
-    ];
+    const line = (src: { key: string; title: string }) => {
+      const k = hits[src.key] || 0;
+      return k ? `${I.hit} <b>${escapeHtml(src.title)}</b> · ${en ? "found" : "найдено"}: ${k}` : `${I.ok} ${escapeHtml(src.title)}`;
+    };
+    const head = `${I.head} <b>${en ? "Checking" : "Проверяем"}${who ? ` ${who}` : ""}</b>`;
     if (final) {
       const found = sources.filter((src) => (hits[src.key] || 0) > 0).length;
-      out.push(
+      return [
+        `${I.head} <b>${who || (en ? "Check" : "Проверка")}</b> · ${en ? `${n} sources checked` : `проверено источников: ${n}`}`,
         "",
         found
           ? `${I.hit} <b>${en ? `Found in ${found} of ${n}` : `Найдено в ${found} из ${n}`}</b>`
-          : `${I.ok} <b>${en ? `Clean in all ${n} sources` : `Чисто во всех источниках (${n})`}</b>`,
-      );
-    } else if (slow) {
-      out.push("", `${I.busy} ${en ? "The search can take up to 30 seconds. Please wait." : "Поиск может продлиться до 30 сек. Пожалуйста, ожидайте."}`);
+          : `${I.ok} <b>${en ? "Clean in every source" : "Чисто во всех источниках"}</b>`,
+        // found ones first, the rest folded
+        `<blockquote expandable>${[...sources.filter((x) => hits[x.key]), ...sources.filter((x) => !hits[x.key])].map(line).join("\n")}</blockquote>`,
+      ].join("\n");
     }
-    return out.join("\n");
+    if (!res) {
+      const src = sources[cursor % n]!;
+      return [
+        head,
+        "",
+        `${I.busy} <i>${escapeHtml(src.title)}</i>`,
+        `<i>${en ? `source ${Math.min(cursor + 1, n)} of ${n}` : `источник ${Math.min(cursor + 1, n)} из ${n}`}</i>`,
+        ...(slow ? ["", `<i>${en ? "The search can take up to 30 seconds." : "Поиск может занять до 30 секунд."}</i>`] : []),
+      ].join("\n");
+    }
+    return [head, "", `<blockquote>${sources.slice(0, done).map(line).join("\n")}</blockquote>`, `<i>${done} / ${n}</i>`].join("\n");
   };
 
   let useCe = customEmojiEnabled() && isPrivateChat(chatId);
@@ -6191,10 +6186,8 @@ async function animateBotCheck(
     }
   };
 
-  const stepIn = Math.max(1, Math.ceil(n / 5)); // sources started per frame
   const stepOut = Math.max(1, Math.ceil(n / 4)); // results revealed per frame
   const started = Date.now();
-  pos = Math.min(n, stepIn);
   await show(frame(false));
   void tgSoft("sendChatAction", { chat_id: chatId, action: "typing" });
   while (done < n) {
@@ -6203,13 +6196,11 @@ async function animateBotCheck(
       // the answer can come early: still finish the current frame's pause
       await sleep(Math.max(0, CHECK_FRAME_MS - ((Date.now() - started) % CHECK_FRAME_MS)));
       done = Math.min(n, done + stepOut);
-      pos = Math.min(n, Math.max(pos, done + stepOut));
     } else {
-      pos = Math.min(n, pos + stepIn);
+      cursor = (cursor + 1) % n;
       if (!slow && Date.now() - started > 4000) slow = true;
       if (Date.now() - started > 60_000) break; // the search has its own timeouts; never spin forever
     }
-    dots++;
     if (done < n) await show(frame(false));
   }
   const result = (res as CheckResult | null) || (await search);

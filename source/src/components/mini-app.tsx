@@ -103,7 +103,7 @@ export function MiniApp({
 
   return (
     <div
-      className={cn("relative flex flex-col overflow-hidden overscroll-none bg-bg text-fg", !embedded && "z-50")}
+      className={cn("epb-app-bg relative isolate flex flex-col overflow-hidden overscroll-none bg-bg text-fg", !embedded && "z-50")}
       style={{
         position: "fixed",
         left: 0,
