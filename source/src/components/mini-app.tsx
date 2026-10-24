@@ -532,7 +532,7 @@ function Home({
             }}
             className="epb-act epb-act-scam"
           >
-            <span className="relative flex-1 text-center font-display text-[17px] font-extrabold [-webkit-text-stroke:0.022em_currentColor] [paint-order:stroke_fill]">{t(locale, "fileComplaint")}</span>
+            <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "fileComplaint")}</span>
             {/* big, see-through, cut by the edge — like the medallion on the base card */}
             <span className="epb-act-scam-word" aria-hidden>
               SCAM
@@ -548,7 +548,7 @@ function Home({
               }}
               className="epb-act epb-act-gray"
             >
-              <span className="relative flex-1 text-center font-display text-[17px] font-extrabold [-webkit-text-stroke:0.022em_currentColor] [paint-order:stroke_fill]">{t(locale, "checkBtn")}</span>
+              <span className="relative flex-1 text-center font-display text-[17px] font-bold">{t(locale, "checkBtn")}</span>
               <Search className="epb-act-loupe" strokeWidth={2.2} aria-hidden />
             </button>
           ) : null}
