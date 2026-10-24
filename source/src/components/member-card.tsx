@@ -101,6 +101,68 @@ const EDGES = [0.34, 0.67, 1];
 // how thick the plate looks, px
 const THICK = 4;
 
+type Pose = { rx: number; ry: number; lift: number };
+
+// The resting sway: one loop of IDLE_LOOP seconds (tilting up and down twice,
+// side to side once).
+const IDLE_LOOP = 14;
+function idlePose(t: number): Pose {
+  const a = (2 * Math.PI * t) / IDLE_LOOP;
+  return { rx: 5 * Math.sin(2 * a), ry: 13 * Math.sin(a), lift: 0 };
+}
+
+// Where every layer goes for a given tilt; used both for the CSS keyframes of
+// the sway and, frame by frame, while the card is held.
+function poseStyles({ rx, ry, lift }: Pose) {
+  const ex = -THICK * Math.sin((ry * Math.PI) / 180);
+  const ey = THICK * Math.sin((rx * Math.PI) / 180);
+  return {
+    card: `translateZ(${(lift * 26).toFixed(1)}px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`,
+    // light: the highlight and the sheen bands follow the tilt
+    glare: `translate3d(${(ry * 1.3).toFixed(1)}%, ${(-rx * 1.6).toFixed(1)}%, 0)`,
+    foil: `translate3d(${(-34 + ry * 1.5 - rx * 0.5).toFixed(1)}%, 0, 0)`,
+    // the side turned away darkens
+    shades: [
+      Math.max(0, -ry) / 32,
+      Math.max(0, ry) / 32,
+      Math.max(0, rx) / 24,
+      Math.max(0, -rx) / 24,
+    ].map((v) => Number(v.toFixed(3))),
+    // the rim shows on the side that turns towards the viewer
+    edges: EDGES.map((f) => `translate3d(${(ex * f).toFixed(2)}px, ${(ey * f).toFixed(2)}px, 0)`),
+    // the shadow on the "table" slides away from the raised side and spreads when lifted
+    shadow: `translate3d(${(-ry * 0.7).toFixed(1)}px, ${(16 + rx * 0.5 + lift * 10).toFixed(1)}px, 0) scale(${(0.92 + lift * 0.06).toFixed(3)})`,
+    shadowOpacity: Number((0.75 - lift * 0.2).toFixed(3)),
+  };
+}
+
+// The sway sampled into keyframes, one set per layer, added to the page once.
+let idleKeyframesAdded = false;
+function ensureIdleKeyframes() {
+  if (idleKeyframesAdded || typeof document === "undefined") return;
+  idleKeyframesAdded = true;
+  const steps = 48;
+  const sets: Record<string, string[]> = {};
+  const add = (name: string, rule: string, pct: string) =>
+    (sets[name] ||= []).push(`${pct}%{${rule}}`);
+  for (let i = 0; i <= steps; i++) {
+    const pct = ((i / steps) * 100).toFixed(3);
+    const st = poseStyles(idlePose((i / steps) * IDLE_LOOP));
+    add("card", `transform:${st.card}`, pct);
+    add("glare", `transform:${st.glare}`, pct);
+    add("foil", `transform:${st.foil}`, pct);
+    add("shadow", `transform:${st.shadow};opacity:${st.shadowOpacity}`, pct);
+    st.shades.forEach((v, j) => add(`shade${j}`, `opacity:${v}`, pct));
+    st.edges.forEach((v, j) => add(`edge${j}`, `transform:${v}`, pct));
+  }
+  const style = document.createElement("style");
+  style.dataset.epb = "card-idle";
+  style.textContent = Object.entries(sets)
+    .map(([name, frames]) => `@keyframes epb-idle-${name}{${frames.join("")}}`)
+    .join("\n");
+  document.head.appendChild(style);
+}
+
 export function MemberCard({
   metal,
   holder,
@@ -145,89 +207,119 @@ export function MemberCard({
     const shades = shadeRefs.current;
     const edges = edgeRefs.current;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    let rx = 0;
-    let ry = 0;
+    // every moving layer with the name of its idle keyframes
+    const layers: [HTMLElement | null, string][] = [
+      [el, "card"],
+      [glare, "glare"],
+      [foil, "foil"],
+      [shadow, "shadow"],
+      ...shades.map((n, i): [HTMLElement | null, string] => [n, `shade${i}`]),
+      ...edges.map((n, i): [HTMLElement | null, string] => [n, `edge${i}`]),
+    ];
+    const born = performance.now();
+    const now = () => (performance.now() - born) / 1000;
+    const rest = (t: number): Pose => (reduce ? { rx: 0, ry: 0, lift: 0 } : idlePose(t));
+
+    // At rest the sway is a CSS animation (run by the compositor, no script per
+    // frame, so it costs weak phones next to nothing). The script only drives
+    // the card while it is held and while it settles back into the sway.
+    const idle = () => {
+      const t = now();
+      for (const [node, name] of layers) {
+        if (!node) continue;
+        node.style.animation = reduce ? "none" : `epb-idle-${name} ${IDLE_LOOP}s linear infinite`;
+        node.style.animationDelay = reduce ? "" : `-${(t % IDLE_LOOP).toFixed(3)}s`;
+      }
+      if (reduce) apply(rest(0));
+    };
+    const apply = (p: Pose) => {
+      const st = poseStyles(p);
+      el.style.transform = st.card;
+      glare.style.transform = st.glare;
+      foil.style.transform = st.foil;
+      shadow.style.transform = st.shadow;
+      shadow.style.opacity = String(st.shadowOpacity);
+      shades.forEach((n, i) => n && (n.style.opacity = String(st.shades[i])));
+      edges.forEach((n, i) => n && (n.style.transform = st.edges[i]!));
+    };
+    const takeOver = () => {
+      for (const [node] of layers) if (node) node.style.animation = "none";
+    };
+    ensureIdleKeyframes();
+    idle();
+
+    let pose: Pose = rest(now());
     let tx = 0;
     let ty = 0;
     let dragging = false;
+    let driving = false;
     let moved = 0;
     let sx = 0;
     let sy = 0;
     let bx = 0;
     let by = 0;
     let raf = 0;
-    let lift = 0;
     let last = 0;
-    const start = performance.now();
     const clamp = (v: number, m: number) => Math.max(-m, Math.min(m, v));
 
-    // Every frame only transforms and opacity change, each on its own layer,
-    // so the card face (art, engraved letters) is never repainted.
-    const frame = (now: number) => {
-      const t = (now - start) / 1000;
-      const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
-      last = now;
-      const gx = dragging ? tx : reduce ? 0 : 5 * Math.sin(t * 0.7);
-      const gy = dragging ? ty : reduce ? 0 : 13 * Math.sin(t * 0.45);
-      // the same easing at any frame rate
-      const k = 1 - Math.pow(1 - (dragging ? 0.3 : 0.05), dt * 60);
-      rx += (gx - rx) * k;
-      ry += (gy - ry) * k;
-      lift += ((dragging ? 1 : 0) - lift) * (1 - Math.pow(0.85, dt * 60));
-      el.style.transform = `translateZ(${(lift * 26).toFixed(1)}px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`;
-      // light: the highlight and the sheen bands follow the tilt
-      glare.style.transform = `translate3d(${(ry * 1.3).toFixed(1)}%, ${(-rx * 1.6).toFixed(1)}%, 0)`;
-      foil.style.transform = `translate3d(${(-34 + ry * 1.5 - rx * 0.5).toFixed(1)}%, 0, 0)`;
-      // the side turned away darkens
-      const sh = [
-        Math.max(0, -ry) / 32,
-        Math.max(0, ry) / 32,
-        Math.max(0, rx) / 24,
-        Math.max(0, -rx) / 24,
-      ];
-      for (let i = 0; i < 4; i++) {
-        const node = shades[i];
-        if (node) node.style.opacity = sh[i]!.toFixed(3);
+    // after release: blend from where the finger left the card into the sway
+    // over SETTLE seconds, then the CSS animation takes over exactly there
+    const SETTLE = 0.8;
+    let released: { at: number; from: Pose } | null = null;
+    const frame = (ms: number) => {
+      const dt = last ? Math.min(0.05, (ms - last) / 1000) : 1 / 60;
+      last = ms;
+      if (dragging) {
+        // the same easing at any frame rate
+        const k = 1 - Math.pow(0.7, dt * 60);
+        pose = {
+          rx: pose.rx + (tx - pose.rx) * k,
+          ry: pose.ry + (ty - pose.ry) * k,
+          lift: pose.lift + (1 - pose.lift) * (1 - Math.pow(0.85, dt * 60)),
+        };
+      } else {
+        released ??= { at: now(), from: pose };
+        const u = Math.min(1, (now() - released.at) / SETTLE);
+        const e = 1 - Math.pow(1 - u, 3);
+        const to = rest(now());
+        const f = released.from;
+        pose = {
+          rx: f.rx + (to.rx - f.rx) * e,
+          ry: f.ry + (to.ry - f.ry) * e,
+          lift: f.lift * (1 - e),
+        };
+        if (u >= 1) {
+          apply(to);
+          released = null;
+          driving = false;
+          idle();
+          return;
+        }
       }
-      // the rim shows on the side that turns towards the viewer
-      const ex = -THICK * Math.sin((ry * Math.PI) / 180);
-      const ey = THICK * Math.sin((rx * Math.PI) / 180);
-      edges.forEach((node, i) => {
-        const f = EDGES[i]!;
-        if (node)
-          node.style.transform = `translate3d(${(ex * f).toFixed(2)}px, ${(ey * f).toFixed(2)}px, 0)`;
-      });
-      // the shadow on the "table" slides away from the raised side and spreads when lifted
-      shadow.style.transform = `translate3d(${(-ry * 0.7).toFixed(1)}px, ${(16 + rx * 0.5 + lift * 10).toFixed(1)}px, 0) scale(${(0.92 + lift * 0.06).toFixed(3)})`;
-      shadow.style.opacity = (0.75 - lift * 0.2).toFixed(3);
+      apply(pose);
       raf = requestAnimationFrame(frame);
     };
-    // the animation runs only while the card is on screen and the app is visible
-    let onScreen = true;
-    const run = () => {
-      cancelAnimationFrame(raf);
-      last = 0;
-      if (!document.hidden && onScreen) raf = requestAnimationFrame(frame);
-    };
-    run();
-    const io =
-      typeof IntersectionObserver === "function"
-        ? new IntersectionObserver((entries) => {
-            onScreen = entries.some((e) => e.isIntersecting);
-            run();
-          })
-        : null;
-    io?.observe(el);
 
     const down = (e: PointerEvent) => {
+      if (!driving) {
+        // start from exactly where the sway is now
+        pose = rest(now());
+        takeOver();
+        apply(pose);
+        driving = true;
+        last = 0;
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(frame);
+      }
       dragging = true;
+      released = null;
       moved = 0;
       sx = e.clientX;
       sy = e.clientY;
-      bx = rx;
-      by = ry;
-      tx = rx;
-      ty = ry;
+      bx = pose.rx;
+      by = pose.ry;
+      tx = pose.rx;
+      ty = pose.ry;
       try {
         el.setPointerCapture(e.pointerId);
       } catch {
@@ -251,15 +343,12 @@ export function MemberCard({
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
     el.addEventListener("pointercancel", up);
-    document.addEventListener("visibilitychange", run);
     return () => {
       cancelAnimationFrame(raf);
-      io?.disconnect();
       el.removeEventListener("pointerdown", down);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
-      document.removeEventListener("visibilitychange", run);
     };
   }, []);
 
