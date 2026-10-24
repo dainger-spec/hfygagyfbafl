@@ -20,7 +20,7 @@ import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { hasSavedLocale, t, type Locale } from "@/lib/i18n";
+import { hasSavedLocale, t, type Locale, type Msg } from "@/lib/i18n";
 
 export type MiniPage = "home" | "apply" | "history" | "done" | "owners" | "check" | "sponsors" | "base";
 
@@ -705,6 +705,34 @@ function PartnerLogos({ size, gap = false }: { size: number; gap?: boolean }) {
         );
       })}
     </>
+  );
+}
+
+// What the search is doing, one step at a time under the loader (matches what the
+// server does for this kind of input: @username, numeric ID or forum nickname).
+function SearchSteps({ input }: { input: string }) {
+  const locale = useBlacklistStore((s) => s.locale);
+  const q = input.trim();
+  const isId = /^\d{5,}$/.test(q.replace(/^id\s*/i, ""));
+  const isHandle = !isId && (/^@|t\.me\//i.test(q) || /^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(q));
+  const keys: Msg[] = isId
+    ? ["stepById", "stepIdNames", "stepPrevNames", "stepEpb", "stepChannels", "stepExternal", "stepCard"]
+    : isHandle
+      ? ["stepResolve", "stepGetId", "stepById", "stepPrevNames", "stepEpb", "stepChannels", "stepExternal", "stepCard"]
+      : ["stepNick", "stepForums", "stepChannels", "stepExternal"];
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    setI(0);
+    const id = window.setInterval(() => setI((v) => Math.min(v + 1, keys.length - 1)), 1100);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+  return (
+    <div className="h-5 overflow-hidden" aria-live="polite">
+      <p key={i} className="epb-step-in text-sm font-semibold text-muted">
+        {t(locale, keys[i]!)}
+      </p>
+    </div>
   );
 }
 
@@ -1655,7 +1683,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                 scanSources.length ? "h-[94px] w-[92px]" : "h-[123px] w-[120px]",
               )}
             />
-            <p className="text-sm font-semibold text-muted">{t(locale, "checkChecking")}</p>
+            <SearchSteps input={value} />
             {scanSources.length ? (
               <SourceScan key={scanId} sources={scanSources} hits={scanHits} onDone={() => scanDone.current?.()} />
             ) : (
