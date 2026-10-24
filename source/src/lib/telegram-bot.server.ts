@@ -382,7 +382,7 @@ try {
 // Kept apart from the complaint records, which get pruned when there are many,
 // so a user's card level never drops because old records were cleaned up.
 const TIERS_PATH = join(DATA_DIR, "telegram-user-tiers.json");
-let publishedByUser: Record<string, string[]> = readJson<Record<string, string[]>>(TIERS_PATH) || {};
+const publishedByUser: Record<string, string[]> = readJson<Record<string, string[]>>(TIERS_PATH) || {};
 let tiersTimer: ReturnType<typeof setTimeout> | null = null;
 function saveTiers() {
   if (tiersTimer) return;
@@ -3763,6 +3763,431 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
       createdAt: c.createdAt || 0,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// ---------- /pars: check a chat's members against the blacklist base ----------
+// The owner types /pars in a group. The bot answers there with one quiet line
+// (deleted again after a minute together with the command) and carries on in
+// private. The userbot reads the member list slowly, page by page with pauses,
+// and only reads: nothing is posted to the chat, nobody is contacted, no one is
+// added or removed. Members are matched against the local base only (EPB
+// complaints, the saved copies of the blacklist channels, the manual list), so
+// the userbot does no extra work per member; only the few posts that match are
+// re-checked with Telegram. The owner gets the report in private.
+type ParsTarget = { chatId: string; title: string; username?: string; members?: number; at: number };
+type ParsMember = { id: string; usernames: string[]; name: string };
+type ParsFind = {
+  member: ParsMember;
+  epb: { key: string; date: number; link?: string }[];
+  manual: CheckResult["manual"];
+  posts: CheckHit[];
+};
+const parsTargets = new Map<string, ParsTarget>();
+let parsRunning: ParsTarget | null = null;
+const parsFinished = new Map<string, number>();
+const PARS_PAGE = 200;
+const PARS_MAX = 10_000;
+const PARS_PAUSE_MS = 1500;
+const PARS_COOLDOWN_MS = 10 * 60_000;
+const PARS_LINK_TTL = 30 * 60_000;
+// longest FLOOD_WAIT we sit out; anything longer ends the read with what we have
+const PARS_MAX_WAIT_S = 120;
+
+async function parsAskInGroup(msg: TgMessage) {
+  const chatId = String(msg.chat.id);
+  for (const [k, v] of parsTargets) if (Date.now() - v.at > PARS_LINK_TTL) parsTargets.delete(k);
+  const token = randomUUID().replace(/-/g, "").slice(0, 12);
+  const chat = await tgSoft<{ title?: string; username?: string }>("getChat", { chat_id: chatId });
+  const members = await tgSoft<number>("getChatMemberCount", { chat_id: chatId });
+  parsTargets.set(token, {
+    chatId,
+    title: chat?.title || msg.chat.title || chatId,
+    username: chat?.username || undefined,
+    members: typeof members === "number" ? members : undefined,
+    at: Date.now(),
+  });
+  const sent = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text: "Продолжите в личных сообщениях бота.",
+    disable_notification: true,
+    reply_markup: { inline_keyboard: [[{ text: "Открыть бота", url: `https://t.me/${BOT_USERNAME}?start=pars_${token}` }]] },
+  });
+  // keep the chat clean: the command and the answer go away after a minute
+  const t = setTimeout(() => {
+    void tgSoft("deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+    if (sent?.message_id) void tgSoft("deleteMessage", { chat_id: chatId, message_id: sent.message_id });
+  }, 60_000);
+  (t as { unref?: () => void }).unref?.();
+}
+
+function parsMinutes(n: number): number {
+  return Math.max(1, Math.ceil((Math.ceil(Math.min(n, PARS_MAX) / PARS_PAGE) * (PARS_PAUSE_MS + 700)) / 60_000));
+}
+
+async function parsOffer(chatId: number | string, token: string) {
+  const t = parsTargets.get(token);
+  if (!t || Date.now() - t.at > PARS_LINK_TTL) {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Ссылка устарела. Напишите /pars в чате ещё раз." });
+    return;
+  }
+  const lines = [
+    "🔎 <b>Проверка участников чата</b>",
+    "",
+    `Чат: <b>${escapeHtml(t.title)}</b>${t.username ? ` (@${escapeHtml(t.username)})` : ""}`,
+    t.members ? `Участников: ${t.members}` : "",
+    "",
+    "Юзербот спокойно, с паузами выгрузит список участников (юзернеймы и ID) и сверит каждого с базой: жалобы EPB, копии блеклист-каналов и ручной список. Отчёт придёт сюда.",
+    "В самом чате ничего не появится, никому ничего не отправится.",
+    "",
+    t.members && t.members > PARS_MAX ? `В больших чатах Telegram отдаёт не больше ${PARS_MAX} участников — проверятся они.` : "",
+    t.members ? `Займёт примерно ${parsMinutes(t.members)} мин.` : "",
+  ].filter((l, i, a) => l !== "" || (a[i - 1] !== "" && i < a.length - 1));
+  await tgSoft("sendMessage", {
+    chat_id: chatId,
+    text: lines.join("\n"),
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "Начать проверку", callback_data: `pars:go:${token}` }],
+        [{ text: "Отмена", callback_data: `pars:no:${token}` }],
+      ],
+    },
+  });
+}
+
+async function handleParsCallback(cb: NonNullable<TgUpdate["callback_query"]>): Promise<void> {
+  const [, action, token = ""] = (cb.data || "").split(":");
+  const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+  if (!isOwner(cb.from?.id) || !cb.message) {
+    await answer();
+    return;
+  }
+  const chatId = cb.message.chat.id;
+  const msgId = cb.message.message_id;
+  if (action === "no") {
+    parsTargets.delete(token);
+    await answer("Отменено");
+    await tgSoft("editMessageText", { chat_id: chatId, message_id: msgId, text: "Проверка чата отменена." });
+    return;
+  }
+  const t = parsTargets.get(token);
+  if (!t || Date.now() - t.at > PARS_LINK_TTL) {
+    await answer("Ссылка устарела. Напишите /pars в чате ещё раз.", true);
+    return;
+  }
+  if (!hasUserbot()) {
+    await answer("Юзербот не подключён. Подключите аккаунт: /userbot", true);
+    return;
+  }
+  if (parsRunning) {
+    await answer(`Уже идёт проверка чата «${parsRunning.title}». Дождитесь отчёта.`, true);
+    return;
+  }
+  const last = parsFinished.get(t.chatId) || 0;
+  if (Date.now() - last < PARS_COOLDOWN_MS) {
+    const min = Math.ceil((PARS_COOLDOWN_MS - (Date.now() - last)) / 60_000);
+    await answer(`Этот чат недавно проверялся. Повторить можно через ${min} мин.`, true);
+    return;
+  }
+  if (Date.now() < userBlockedUntil) {
+    const min = Math.ceil((userBlockedUntil - Date.now()) / 60_000);
+    await answer(`Telegram попросил юзербот подождать ещё ~${min} мин. Попробуйте позже.`, true);
+    return;
+  }
+  parsTargets.delete(token);
+  parsRunning = t;
+  await answer("Начинаю");
+  await tgSoft("editMessageText", {
+    chat_id: chatId,
+    message_id: msgId,
+    text: `🔎 Проверка чата «${t.title}» началась. Отчёт придёт отдельным сообщением.`,
+  });
+  // runs in the background: the bot keeps answering everyone meanwhile
+  void parsScan(t, chatId)
+    .catch((err) => console.error("[epb] pars", err))
+    .finally(() => {
+      parsFinished.set(t.chatId, Date.now());
+      parsRunning = null;
+    });
+}
+
+function parsErrorText(err: unknown): string {
+  const text = (err as { errorMessage?: string; message?: string })?.errorMessage || (err as Error)?.message || String(err);
+  if (/CHAT_ADMIN_REQUIRED/i.test(text)) {
+    return "В этом чате список участников скрыт — его видят только админы. Сделайте аккаунт юзербота администратором (можно без прав) и повторите /pars.";
+  }
+  if (/CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|CHAT_FORBIDDEN|PEER_ID_INVALID|Could not find the input entity|Cannot find any entity/i.test(text)) {
+    return "Аккаунт юзербота не состоит в этом чате (или не видит его). Добавьте его в чат и повторите /pars.";
+  }
+  if (floodSeconds(err)) return "Telegram попросил юзербот подождать. Попробуйте позже.";
+  return `Не удалось получить участников: ${text.slice(0, 200)}`;
+}
+
+// The member list, read gently: pages of 200 with a pause between them. A
+// FLOOD_WAIT is waited out once if short; a long one ends the read with what
+// was collected (the report then says so).
+async function parsFetchMembers(
+  t: ParsTarget,
+  onProgress: (got: number) => void,
+): Promise<{ members: ParsMember[]; partial: string }> {
+  const { client, Api } = await userbot();
+  const ref = t.username ? t.username : Number(t.chatId);
+  const peer = (await withTimeout(userInputPeer(client, ref), 30_000, "resolve timeout")) as { className?: string; chatId?: unknown };
+  const out = new Map<string, ParsMember>();
+  const take = (users: unknown[]) => {
+    for (const raw of users || []) {
+      const u = raw as {
+        id?: { toString(): string };
+        username?: string;
+        usernames?: { username?: string; active?: boolean }[];
+        firstName?: string;
+        lastName?: string;
+        bot?: boolean;
+        deleted?: boolean;
+        className?: string;
+      };
+      if (!u?.id || u.bot || u.deleted || (u.className && u.className !== "User")) continue;
+      const id = u.id.toString();
+      const names = new Set<string>();
+      if (u.username) names.add(u.username.toLowerCase());
+      for (const x of u.usernames || []) if (x?.username && x.active !== false) names.add(x.username.toLowerCase());
+      out.set(id, { id, usernames: [...names].slice(0, 4), name: [u.firstName, u.lastName].filter(Boolean).join(" ") });
+    }
+  };
+  if (peer?.className === "InputPeerChat") {
+    // an old-style small group: one request returns everybody
+    const full = (await withTimeout(client.invoke(new Api.messages.GetFullChat({ chatId: peer.chatId })), 20_000, "timeout")) as {
+      users?: unknown[];
+    };
+    take(full?.users || []);
+    onProgress(out.size);
+    return { members: [...out.values()], partial: "" };
+  }
+  let offset = 0;
+  let partial = "";
+  let waited = false;
+  while (offset < PARS_MAX) {
+    let res: { users?: unknown[]; participants?: unknown[]; count?: number };
+    try {
+      res = (await withTimeout(
+        client.invoke(
+          new Api.channels.GetParticipants({
+            channel: peer,
+            filter: new Api.ChannelParticipantsRecent(),
+            offset,
+            limit: PARS_PAGE,
+            hash: 0,
+          }),
+        ),
+        20_000,
+        "timeout",
+      )) as typeof res;
+    } catch (err) {
+      const wait = floodSeconds(err);
+      if (wait && wait <= PARS_MAX_WAIT_S && !waited) {
+        waited = true;
+        await sleep((wait + 3) * 1000);
+        continue;
+      }
+      if (wait) userBlockedUntil = Date.now() + (wait + 5) * 1000;
+      if (out.size) {
+        partial = wait ? "Telegram попросил юзербот сделать паузу, поэтому список выгружен не полностью." : "Список выгружен не полностью (Telegram перестал отвечать).";
+        break;
+      }
+      throw err;
+    }
+    const page = res?.participants?.length || 0;
+    take(res?.users || []);
+    onProgress(out.size);
+    if (page < PARS_PAGE) break;
+    offset += page;
+    // a calm pace with a little jitter, so the account never looks like a scraper
+    await sleep(PARS_PAUSE_MS + Math.floor(Math.random() * 700));
+  }
+  if (offset >= PARS_MAX) partial = `Telegram отдаёт не больше ${PARS_MAX} участников большого чата — проверены они.`;
+  return { members: [...out.values()], partial };
+}
+
+// One member against the local base: no network at all.
+function parsLookup(m: ParsMember, channels: CheckChannel[], botPosts: Set<number>): ParsFind | null {
+  const names = m.usernames.filter((u) => !isIgnoredHandle(u));
+  const epb: ParsFind["epb"] = [];
+  let hasBotRecord = false;
+  for (const [key, rec] of Object.entries(pendingPosts)) {
+    const accounts = pendingAccounts(rec);
+    const match = accounts.some(
+      (a) => (a.id && a.id === m.id) || (a.username && names.includes(a.username.replace(/^@/, "").toLowerCase())),
+    );
+    if (!match) continue;
+    hasBotRecord = true;
+    if (rec.status !== "published" || !rec.channelPosted || rec.removedFromCheck || rec.deletedEverywhere) continue;
+    const chan = rec.channelChatId || bindings.channelId || "";
+    const mid = rec.channelMsgIds?.[0];
+    epb.push({ key, date: rec.createdAt || 0, link: chan && mid ? messageLink({ id: chan, addedAt: 0 }, mid) : undefined });
+  }
+  const manual = names.map((u) => matchManualBlacklist(u, "")).flat().concat(matchManualBlacklist("", m.id));
+  const seen = new Set<string>();
+  const posts: CheckHit[] = [];
+  const subjects = [
+    ...names.map((u, i) => ({ username: u, id: i === 0 ? m.id : "", nick: "" })),
+    ...(names.length ? [] : [{ username: "", id: m.id, nick: "" }]),
+    // earlier usernames of the same account
+    ...knownUsernames(m.id)
+      .map((k) => k.username)
+      .filter((u) => !names.includes(u))
+      .slice(0, 3)
+      .map((u) => ({ username: u, id: "", nick: "" })),
+  ];
+  const epbChannel = epbCheckChannel();
+  for (const ch of [...channels, ...(epbChannel && !hasBotRecord ? [epbChannel] : [])]) {
+    const mirror = loadMirror(ch);
+    if (!mirror.msgs.size) continue;
+    for (const sub of subjects) {
+      for (const h of searchMirror(ch, mirror, sub)) {
+        if (epbChannel && ch === epbChannel && botPosts.has(h.messageId)) continue;
+        const k = `${chatIdKey(h.channelId)}:${h.messageId}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        posts.push(h);
+      }
+    }
+  }
+  const uniqueManual = manual.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i);
+  if (!epb.length && !uniqueManual.length && !posts.length) return null;
+  posts.sort((a, b) => b.date - a.date);
+  return { member: m, epb, manual: uniqueManual, posts };
+}
+
+// Posts found in the saved copies are re-checked with Telegram (still there,
+// still accusing this person); a handful of light requests in total.
+async function parsConfirm(finds: ParsFind[]): Promise<ParsFind[]> {
+  const out: ParsFind[] = [];
+  let budget = 60;
+  for (const f of finds) {
+    if (f.posts.length && budget > 0 && hasUserbot() && Date.now() >= userBlockedUntil) {
+      const byChannel = new Map<string, CheckHit[]>();
+      for (const h of f.posts) byChannel.set(chatIdKey(h.channelId), [...(byChannel.get(chatIdKey(h.channelId)) || []), h]);
+      const kept: CheckHit[] = [];
+      for (const [key, hits] of byChannel) {
+        const ch = [...checkChannels(), ...(epbCheckChannel() ? [epbCheckChannel()!] : [])].find((c) => chatIdKey(c.id) === key);
+        if (!ch || budget <= 0) {
+          kept.push(...hits);
+          continue;
+        }
+        budget--;
+        const subject = { username: f.member.usernames[0] || "", id: f.member.id, nick: "" };
+        kept.push(...(await confirmMirrorHits(ch, loadMirror(ch), hits, subject)));
+        await sleep(400);
+      }
+      f.posts = kept;
+    }
+    if (f.epb.length || f.manual.length || f.posts.length) out.push(f);
+  }
+  return out;
+}
+
+function parsDate(ms: number): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+}
+
+function parsFindHtml(f: ParsFind): string {
+  const who = f.member.usernames.length ? f.member.usernames.map((u) => `@${escapeHtml(u)}`).join(", ") : escapeHtml(f.member.name || "без юзернейма");
+  const lines = [`• <b>${who}</b> · ID <code>${f.member.id}</code>${f.member.name && f.member.usernames.length ? ` · ${escapeHtml(f.member.name.slice(0, 40))}` : ""}`];
+  for (const e of f.epb.slice(0, 3)) {
+    lines.push(`   EPB: ${e.link ? `<a href="${escapeHtml(e.link)}">жалоба ${escapeHtml(e.key)}</a>` : `жалоба ${escapeHtml(e.key)}`}${e.date ? ` (${parsDate(e.date)})` : ""}`);
+  }
+  const byTitle = new Map<string, CheckHit[]>();
+  for (const h of f.posts) byTitle.set(h.channelTitle || "канал", [...(byTitle.get(h.channelTitle || "канал") || []), h]);
+  for (const [title, hits] of byTitle) {
+    const links = hits
+      .slice(0, 3)
+      .map((h) => `<a href="${escapeHtml(h.link)}">${parsDate(h.date) || "пост"}</a>`)
+      .join(", ");
+    lines.push(`   ${escapeHtml(title)}: ${links}${hits.length > 3 ? ` и ещё ${hits.length - 3}` : ""}`);
+  }
+  for (const x of f.manual.slice(0, 2)) lines.push(`   Ручной список: ${escapeHtml(x.source || x.account)}`);
+  return lines.join("\n");
+}
+
+function parsFindText(f: ParsFind): string {
+  const who = f.member.usernames.length ? f.member.usernames.map((u) => `@${u}`).join(", ") : f.member.name || "без юзернейма";
+  const lines = [`${who} | ID ${f.member.id}${f.member.name ? ` | ${f.member.name}` : ""}`];
+  for (const e of f.epb) lines.push(`  EPB: жалоба ${e.key}${e.link ? ` ${e.link}` : ""}`);
+  for (const h of f.posts) lines.push(`  ${h.channelTitle}: ${h.link}`);
+  for (const x of f.manual) lines.push(`  Ручной список: ${x.source || x.account}`);
+  return lines.join("\n");
+}
+
+async function parsScan(t: ParsTarget, ownerChat: number | string) {
+  const status = await tgSoft<{ message_id: number }>("sendMessage", {
+    chat_id: ownerChat,
+    text: `⏳ «${t.title}»: выгружаю участников…`,
+  });
+  let lastEdit = 0;
+  const say = async (text: string, force = false) => {
+    if (!status?.message_id) return;
+    if (!force && Date.now() - lastEdit < 4000) return;
+    lastEdit = Date.now();
+    await tgSoft("editMessageText", { chat_id: ownerChat, message_id: status.message_id, text });
+  };
+  let members: ParsMember[];
+  let partial = "";
+  try {
+    const got = await parsFetchMembers(t, (n) => void say(`⏳ «${t.title}»: выгружено участников: ${n}${t.members ? ` из ~${Math.min(t.members, PARS_MAX)}` : ""}…`));
+    members = got.members;
+    partial = got.partial;
+  } catch (err) {
+    await say(`⚠️ «${t.title}»: ${parsErrorText(err)}`, true);
+    return;
+  }
+  await say(`⏳ «${t.title}»: сверяю ${members.length} участников с базой…`, true);
+  const channels = checkChannels();
+  const botPosts = new Set<number>();
+  for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
+  const raw: ParsFind[] = [];
+  for (let i = 0; i < members.length; i++) {
+    const f = parsLookup(members[i]!, channels, botPosts);
+    if (f) raw.push(f);
+    // let the bot breathe between small batches
+    if (i % 50 === 49) {
+      await new Promise((r) => setImmediate(r));
+      void say(`⏳ «${t.title}»: сверено ${i + 1} из ${members.length}…`);
+    }
+  }
+  const finds = await parsConfirm(raw);
+  const hidden = t.members && members.length < t.members * 0.5 && t.members > 50;
+  const head = [
+    `✅ <b>Проверка чата завершена</b>`,
+    `Чат: <b>${escapeHtml(t.title)}</b>`,
+    `Проверено участников: ${members.length}${t.members ? ` из ${t.members}` : ""} (боты и удалённые аккаунты не считаются)`,
+    partial ? `⚠️ ${escapeHtml(partial)}` : "",
+    hidden && !partial ? "⚠️ Telegram отдал меньше половины участников — возможно, список участников скрыт настройками чата (тогда юзербот должен быть админом)." : "",
+    "",
+    finds.length ? `🚨 Найдено в базе: <b>${finds.length}</b>` : "Никого из участников нет в базе блеклистов 👍",
+  ]
+    .filter((l, i, a) => l !== "" || a[i - 1] !== "")
+    .join("\n");
+  await say(`✅ «${t.title}»: готово, отчёт ниже.`, true);
+  const shown = finds.slice(0, 40);
+  const body = shown.map(parsFindHtml).join("\n\n");
+  for (const part of splitHtml(body ? `${head}\n\n${body}` : head, 4000)) {
+    await tgSoft("sendMessage", { chat_id: ownerChat, text: part, parse_mode: "HTML", disable_web_page_preview: true });
+  }
+  if (finds.length > shown.length || finds.length > 15) {
+    // the full list as a file, easy to forward or keep
+    const text = [`Проверка чата: ${t.title}`, `Проверено: ${members.length}`, `Найдено: ${finds.length}`, "", ...finds.map(parsFindText)].join("\n\n");
+    const form = new FormData();
+    form.set("chat_id", String(ownerChat));
+    form.set("caption", `Полный список найденных: ${finds.length}`);
+    form.set("document", new File([text], `pars-${t.chatId}.txt`, { type: "text/plain" }));
+    try {
+      await tgForm("sendDocument", form);
+    } catch {
+      /* the message above already has the main part */
+    }
+  }
 }
 
 // ---------- Owner userbot setup (connect an account, pick channels to parse) ----------
@@ -9467,6 +9892,11 @@ async function handleTelegramUpdate(update: TgUpdate) {
   if (groupMsg && (groupMsg.chat.type === "group" || groupMsg.chat.type === "supergroup")) {
     if (groupMsg.migrate_to_chat_id) onChatMigrated(String(groupMsg.chat.id), String(groupMsg.migrate_to_chat_id));
     if (groupMsg.migrate_from_chat_id) onChatMigrated(String(groupMsg.migrate_from_chat_id), String(groupMsg.chat.id));
+    // /pars from the bot owner: check this chat's members (continues in private)
+    if (commandName(groupMsg.text) === "pars") {
+      if (isOwner(groupMsg.from?.id) && !tooMany(`pars:${groupMsg.chat.id}`, 3, 60_000)) await parsAskInGroup(groupMsg);
+      return;
+    }
     // Ordinary messages from relay chats are dropped before any rate limit, so busy
     // or spammed groups can never use up the limit and mute the bot for arbiters.
     if (!isOfficialArbiterChat(groupMsg.chat.id)) return;
@@ -9542,6 +9972,10 @@ async function handleTelegramUpdate(update: TgUpdate) {
         return;
       }
       await editCard(cb, await startCaption(locale), applyKeyboard(locale));
+      return;
+    }
+    if (cb.data.startsWith("pars:")) {
+      await handleParsCallback(cb);
       return;
     }
     if (cb.data === "bcap:x") {
@@ -9738,6 +10172,11 @@ async function handleTelegramUpdate(update: TgUpdate) {
   const cmd = commandName(msg.text);
   const userId = String(msg.from?.id || msg.chat.id);
 
+  if (cmd === "start" && msg.chat.type === "private" && /^\/start(?:@\w+)?\s+pars_/i.test(msg.text || "") && isOwner(msg.from?.id)) {
+    const token = (msg.text || "").split(/\s+/)[1]!.slice("pars_".length);
+    await parsOffer(msg.chat.id, token);
+    return;
+  }
   if (cmd === "start" || cmd === "app") {
     const fromId = msg.from?.id;
     if (fromId && !hasLang(fromId)) {
