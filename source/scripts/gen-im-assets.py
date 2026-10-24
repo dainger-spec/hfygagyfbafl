@@ -126,11 +126,16 @@ def face(metal: str) -> bytes:
     return np.asarray(out.convert("RGBA"), np.uint8).tobytes()
 
 
+# Where the server engraves the holder's details on the back (1200-wide box):
+# a 2x3 grid, each field a small label above a large value, and the signature.
+BACK_GRID = {"cols": [84, 640], "rows": [404, 502, 600], "valueGap": 40, "sign": [104, 330], "signWidth": 620}
+
+
 def back_face(metal: str) -> bytes:
     """The reverse, like the back of a charge card, with our own words: the
     stripe, the signature panel, the emblem box, the contactless mark and the
-    service lines (the bot instead of phone numbers). The holder's details are
-    engraved over it per user by the server."""
+    service line (the bot instead of phone numbers). One typeface (Inter) for
+    everything; the holder's details are engraved per user by the server."""
     ink, _ribbon, hi, lo, _rim = LOOKS[metal]
     W, H = CW * SS, CH * SS
     s = K * SS
@@ -141,60 +146,64 @@ def back_face(metal: str) -> bytes:
     d = ImageDraw.Draw(art)
     inter = lambda name, size: ImageFont.truetype(os.path.join(INTER, name), int(size * s))
     inkc = (*rgb(ink), 255)
-    d.text((84 * s, 58 * s), "USE OF THIS CARD IS SUBJECT TO THE EUROPE PRIVATE BLACKLIST RULES", font=inter("InterDisplay-Bold.otf", 17), fill=inkc, anchor="ls")
+    soft = (*rgb(ink), 190)
+    d.text((84 * s, 56 * s), "USE OF THIS CARD IS SUBJECT TO THE EUROPE PRIVATE BLACKLIST RULES", font=inter("InterDisplay-SemiBold.otf", 17), fill=soft, anchor="ls")
     # magnetic stripe
     st = np.array(STRIPE[metal], np.float32)
-    y0, y1 = int(84 * s), int(196 * s)
+    y0, y1 = int(80 * s), int(180 * s)
     band = np.zeros((y1 - y0, W, 4), np.uint8)
     t = np.linspace(0, 1, y1 - y0)[:, None]
     band[..., :3] = np.clip(st * (0.92 + 0.16 * np.sin(t * math.pi))[..., None] + np.random.default_rng(3).normal(0, 2.5, (y1 - y0, W, 1)), 0, 255)
     band[..., 3] = 255
     art.alpha_composite(Image.fromarray(band, "RGBA"), (0, y0))
-    d.text((84 * s, 240 * s), "SIGN", font=inter("InterDisplay-SemiBold.otf", 16), fill=inkc, anchor="ls")
+    d.text((84 * s, 222 * s), "SIGN", font=inter("InterDisplay-SemiBold.otf", 16), fill=soft, anchor="ls")
     # signature panel with its own faint pattern
-    px0, py0, px1, py1 = int(84 * s), int(258 * s), int(760 * s), int(394 * s)
-    panel = Image.new("RGBA", (px1 - px0, py1 - py0), (236, 236, 230, 255))
+    px0, py0, px1, py1 = int(84 * s), int(236 * s), int(760 * s), int(348 * s)
+    panel = Image.new("RGBA", (px1 - px0, py1 - py0), (238, 238, 232, 255))
     pd = ImageDraw.Draw(panel)
-    pf = inter("InterDisplay-Medium.otf", 15)
-    for row, yy in enumerate(range(int(8 * s), py1 - py0, int(46 * s))):
+    pf = inter("InterDisplay-Medium.otf", 14)
+    for row, yy in enumerate(range(int(6 * s), py1 - py0, int(38 * s))):
         x = -int(80 * s) * (row % 2)
         while x < px1 - px0:
-            pd.text((x, yy), "EUROPE PRIVATE   BLACKLIST   ", font=pf, fill=(198, 198, 192, 255))
+            pd.text((x, yy), "EUROPE PRIVATE   BLACKLIST   ", font=pf, fill=(208, 208, 202, 255))
             x += int(pf.getlength("EUROPE PRIVATE   BLACKLIST   "))
-    for k in range(6):
-        pd.arc((int((k * 140 - 40) * s), int(30 * s), int((k * 140 + 120) * s), int(170 * s)), 200, 340, fill=(205, 205, 199, 255), width=int(2 * s))
     art.alpha_composite(panel, (px0, py0))
     # emblem box (where the card brand's logo would be)
-    bx0, by0, bx1, by1 = int(984 * s), int(256 * s), int(1128 * s), int(396 * s)
-    d.rectangle((bx0, by0, bx1, by1), fill=(16, 22, 40, 255))
+    bx0, by0, bx1, by1 = int(1000 * s), int(236 * s), int(1116 * s), int(348 * s)
+    d.rounded_rectangle((bx0, by0, bx1, by1), radius=int(8 * s), fill=(16, 22, 40, 255))
     em = Image.open(os.path.join(ROOT, "public", "brand", "emblem-v2.png")).convert("RGBA")
     eh = int((by1 - by0) * 0.86)
     em = em.resize((round(em.width * eh / em.height), eh), Image.LANCZOS)
     art.alpha_composite(em, ((bx0 + bx1) // 2 - em.width // 2, (by0 + by1) // 2 - em.height // 2))
-    d.text((bx0 - 6 * s, by1 + 4 * s), "®", font=inter("InterDisplay-Medium.otf", 18), fill=inkc, anchor="rt")
+    # thin rules between the detail rows, like the lines of an engraved form
+    for yy in (452, 550):
+        d.line((84 * s, (yy + 8) * s, 1116 * s, (yy + 8) * s), fill=(*rgb(ink), 40), width=max(1, int(1.2 * s)))
     # contactless mark
-    cx, cy = 1080 * s, 640 * s
+    cx, cy = 1084 * s, 690 * s
     for k in range(4):
-        r = (12 + k * 14) * s
-        d.arc((cx - r, cy - r, cx + r, cy + r), -55, 55, fill=inkc, width=int(5 * s))
-    # service lines: the bot and the channel instead of phone numbers
-    d.text((84 * s, 652 * s), "Service: t.me/EuropeBlack_bot", font=inter("InterDisplay-Bold.otf", 30), fill=inkc, anchor="ls")
-    d.text((84 * s, 702 * s), "EUROPE PRIVATE BLACKLIST · 24/7", font=inter("InterDisplay-Black.otf", 36), fill=inkc, anchor="ls")
-    d.text((84 * s, 742 * s), "NOT TRANSFERABLE", font=inter("InterDisplay-Bold.otf", 16), fill=inkc, anchor="ls")
-    d.text((1116 * s, 742 * s), "© EPB", font=inter("InterDisplay-Bold.otf", 16), fill=inkc, anchor="rs")
+        r = (8 + k * 10) * s
+        d.arc((cx - r, cy - r, cx + r, cy + r), -55, 55, fill=inkc, width=int(4 * s))
+    # service line: the bot instead of phone numbers
+    d.text((84 * s, 700 * s), "EUROPE PRIVATE BLACKLIST  ·  t.me/EuropeBlack_bot  ·  24/7", font=inter("InterDisplay-Bold.otf", 24), fill=inkc, anchor="ls")
+    d.text((84 * s, 738 * s), "NOT TRANSFERABLE", font=inter("InterDisplay-SemiBold.otf", 15), fill=soft, anchor="ls")
+    d.text((1116 * s, 738 * s), "© EPB", font=inter("InterDisplay-Bold.otf", 15), fill=soft, anchor="rs")
     out = art.resize((CW, CH), Image.LANCZOS)
     return np.asarray(out.convert("RGBA"), np.uint8).tobytes()
 
 
-def atlas(px: int):
-    """Glyph bitmaps at a pixel size: Archivo for Latin, Inter for Cyrillic."""
-    latin = ImageFont.truetype(os.path.join(FONTS, "Archivo-Regular.ttf"), px * SS)
-    cyr = ImageFont.truetype(os.path.join(INTER, "InterDisplay-Regular.otf"), px * SS)
-    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-+ —АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ:@/,·()~№#!?'\"&"
+UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-+ —АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ:@/,·()~№#!?'\"&"
+ALL = UPPER + "abcdefghijklmnopqrstuvwxyzабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+
+
+def atlas(px: int, latin_font: str = "", cyr_font: str = "", chars: str = UPPER):
+    """Glyph bitmaps at a pixel size (by default Archivo for Latin, Inter for
+    Cyrillic; one font for both when given)."""
+    latin = ImageFont.truetype(latin_font or os.path.join(FONTS, "Archivo-Regular.ttf"), px * SS)
+    cyr = ImageFont.truetype(cyr_font or os.path.join(INTER, "InterDisplay-Regular.otf"), px * SS)
     ascent = latin.getmetrics()[0]
     glyphs = {}
     for c in chars:
-        f = cyr if "А" <= c <= "Я" or c == "Ё" else latin
+        f = cyr if ("А" <= c <= "я" or c in "Ёё") else latin
         adv = f.getlength(c)
         box = f.getbbox(c, anchor="ls")
         x0, y0, x1, y1 = box
@@ -221,7 +230,15 @@ def main():
     faces = {m: base64.b64encode(gzip.compress(face(m), 9)).decode() for m in LOOKS}
     backs = {m: base64.b64encode(gzip.compress(back_face(m), 9)).decode() for m in LOOKS}
     looks = {m: {"ink": v[0], "hi": list(v[2]), "lo": list(v[3]), "rim": list(v[4])} for m, v in LOOKS.items()}
-    fonts = {"name": atlas(round(54 * K)), "count": atlas(round(46 * K)), "info": atlas(round(30 * K))}
+    inter = lambda n: os.path.join(INTER, n)
+    fonts = {
+        "name": atlas(round(54 * K)),
+        "count": atlas(round(46 * K)),
+        # the back: one typeface, small labels above large values, a signature
+        "label": atlas(round(19 * K), inter("InterDisplay-SemiBold.otf"), inter("InterDisplay-SemiBold.otf")),
+        "value": atlas(round(36 * K), inter("InterDisplay-Bold.otf"), inter("InterDisplay-Bold.otf"), ALL),
+        "sign": atlas(round(46 * K), inter("InterDisplay-MediumItalic.otf"), inter("InterDisplay-MediumItalic.otf"), ALL),
+    }
     out = os.path.join(ROOT, "src", "lib", "member-gif-assets.ts")
     with open(out, "w") as fh:
         fh.write("// Generated by scripts/gen-im-assets.py — the /im card animation's card faces\n")
@@ -231,7 +248,7 @@ def main():
         fh.write(f"export const CARD_BACKS: Record<string, string> = {json.dumps(backs)};\n")
         fh.write(f"export const CARD_INKS: Record<string, {{ ink: string; hi: number[]; lo: number[]; rim: number[] }}> = {json.dumps(looks)};\n")
         fh.write("export type GlyphAtlas = { size: number; ascent: number; glyphs: Record<string, { a: number; x?: number; y?: number; w?: number; h?: number; d?: string }> };\n")
-        fh.write(f"export const CARD_FONTS: Record<\"name\" | \"count\" | \"info\", GlyphAtlas> = {json.dumps(fonts)};\n")
+        fh.write(f"export const BACK_GRID = {json.dumps(BACK_GRID)};\nexport const CARD_FONTS: Record<\"name\" | \"count\" | \"label\" | \"value\" | \"sign\", GlyphAtlas> = {json.dumps(fonts)};\n")
     print(out, os.path.getsize(out), "bytes")
 
 

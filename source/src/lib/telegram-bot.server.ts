@@ -3815,9 +3815,9 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
 // ---------- /im: a member's card in a group ----------
 // The card of the app (metal by tier, the person's name, the base count) as a
 // short looping animation that tilts in 3D, with the person's numbers below.
-// Drawing one takes ~2 s, so cards are drawn one at a time, a finished one is
-// reused for half an hour (by Telegram file id), and each person and chat has a
-// small limit.
+// Drawing one takes ~1 s of CPU, so cards are drawn one at a time, a finished one is
+// reused for half an hour (by Telegram file id), each person and chat has a
+// small limit, and the bot draws at most 12 a minute.
 const imCache = new Map<string, { fileId: string; at: number }>();
 let imQueue: Promise<unknown> = Promise.resolve();
 let imWaiting = 0;
@@ -3925,7 +3925,8 @@ async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promis
   const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
   const cached = imCache.get(key);
   if (cached && Date.now() - cached.at < IM_CACHE_MS) return { fileId: cached.fileId };
-  if (imWaiting >= 4) return null;
+  // and for the whole bot: a burst of /im in many chats waits instead of piling up
+  if (imWaiting >= 4 || tooMany("im-render", 12, 60_000)) return null;
   imWaiting++;
   const job = imQueue.then(async () => {
     try {

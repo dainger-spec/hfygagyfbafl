@@ -1,7 +1,7 @@
 import { gunzipSync } from "node:zlib";
 // @ts-expect-error gifenc ships no types
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
-import { CARD_BACKS, CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS, CARD_INKS, type GlyphAtlas } from "@/lib/member-gif-assets";
+import { BACK_GRID, CARD_BACKS, CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS, CARD_INKS, type GlyphAtlas } from "@/lib/member-gif-assets";
 
 // The /im animation: the member card of the app, with the person's name and the
 // base count, gently tilting in 3D over the drifting engraved texture and a warm
@@ -13,8 +13,8 @@ import { CARD_BACKS, CARD_FACES, CARD_FACE_H, CARD_FACE_W, CARD_FONTS, CARD_INKS
 
 const W = 640;
 const H = 440;
-const FRAMES = 40;
-const DELAY_MS = 70;
+const FRAMES = 36;
+const DELAY_MS = 78;
 const PERSPECTIVE = 900;
 const SCALE = 0.9; // the 600-px face shown at ~540 px
 const THICK = 5; // rim depth, face pixels
@@ -55,19 +55,25 @@ function hexRgb(h: string): [number, number, number] {
 // the text ends.
 function drawText(
   face: Uint8Array,
-  fontName: "name" | "count" | "info",
+  fontName: keyof typeof CARD_FONTS,
   text: string,
   x: number,
   baseline: number,
   maxWidth: number,
   align: "left" | "center",
   metal: string,
-  style: { relief?: "raised" | "engraved" | "flat"; color?: [number, number, number]; alpha?: number } = {},
+  style: {
+    relief?: "raised" | "engraved" | "flat";
+    color?: [number, number, number];
+    alpha?: number;
+    upper?: boolean;
+    track?: number;
+  } = {},
 ): number {
   const font: GlyphAtlas = CARD_FONTS[fontName];
-  const chars = [...text.toUpperCase()].filter((c) => font.glyphs[c]);
+  const chars = [...(style.upper === false ? text : text.toUpperCase())].filter((c) => font.glyphs[c]);
   if (!chars.length) return x;
-  const track = 1;
+  const track = style.track ?? 1;
   const width = chars.reduce((s, c) => s + font.glyphs[c]!.a + track, -track);
   const scale = Math.min(1, maxWidth / Math.max(1, width));
   const start = align === "center" ? x - (width * scale) / 2 : x;
@@ -129,19 +135,27 @@ function insideRounded(u: number, v: number): boolean {
   return dx * dx + dy * dy <= RADIUS * RADIUS;
 }
 
+
 // The background: the drifting engraved "banknote" lines of the app (two
 // copies, the second mirrored, sliding against each other so the moire moves)
-// under a warm yellowish light that wanders around. The line pattern is drawn
-// once, a little larger than the frame; frames only shift it.
+// under a warm yellowish light that wanders around. Everything that does not
+// move is worked out once and kept (the line pattern a little larger than the
+// frame, the light spot, the vignette, the card's shadow), so a frame only
+// looks values up.
+const tick = () => new Promise((r) => setImmediate(r));
 const PAD = 48;
 const TW = W + 2 * PAD;
 const TH = H + 2 * PAD;
-let lines: Float32Array | null = null;
-function lineTexture(): Float32Array {
-  if (lines) return lines;
-  lines = new Float32Array(TW * TH);
+const LIGHT_SIGMA = 230;
+type Layers = { lines: Uint8Array; light: Uint8Array; vign: Float32Array; rowK: Float32Array; shadow: Uint8Array; shW: number; shH: number };
+let layers: Layers | null = null;
+// built on the first card, in slices so that one does not hold the bot either
+async function bgLayers(): Promise<Layers> {
+  if (layers) return layers;
+  const lines = new Uint8Array(TW * TH);
   const ts = 2.2;
   for (let y = 0; y < TH; y++) {
+    if (y % 64 === 63) await tick();
     for (let x = 0; x < TW; x++) {
       const u = x / ts;
       const v = y / ts;
@@ -149,43 +163,92 @@ function lineTexture(): Float32Array {
         7 * Math.sin(u / 41 + v / 67) + 4.5 * Math.sin(u / 23 - v / 49 + 1.3) + 3 * Math.sin((u + 2 * v) / 31 + 0.7) + 2 * Math.sin(u / 11 + v / 90 + 2.1);
       const phase = (v - flow) / 3.4;
       const dist = Math.abs(phase - Math.round(phase)) * 3.4 * ts;
-      lines[y * TW + x] = Math.max(0, Math.min(1, 1 - (dist - 0.55) / 0.9));
+      lines[y * TW + x] = Math.round(255 * Math.max(0, Math.min(1, 1 - (dist - 0.55) / 0.9)));
     }
   }
-  return lines;
+  // the light spot, twice the frame so any centre inside the frame is a window of it
+  const light = new Uint8Array(4 * W * H);
+  for (let y = 0; y < 2 * H; y++) {
+    if (y % 128 === 127) await tick();
+    for (let x = 0; x < 2 * W; x++) {
+      const dx = x - W;
+      const dy = y - H;
+      light[y * 2 * W + x] = Math.round(255 * Math.exp(-(dx * dx + dy * dy) / (2 * LIGHT_SIGMA * LIGHT_SIGMA)));
+    }
+  }
+  const vign = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const cx = (x - W / 2) / (W * 0.6);
+      const cy = (y - H / 2) / (H * 0.7);
+      vign[y * W + x] = Math.max(0, 1 - (cx * cx + cy * cy) * 0.55);
+    }
+  }
+  const rowK = new Float32Array(H);
+  for (let y = 0; y < H; y++) rowK[y] = 0.05 + 0.17 * Math.pow(y / H, 1.4);
+  // the soft shadow on the "table": always the same shape, only moved
+  const rx = (CARD_FACE_W / 2) * SCALE * 0.98;
+  const ry = (CARD_FACE_H / 2) * SCALE * 0.95;
+  const shW = Math.ceil(rx * 1.6) * 2;
+  const shH = Math.ceil(ry * 1.6) * 2;
+  const shadow = new Uint8Array(shW * shH);
+  for (let y = 0; y < shH; y++) {
+    for (let x = 0; x < shW; x++) {
+      const qx = (x - shW / 2) / rx;
+      const qy = (y - shH / 2) / ry;
+      shadow[y * shW + x] = Math.round(255 * 0.75 * Math.exp(-Math.pow(qx * qx + qy * qy, 3) * 1.2));
+    }
+  }
+  layers = { lines, light, vign, rowK, shadow, shW, shH };
+  return layers;
 }
 
-function backdrop(a: number, out: Float32Array) {
-  const tex = lineTexture();
+function drawBackground(L: Layers, a: number, rx: number, ry: number, out: Uint8Array) {
+  const { lines, light, vign, rowK, shadow, shW, shH } = L;
   const ax = Math.round(PAD + PAD * 0.8 * Math.sin(a));
   const ay = Math.round(PAD + PAD * 0.5 * Math.cos(a));
   const bx = Math.round(PAD - PAD * 0.7 * Math.sin(a + 1.1));
   const by = Math.round(PAD + PAD * 0.6 * Math.sin(a));
-  const lx = W / 2 + 170 * Math.cos(a);
-  const ly = H / 2 - 20 + 95 * Math.sin(a * 2);
+  // window of the light layer whose centre lands on the light's position
+  const lx = Math.round(W - (W / 2 + 170 * Math.cos(a)));
+  const ly = Math.round(H - (H / 2 - 20 + 95 * Math.sin(a * 2)));
   for (let y = 0; y < H; y++) {
-    const fy = Math.pow(y / H, 1.4);
-    for (let x = 0; x < W; x++) {
-      const dx = x - lx;
-      const dy = y - ly;
-      const light = 0.34 * Math.exp(-(dx * dx + dy * dy) / (2 * 230 * 230));
-      const cx = (x - W / 2) / (W * 0.6);
-      const cy = (y - H / 2) / (H * 0.7);
-      const vign = Math.max(0, 1 - (cx * cx + cy * cy) * 0.55);
-      const la = tex[(y + ay) * TW + (x + ax)]!;
-      const lb = tex[(y + by) * TW + (W - 1 - x + bx)]!;
+    const ka = (y + ay) * TW + ax;
+    const kb = (y + by) * TW + W - 1 + bx;
+    const kl = (y + ly) * 2 * W + lx;
+    const rk = rowK[y]!;
+    let p = y * W * 4;
+    for (let x = 0; x < W; x++, p += 4) {
+      const li = light[kl + x]! * (0.34 / 255);
+      const vg = vign[y * W + x]!;
+      const la = lines[ka + x]! / 255;
+      const lb = lines[kb - x]! / 255;
       const t = 1 - (1 - la) * (1 - 0.45 * lb);
-      const k = (0.05 + 0.17 * fy) * (0.75 + 2.2 * light) * vign;
-      const i = (y * W + x) * 3;
+      const k = rk * (0.75 + 2.2 * li) * vg * t;
+      const amb = 0.45 + 0.55 * vg;
       // warm yellowish light, the engraving in gold over it
-      out[i] = (8 + 205 * light) * (0.45 + 0.55 * vign) + 246 * t * k;
-      out[i + 1] = (7 + 150 * light) * (0.45 + 0.55 * vign) + 200 * t * k;
-      out[i + 2] = (5 + 38 * light) * (0.45 + 0.55 * vign) + 90 * t * k;
+      out[p] = (8 + 205 * li) * amb + 246 * k;
+      out[p + 1] = (7 + 150 * li) * amb + 200 * k;
+      out[p + 2] = (5 + 38 * li) * amb + 90 * k;
+      out[p + 3] = 255;
+    }
+  }
+  const sx = Math.round(W / 2 - ry * 0.7 - shW / 2);
+  const sy = Math.round(H / 2 - 6 + 16 + rx * 0.5 - shH / 2);
+  for (let y = Math.max(0, sy); y < Math.min(H, sy + shH); y++) {
+    for (let x = Math.max(0, sx); x < Math.min(W, sx + shW); x++) {
+      const s = shadow[(y - sy) * shW + (x - sx)]!;
+      if (!s) continue;
+      const p = (y * W + x) * 4;
+      const k = 1 - s / 255;
+      out[p] = out[p]! * k;
+      out[p + 1] = out[p + 1]! * k;
+      out[p + 2] = out[p + 2]! * k;
     }
   }
 }
 
-function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, bg: Float32Array, out: Uint8Array) {
+function drawCard(face: Uint8Array, rim: number[], rx: number, ry: number, out: Uint8Array) {
   const ax = (rx * Math.PI) / 180;
   const ay = (ry * Math.PI) / 180;
   // CSS rotateX(rx) rotateY(ry): p' = Rx · Ry · p (y down, z towards the viewer)
@@ -203,6 +266,32 @@ function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, bg
   const oy = H / 2 - 6;
   const hw = CARD_FACE_W / 2;
   const hh = CARD_FACE_H / 2;
+  // only the pixels the card can cover: the projected corners of both planes
+  let minX = W;
+  let maxX = 0;
+  let minY = H;
+  let maxY = 0;
+  for (const z of [0, -THICK]) {
+    for (const [X, Y] of [
+      [-hw, -hh],
+      [hw, -hh],
+      [-hw, hh],
+      [hw, hh],
+    ] as const) {
+      const px = X * c1[0]! + Y * c2[0]! + z * c3[0]!;
+      const py = X * c1[1]! + Y * c2[1]! + z * c3[1]!;
+      const pz = X * c1[2]! + Y * c2[2]! + z * c3[2]!;
+      const f = (d / (d - pz)) * SCALE;
+      minX = Math.min(minX, ox + px * f);
+      maxX = Math.max(maxX, ox + px * f);
+      minY = Math.min(minY, oy + py * f);
+      maxY = Math.max(maxY, oy + py * f);
+    }
+  }
+  const x0 = Math.max(0, Math.floor(minX) - 1);
+  const x1 = Math.min(W, Math.ceil(maxX) + 2);
+  const y0 = Math.max(0, Math.floor(minY) - 1);
+  const y1 = Math.min(H, Math.ceil(maxY) + 2);
   // light: highlight and sheen follow the tilt, the far side darkens
   const glareU = CARD_FACE_W * (0.5 + ry * 0.026);
   const glareV = CARD_FACE_H * (0.3 - rx * 0.032);
@@ -211,93 +300,74 @@ function renderFrame(face: Uint8Array, rim: number[], rx: number, ry: number, bg
   const shadeR = Math.max(0, ry) / 32;
   const shadeT = Math.max(0, rx) / 24;
   const shadeB = Math.max(0, -rx) / 24;
-  // shadow on the "table"
-  const shX = ox - ry * 0.7;
-  const shY = oy + 16 + rx * 0.5;
-  for (let y = 0; y < H; y++) {
+  for (let y = y0; y < y1; y++) {
     const s2 = (y - oy) / SCALE;
-    for (let x = 0; x < W; x++) {
+    for (let x = x0; x < x1; x++) {
       const s1 = (x - ox) / SCALE;
-      const o = (y * W + x) * 3;
-      let r = bg[o]!;
-      let g = bg[o + 1]!;
-      let b = bg[o + 2]!;
-      // soft shadow
-      const qx = (x - shX) / (hw * SCALE * 0.98);
-      const qy = (y - shY) / (hh * SCALE * 0.95);
-      const sh = Math.exp(-Math.pow(qx * qx + qy * qy, 3) * 1.2) * 0.75;
-      r *= 1 - sh;
-      g *= 1 - sh;
-      b *= 1 - sh;
       // face plane (Z = 0): solve the 2x2 system for the card point under this pixel
       const a11 = d * c1[0]! + s1 * c1[2]!;
       const a12 = d * c2[0]! + s1 * c2[2]!;
       const a21 = d * c1[1]! + s2 * c1[2]!;
       const a22 = d * c2[1]! + s2 * c2[2]!;
       const det = a11 * a22 - a12 * a21;
-      let drawn = false;
-      if (Math.abs(det) > 1e-6) {
-        const X = (s1 * d * a22 - a12 * s2 * d) / det;
-        const Y = (a11 * s2 * d - a21 * s1 * d) / det;
-        const u = X + hw;
-        const v = Y + hh;
-        if (insideRounded(u, v)) {
-          // bilinear sample of the face
-          const u0 = Math.min(CARD_FACE_W - 2, Math.floor(u));
-          const v0 = Math.min(CARD_FACE_H - 2, Math.floor(v));
-          const fu = u - u0;
-          const fv = v - v0;
-          const i00 = (v0 * CARD_FACE_W + u0) * 4;
-          const i10 = i00 + 4;
-          const i01 = i00 + CARD_FACE_W * 4;
-          const i11 = i01 + 4;
-          const w00 = (1 - fu) * (1 - fv);
-          const w10 = fu * (1 - fv);
-          const w01 = (1 - fu) * fv;
-          const w11 = fu * fv;
-          r = face[i00]! * w00 + face[i10]! * w10 + face[i01]! * w01 + face[i11]! * w11;
-          g = face[i00 + 1]! * w00 + face[i10 + 1]! * w10 + face[i01 + 1]! * w01 + face[i11 + 1]! * w11;
-          b = face[i00 + 2]! * w00 + face[i10 + 2]! * w10 + face[i01 + 2]! * w01 + face[i11 + 2]! * w11;
-          const nu = u / CARD_FACE_W;
-          const nv = v / CARD_FACE_H;
-          let dark = 0;
-          if (shadeL) dark += shadeL * 0.42 * Math.max(0, 1 - nu / 0.6);
-          if (shadeR) dark += shadeR * 0.42 * Math.max(0, 1 - (1 - nu) / 0.6);
-          if (shadeT) dark += shadeT * 0.36 * Math.max(0, 1 - nv / 0.6);
-          if (shadeB) dark += shadeB * 0.36 * Math.max(0, 1 - (1 - nv) / 0.6);
-          const gu = (u - glareU) / (CARD_FACE_W * 0.42);
-          const gv = (v - glareV) / (CARD_FACE_W * 0.42);
-          const glare = 0.3 * Math.exp(-(gu * gu + gv * gv) * 3);
-          const band = nu * 0.9 + nv * 0.36;
-          const sheen = 0.2 * Math.exp(-Math.pow((band - sheenAt) / 0.05, 2)) - 0.08 * Math.exp(-Math.pow((band - sheenAt - 0.17) / 0.05, 2));
-          const k = 1 - dark;
-          const add = (glare + sheen) * 255;
-          r = r * k + add;
-          g = g * k + add * 0.97;
-          b = b * k + add * 0.9;
-          drawn = true;
-        }
-      }
-      if (!drawn) {
+      if (Math.abs(det) <= 1e-6) continue;
+      const p = (y * W + x) * 4;
+      const X = (s1 * d * a22 - a12 * s2 * d) / det;
+      const Y = (a11 * s2 * d - a21 * s1 * d) / det;
+      const u = X + hw;
+      const v = Y + hh;
+      let r: number;
+      let g: number;
+      let b: number;
+      if (insideRounded(u, v)) {
+        // bilinear sample of the face
+        const u0 = Math.min(CARD_FACE_W - 2, Math.floor(u));
+        const v0 = Math.min(CARD_FACE_H - 2, Math.floor(v));
+        const fu = u - u0;
+        const fv = v - v0;
+        const i00 = (v0 * CARD_FACE_W + u0) * 4;
+        const i10 = i00 + 4;
+        const i01 = i00 + CARD_FACE_W * 4;
+        const i11 = i01 + 4;
+        const w00 = (1 - fu) * (1 - fv);
+        const w10 = fu * (1 - fv);
+        const w01 = (1 - fu) * fv;
+        const w11 = fu * fv;
+        r = face[i00]! * w00 + face[i10]! * w10 + face[i01]! * w01 + face[i11]! * w11;
+        g = face[i00 + 1]! * w00 + face[i10 + 1]! * w10 + face[i01 + 1]! * w01 + face[i11 + 1]! * w11;
+        b = face[i00 + 2]! * w00 + face[i10 + 2]! * w10 + face[i01 + 2]! * w01 + face[i11 + 2]! * w11;
+        const nu = u / CARD_FACE_W;
+        const nv = v / CARD_FACE_H;
+        let dark = 0;
+        if (shadeL) dark += shadeL * 0.42 * Math.max(0, 1 - nu / 0.6);
+        if (shadeR) dark += shadeR * 0.42 * Math.max(0, 1 - (1 - nu) / 0.6);
+        if (shadeT) dark += shadeT * 0.36 * Math.max(0, 1 - nv / 0.6);
+        if (shadeB) dark += shadeB * 0.36 * Math.max(0, 1 - (1 - nv) / 0.6);
+        const gu = (u - glareU) / (CARD_FACE_W * 0.42);
+        const gv = (v - glareV) / (CARD_FACE_W * 0.42);
+        const glare = 0.3 * Math.exp(-(gu * gu + gv * gv) * 3);
+        const band = nu * 0.9 + nv * 0.36;
+        const sheen = 0.2 * Math.exp(-Math.pow((band - sheenAt) / 0.05, 2)) - 0.08 * Math.exp(-Math.pow((band - sheenAt - 0.17) / 0.05, 2));
+        const k = 1 - dark;
+        const add = (glare + sheen) * 255;
+        r = r * k + add;
+        g = g * k + add * 0.97;
+        b = b * k + add * 0.9;
+      } else {
         // the rim: the back of the plate (Z = -THICK) peeking out past the face
         const e1 = s1 * (d + THICK * c3[2]!) + d * THICK * c3[0]!;
         const e2 = s2 * (d + THICK * c3[2]!) + d * THICK * c3[1]!;
-        if (Math.abs(det) > 1e-6) {
-          const X = (e1 * a22 - a12 * e2) / det;
-          const Y = (a11 * e2 - a21 * e1) / det;
-          if (insideRounded(X + hw, Y + hh)) {
-            const lit = 0.75 + 0.35 * Math.sin((X / hw + Y / hh) * 1.3 + ry * 0.05);
-            r = rim[0]! * lit;
-            g = rim[1]! * lit;
-            b = rim[2]! * lit;
-          }
-        }
+        const bX = (e1 * a22 - a12 * e2) / det;
+        const bY = (a11 * e2 - a21 * e1) / det;
+        if (!insideRounded(bX + hw, bY + hh)) continue;
+        const lit = 0.75 + 0.35 * Math.sin((bX / hw + bY / hh) * 1.3 + ry * 0.05);
+        r = rim[0]! * lit;
+        g = rim[1]! * lit;
+        b = rim[2]! * lit;
       }
-      const p = (y * W + x) * 4;
       out[p] = r < 0 ? 0 : r > 255 ? 255 : r;
       out[p + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
       out[p + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
-      out[p + 3] = 255;
     }
   }
 }
@@ -309,47 +379,72 @@ export type CardBack = {
   lines: [string, string][];
 };
 
-// Builds the GIF. Each frame is followed by a pause in the event loop, so the
+// Builds the GIF. Frames are drawn and encoded one at a time (only a few are
+// kept, for the palette), each followed by a pause in the event loop, so the
 // bot keeps answering everyone while a card is drawn.
 export async function renderMemberGif(opts: { metal: string; holder: string; count: number | null; back?: CardBack }): Promise<Buffer> {
   const side = opts.back ? "back" : "front";
   const face = new Uint8Array(baseFace(opts.metal, side));
   if (opts.back) {
-    drawText(face, "name", opts.back.signature.slice(0, 40) || "EPB MEMBER", 104 * K, 345 * K, 630 * K, "left", opts.metal, {
+    const [sx, sy] = BACK_GRID.sign;
+    drawText(face, "sign", opts.back.signature.slice(0, 40) || "EPB Member", sx! * K, sy! * K, BACK_GRID.signWidth * K, "left", opts.metal, {
       relief: "flat",
-      color: [28, 28, 30],
+      color: [24, 30, 48],
+      upper: false,
+      track: 0,
     });
+    // two columns of three: a small label, the value under it
+    const colW = (BACK_GRID.cols[1]! - BACK_GRID.cols[0]! - 40) * K;
     opts.back.lines.slice(0, 6).forEach(([label, value], i) => {
-      const y = (448 + i * 32) * K;
-      const end = drawText(face, "info", `${label}: `, 84 * K, y, 360 * K, "left", opts.metal, { relief: "engraved", alpha: 0.72 });
-      drawText(face, "info", value, end, y, (1040 - 84) * K - (end - 84 * K), "left", opts.metal, { relief: "engraved" });
+      const x = BACK_GRID.cols[i % 2]! * K;
+      const y = BACK_GRID.rows[Math.floor(i / 2)]! * K;
+      drawText(face, "label", label, x, y, colW, "left", opts.metal, { relief: "flat", alpha: 0.62, track: 1.6 });
+      drawText(face, "value", value || "—", x, y + BACK_GRID.valueGap * K, colW, "left", opts.metal, { relief: "engraved", upper: false });
     });
   } else {
     drawText(face, "name", opts.holder.replace(/^@/, "").slice(0, 32) || "EPB MEMBER", 122 * K, 704 * K, 900 * K, "left", opts.metal);
     if (opts.count != null) {
-      drawText(face, "count", opts.count.toLocaleString("ru-RU").replace(/\u00a0/g, " "), (890 + 6) * K, 604 * K, 260 * K, "center", opts.metal);
+      drawText(face, "count", opts.count.toLocaleString("ru-RU").replace(/ /g, " "), (890 + 6) * K, 604 * K, 260 * K, "center", opts.metal);
     }
   }
   const rim = (CARD_INKS[opts.metal] || CARD_INKS.gold!).rim;
-  const bg = new Float32Array(W * H * 3);
-  const frames: Uint8Array[] = [];
-  for (let i = 0; i < FRAMES; i++) {
+  // the back sways less, so the details stay easy to read
+  const [ampX, ampY] = opts.back ? [3.5, 10] : [5, 14];
+  const L = await bgLayers();
+  const frame = (i: number, out: Uint8Array) => {
     const a = (2 * Math.PI * i) / FRAMES;
-    const out = new Uint8Array(W * H * 4);
-    backdrop(a, bg);
-    renderFrame(face, rim, 5 * Math.sin(2 * a), 14 * Math.sin(a), bg, out);
-    frames.push(out);
-    await new Promise((r) => setImmediate(r));
+    const rx = ampX * Math.sin(2 * a);
+    const ry = ampY * Math.sin(a);
+    drawBackground(L, a, rx, ry, out);
+    drawCard(face, rim, rx, ry, out);
+  };
+  // one palette for every frame (no flicker between frames), from four frames
+  // spread over the loop, every other pixel
+  const kept = new Map<number, Uint8Array>();
+  const px = W * H;
+  const sample = new Uint8Array(4 * Math.ceil(px / 2) * 4);
+  let s = 0;
+  for (let k = 0; k < 4; k++) {
+    const i = Math.floor((k * FRAMES) / 4);
+    const out = new Uint8Array(px * 4);
+    frame(i, out);
+    kept.set(i, out);
+    for (let p = 0; p < px; p += 2, s += 4) sample.set(out.subarray(p * 4, p * 4 + 4), s);
+    await tick();
   }
-  // one palette for every frame (no flicker between frames)
-  const sample = new Uint8Array(W * H * 4 * 4);
-  for (let k = 0; k < 4; k++) sample.set(frames[Math.floor((k * FRAMES) / 4)]!, k * W * H * 4);
-  const palette = quantize(sample, 256, { format: "rgb565" });
+  const palette = quantize(sample.subarray(0, s), 256, { format: "rgb565" });
   const gif = GIFEncoder();
+  const buf = new Uint8Array(px * 4);
   for (let i = 0; i < FRAMES; i++) {
-    const index = applyPalette(frames[i]!, palette, "rgb565");
+    let out = kept.get(i);
+    if (!out) {
+      frame(i, buf);
+      out = buf;
+    }
+    const index = applyPalette(out, palette, "rgb565");
     gif.writeFrame(index, W, H, i === 0 ? { palette, delay: DELAY_MS, repeat: 0 } : { delay: DELAY_MS });
-    await new Promise((r) => setImmediate(r));
+    kept.delete(i);
+    await tick();
   }
   gif.finish();
   return Buffer.from(gif.bytes());
