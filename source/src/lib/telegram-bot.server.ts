@@ -2066,6 +2066,30 @@ export function postHasScamContext(body: string): boolean {
   return SCAM_CONTEXT_RE.test(body || "");
 }
 
+// Someone named in a story who is NOT the scammer: right after (or in a list
+// right after) "impersonated", "scammed" (the victim), "credits to", "thanks
+// to", "send it to", "contact", "victim", "middlemen like", "выдавал себя за",
+// "спасибо", "пишите"… e.g. "He impersonated @nine, @cupid", "Please send it to
+// @investigator". ("scammed by @x" still accuses @x.)
+const NOT_ACCUSED_CUE =
+  "impersonat\\w*|pretend\\w*\\s+to\\s+be|posing\\s+as|credits?(?:\\s+go(?:es)?)?\\s+to|thanks?(?:\\s+to)?|thank\\s+you|shout\\s*outs?\\s+to|" +
+  "send\\s+(?:it|them|this|(?:all\\s+)?info\\w*|proofs?|evidence)?\\s*to|contact|reach\\s+out\\s+to|message|\\bdm|write\\s+to|report\\s+(?:it\\s+|them\\s+)?to|" +
+  "provided\\s+by|helped\\s+by|victims?|middlem[ae]n(?:\\s+like)?|escrow|scammed|ripped|" +
+  "выдава\\p{L}*\\s+себя\\s+за|представля\\p{L}*\\s+(?:себя\\s+)?как|спасибо|благодар\\p{L}*|пишите|обращайтесь(?:\\s+к)?|присылайте|отправляйте";
+const NOT_ACCUSED_BEFORE_RE = new RegExp(
+  `(?:^|[^\\p{L}])(?:${NOT_ACCUSED_CUE})\\s*:?\\s*(?:@[A-Za-z0-9_]+[’'s]*\\s*(?:,|and|&|и|или)?\\s*)*@?$`,
+  "iu",
+);
+// The sentence around position `at` in a line, and the part of it before `at`.
+function sentencePrefix(line: string, at: number): string {
+  const before = line.slice(0, at);
+  const cut = Math.max(before.lastIndexOf(". "), before.lastIndexOf("! "), before.lastIndexOf("? "));
+  return cut >= 0 ? before.slice(cut + 2) : before;
+}
+function notAccusedHere(line: string, at: number): boolean {
+  return at >= 0 && NOT_ACCUSED_BEFORE_RE.test(sentencePrefix(line, at));
+}
+
 // Russian word endings use \p{L}: in JS regexps \w matches Latin letters only.
 const ACCUSED_LABEL_RE =
   /^(?:[📛🚫❌🤡⚠🔴🛑‼️\s])*(?:ответчик\p{L}*|обвиняем\p{L}*|скамер\p{L}*|кидал\p{L}*|мошенни\p{L}*|виновни\p{L}*|respondent|defendant|scammer|fraudster|ripper|accused|offender)\s*:?\s*$/iu;
@@ -2221,11 +2245,19 @@ export function postMatchesSubject(body: string, username: string, id: string, s
     if ((!ignoredName && fields.has(`@${uname}`)) || (idDigits0.length >= 5 && fields.has(idDigits0))) return true;
   }
   let labelAbove = false;
-  const allLines = body.split(/\r?\n/);
-  const sigLine = strict ? -1 : signatureLineIndex(allLines);
+  const rawLines = body.split(/\r?\n/);
+  const sigLine = strict ? -1 : signatureLineIndex(rawLines);
+  // Plain channels: a story line often has several sentences about different
+  // people ("@a is a scammer. He is a friend of @b, another scammer."), so each
+  // sentence is judged on its own.
+  const allLines: string[] = [];
+  rawLines.forEach((l, i) => {
+    if (i === sigLine) return;
+    if (strict) allLines.push(l);
+    else allLines.push(...l.split(/(?<=[.!?])\s+(?=\S)/u));
+  });
   for (let li = 0; li < allLines.length; li++) {
     const line = allLines[li]!;
-    if (li === sigLine) continue; // the channel's signature
     // Arbitration lines: match only the accused side, never the filer (both modes).
     // In strict channels an explicit "X на пользователя Y" / "X on user Y" line is
     // an arbitration line even without the word "арбитраж" on it.
@@ -2242,6 +2274,14 @@ export function postMatchesSubject(body: string, username: string, id: string, s
     if (!hasId && !hasU && !hasNick) {
       if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
       continue;
+    }
+    // named here as a victim, the impersonated one, a helper or a contact
+    if (!strict && (hasU || hasId)) {
+      const re = hasU ? new RegExp("@?(?<!\\w)" + escapeRe(uname) + "(?!\\w)", "iu") : new RegExp("(?<!\\d)" + (id || "").replace(/\D/g, "") + "(?!\\d)");
+      if (notAccusedHere(line, line.search(re))) {
+        if (line.trim()) labelAbove = ACCUSED_LABEL_RE.test(line);
+        continue;
+      }
     }
     // "Ответчик: X" on one line: the label right before the name is enough.
     {
@@ -2827,7 +2867,13 @@ function accusedInPost(text: string, strict: boolean, channelUsername: string | 
   } else if (!names.length && postHasScamContext(text)) {
     const lines = text.split(/\r?\n/);
     const sig = signatureLineIndex(lines);
-    names = lines.flatMap((l, i) => (i === sig ? [] : nameTokens(l.replace(INVISIBLE_RE, "")).map((t) => t.value)));
+    names = lines.flatMap((l, i) => {
+      if (i === sig) return [];
+      const line = l.replace(INVISIBLE_RE, "");
+      return nameTokens(line)
+        .filter((t) => !notAccusedHere(line, t.index))
+        .map((t) => t.value);
+    });
   }
   names = [...new Set(names)].filter((n) => n !== self && !IGNORE_USERNAMES.has(n.slice(1)));
   return {
