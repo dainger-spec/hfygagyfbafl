@@ -6583,7 +6583,7 @@ export async function postDetail(userId: string, channelId: string, messageId: n
 // The newest posts copied from the blacklist channels, for the list at the bottom
 // of the app's home screen: the accused account, where and when, and the damage
 // when the post has a "Сумма/Ущерб" field. One row per account, cached a minute.
-export type LatestParsed = { id: string; account: string; source: string; date: number; amount?: string };
+export type LatestParsed = { id: string; account: string; source: string; date: number; amount?: string; channelId: string; messageId: number; link: string };
 let latestParsedCache = { at: 0, items: [] as LatestParsed[] };
 const AMOUNT_RE = /(?:сумм[аы]?|ущерб|damage|amount)\s*[:\-–—]?\s*([~≈]?\s*\d[\d\s.,]*\s*(?:\$|usdt|usd|€|eur|евро|руб\.?|₽|rub|грн|₴|k|к)?)/i;
 export function latestParsed(limit = 30): LatestParsed[] {
@@ -6605,6 +6605,9 @@ export function latestParsed(limit = 30): LatestParsed[] {
       rows.push({
         key: (p.hs[0] || p.is[0] || "").toLowerCase(),
         id: `${m.key}:${msg.id}`,
+        channelId: c.id,
+        messageId: msg.id,
+        link: messageLink(c, msg.id),
         account,
         source: checkSourceName(c.title || c.username || ""),
         date: msg.date * 1000,

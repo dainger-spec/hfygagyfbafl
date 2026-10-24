@@ -453,7 +453,7 @@ function Home({
   );
 }
 
-type LatestItem = { id: string; account: string; source: string; date: number; amount?: string };
+type LatestItem = { id: string; account: string; source: string; date: number; amount?: string; channelId?: string; messageId?: number; link?: string };
 const LATEST_CACHE_KEY = "epb-latest";
 
 function useLatestParsed(enabled: boolean): LatestItem[] {
@@ -498,7 +498,7 @@ function agoText(locale: Locale, ms: number): string {
   return new Date(ms).toLocaleDateString(locale === "en" ? "en-GB" : "ru-RU", { day: "numeric", month: "short", year: "numeric" });
 }
 
-// One row of "latest blacklists" on the check page; a tap searches the account.
+// One row of "latest blacklists" on the check page; a tap opens the post.
 function LatestRow({ item: e, index, onClick }: { item: LatestItem; index: number; onClick: () => void }) {
   const locale = useBlacklistStore((s) => s.locale);
   return (
@@ -520,7 +520,7 @@ function LatestRow({ item: e, index, onClick }: { item: LatestItem; index: numbe
           {e.source} · {agoText(locale, e.date)}
         </span>
       </span>
-      {e.amount ? <span className="shrink-0 rounded-full bg-danger/10 px-2 py-0.5 text-xs font-bold text-danger">{e.amount}</span> : null}
+      <ChevronLeft className="size-4 shrink-0 rotate-180 text-subtle" />
     </button>
   );
 }
@@ -1164,7 +1164,6 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
   const latest = useLatestParsed(true);
   const [detail, setDetail] = useState<BlEntry | null>(null);
   const [post, setPost] = useState<CheckData["channels"][number] | null>(null);
-  const [autoRun, setAutoRun] = useState(false);
 
   // Warm the cache so the frog loader shows instantly on the first search.
   useEffect(() => {
@@ -1307,12 +1306,6 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
     haptic("light");
     setDetail(e);
   };
-  useEffect(() => {
-    if (!autoRun) return;
-    setAutoRun(false);
-    void run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRun]);
   const epbEntry = (e: CheckData["epb"][number]): BlEntry => ({
     kind: "epb", id: e.id, account: e.accounts || e.id, amount: e.amount, currency: e.currency, date: e.date,
   });
@@ -1497,8 +1490,10 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                 item={e}
                 index={i}
                 onClick={() => {
-                  setValue(e.account.split(",")[0]!.replace(/^ID\s*/i, "").trim());
-                  setAutoRun(true);
+                  // open that blacklist post (full text and photos)
+                  if (e.channelId && e.messageId) {
+                    setPost({ channelId: e.channelId, messageId: e.messageId, channelTitle: e.source, link: e.link || "", date: e.date, snippet: "" });
+                  }
                 }}
               />
             ))}
