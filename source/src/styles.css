@@ -315,13 +315,22 @@
 /* The medallion's engraved lines as the whole app's background: faint gold
    lines behind everything (never over it), brightest at the top and softly
    fading towards the middle and bottom. */
-.epb-app-bg::before {
-  content: "";
+/* The engraving background: two copies of the banknote-style texture
+   (scripts/gen-engrave.py), the second mirrored and fainter, drifting slowly in
+   different directions — where their lines cross, the moiré shimmers like a
+   banknote tilted in the light. Moved with transform only (the phone just
+   slides finished layers, nothing is redrawn). Colour: dark bronze at the top,
+   warm yellow-gold at the bottom, with a soft glow rising from the bottom. */
+.epb-bg {
   position: absolute;
   inset: 0;
   z-index: -1;
+  overflow: hidden;
   pointer-events: none;
-  /* the colour of the lines: dark bronze at the top, warming to yellow-gold at the bottom */
+}
+.epb-bg > i {
+  position: absolute;
+  inset: -7%;
   background: linear-gradient(
     180deg,
     rgba(110, 80, 32, 0.06) 0%,
@@ -330,8 +339,6 @@
     rgba(246, 200, 90, 0.3) 85%,
     rgba(255, 216, 110, 0.36) 100%
   );
-  /* banknote-style engraving: flowing wavy lines with patches of cross-hatching
-     (scripts/gen-engrave.py), plus a soft glow rising from the bottom */
   -webkit-mask-image:
     url("./assets/engrave.svg"),
     radial-gradient(150% 75% at 50% 100%, #000 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0.3) 100%);
@@ -346,6 +353,37 @@
   mask-position: center, center;
   mask-repeat: no-repeat;
   mask-composite: intersect;
+  will-change: transform;
+}
+.epb-bg-a {
+  animation: epb-engrave-a 34s ease-in-out infinite alternate;
+}
+.epb-bg-b {
+  opacity: 0.45;
+  transform: scaleX(-1);
+  animation: epb-engrave-b 46s ease-in-out infinite alternate;
+}
+@keyframes epb-engrave-a {
+  0% {
+    transform: translate3d(-2.5%, -1.5%, 0) rotate(-0.4deg);
+  }
+  100% {
+    transform: translate3d(2.5%, 1.5%, 0) rotate(0.6deg);
+  }
+}
+@keyframes epb-engrave-b {
+  0% {
+    transform: scaleX(-1) translate3d(2%, 2%, 0) rotate(-0.8deg);
+  }
+  100% {
+    transform: scaleX(-1) translate3d(-2%, -1.5%, 0) rotate(0.5deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .epb-bg-a,
+  .epb-bg-b {
+    animation: none;
+  }
 }
 
 /* A soft golden light drifting slowly behind everything (moved with transform

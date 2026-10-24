@@ -115,6 +115,11 @@ export function MiniApp({
         paddingTop: "var(--tg-safe-top, 0px)",
       }}
     >
+      {/* animated engraving behind every screen */}
+      <div className="epb-bg" aria-hidden>
+        <i className="epb-bg-a" />
+        <i className="epb-bg-b" />
+      </div>
       {showApp && !["home", "sponsors", "check", "apply"].includes(page) ? (
         <button
           type="button"
