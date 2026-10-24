@@ -1,7 +1,7 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, RefreshCw, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
-import { CARD_LOOKS, MemberCard } from "@/components/member-card";
+import { CARD_LOOKS, MemberCard, type CardBackInfo } from "@/components/member-card";
 import { TIERS, nextTier, tierFor, type Metal } from "@/lib/tiers";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ import {
 import { checkCounterparty, getCheckSources, getAccess, getCaptcha, solveCaptcha, getBanners, getBaseDetails, getBaseStats, getBlacklistEntry, getFeatures, getLatestParsed, getMyCard, getMyComplaints, getPostDetail, getSponsors, getSponsorStats, saveUserLocale } from "@/lib/telegram-bot.functions";
 import { rehydrateBlacklistStore, useBlacklistStore } from "@/lib/store";
 import type { ComplaintHistoryItem } from "@/lib/types";
+import type { MemberCardBack } from "@/lib/telegram-bot.server";
 import { cn } from "@/lib/utils";
 import { hasSavedLocale, t, type Locale, type Msg } from "@/lib/i18n";
 
@@ -328,39 +329,76 @@ function fetchBase(): Promise<BaseStats | null> {
 // How many of the user's complaints became blacklists (picks the member card).
 // Cached per Telegram account, so a second account on the same phone never
 // shows the first one's card.
+// Also what the back of the card says (the same as on the bot's /im card).
 const CARD_KEY = "epb-card-published";
-let cardMem: { id: string; n: number } | null = null;
-let cardReq: Promise<number | null> | null = null;
-function cachedPublished(uid: string): number | null {
-  cardMem ??= readCache<{ id: string; n: number }>(CARD_KEY);
-  return cardMem && cardMem.id === uid && typeof cardMem.n === "number" ? cardMem.n : null;
+type CardMem = { id: string; n: number; back?: MemberCardBack };
+let cardMem: CardMem | null = null;
+let cardReq: Promise<CardMem | null> | null = null;
+function cachedCard(uid: string): CardMem | null {
+  cardMem ??= readCache<CardMem>(CARD_KEY);
+  return cardMem && cardMem.id === uid && typeof cardMem.n === "number" ? cardMem : null;
 }
-function fetchPublished(uid: string): Promise<number | null> {
+function cachedPublished(uid: string): number | null {
+  return cachedCard(uid)?.n ?? null;
+}
+function fetchCard(uid: string): Promise<CardMem | null> {
   const initData = telegramInitData();
-  if (!initData || !uid) return Promise.resolve(cachedPublished(uid));
+  if (!initData || !uid) return Promise.resolve(cachedCard(uid));
   cardReq ??= getMyCard({ data: { initData } })
     .then((r) => {
-      if (!r?.ok) return cachedPublished(uid);
-      cardMem = { id: uid, n: r.published };
+      if (!r?.ok) return cachedCard(uid);
+      cardMem = { id: uid, n: r.published, back: r.back };
       writeCache(CARD_KEY, cardMem);
-      return r.published;
+      return cardMem;
     })
-    .catch(() => cachedPublished(uid))
+    .catch(() => cachedCard(uid))
     .finally(() => setTimeout(() => (cardReq = null), 30_000));
   return cardReq;
 }
+// The details on the back of the card, worded like the bot's /im card.
+function cardBackInfo(locale: Locale, b: MemberCardBack, tierName: string): CardBackInfo {
+  const en = locale === "en";
+  const reg = !b.reg
+    ? "—"
+    : b.reg.later
+      ? en
+        ? `${b.reg.year} OR LATER`
+        : `${b.reg.year} ИЛИ ПОЗЖЕ`
+      : `${(en ? ["EARLY", "MID", "LATE"] : ["НАЧАЛО", "СЕРЕДИНА", "КОНЕЦ"])[b.reg.part]} ${b.reg.year}`;
+  const n = b.listed;
+  const ruSources = n % 10 === 1 && n % 100 !== 11 ? "ИСТОЧНИК" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "ИСТОЧНИКА" : "ИСТОЧНИКОВ";
+  const listed = !n ? (en ? "NO" : "НЕТ") : en ? `YES · ${n} SOURCE${n === 1 ? "" : "S"}` : `ДА · ${n} ${ruSources}`;
+  const holder = b.name || (b.username ? `@${b.username}` : "EPB Member");
+  return {
+    signature: holder.slice(0, 40),
+    fields: [
+      [en ? "NAME" : "НИК", b.name || "—"],
+      ["USERNAME", b.username ? `@${b.username}` : "—"],
+      ["ID", b.id],
+      [en ? "REGISTERED" : "РЕГИСТРАЦИЯ", reg],
+      [en ? "IN THE BLACKLIST BASE" : "В БАЗЕ БЛЕКЛИСТА", listed],
+      [en ? "CARD" : "КАРТА", en ? `${tierName} · ACCEPTED ${b.accepted} OF ${b.filed}` : `${tierName} · ПРИНЯТО ${b.accepted} ИЗ ${b.filed}`],
+    ],
+  };
+}
+
 // `settled`: the server answered (or failed), so the card can show even
 // without a number (then it is the starting one).
-function usePublished(uid: string): { value: number | null; settled: boolean } {
+function usePublished(uid: string): { value: number | null; settled: boolean; back: MemberCardBack | null } {
   const [value, setValue] = useState<number | null>(() => cachedPublished(uid));
+  const [back, setBack] = useState<MemberCardBack | null>(() => cachedCard(uid)?.back ?? null);
   const [settled, setSettled] = useState(() => cachedPublished(uid) != null);
   useEffect(() => {
     if (!uid) return;
     let alive = true;
     setValue(cachedPublished(uid));
-    void fetchPublished(uid).then((v) => {
+    setBack(cachedCard(uid)?.back ?? null);
+    void fetchCard(uid).then((v) => {
       if (!alive) return;
-      if (v != null) setValue(v);
+      if (v) {
+        setValue(v.n);
+        setBack(v.back ?? null);
+      }
       setSettled(true);
     });
     // never keep the card hidden for long on a slow connection
@@ -370,7 +408,7 @@ function usePublished(uid: string): { value: number | null; settled: boolean } {
       clearTimeout(timer);
     };
   }, [uid]);
-  return { value, settled };
+  return { value, settled, back };
 }
 
 if (typeof window !== "undefined") {
@@ -565,8 +603,10 @@ function Home({
   // known from the last visit, so the base card doesn't wait for the banners request
   const [noBanners, setNoBanners] = useState(() => cachedBanners()?.length === 0);
   const [base, setBase] = useState<BaseStats | null>(() => cachedBase());
-  const { value: published, settled: cardSettled } = usePublished(identity.telegramId);
+  const { value: published, settled: cardSettled, back: backData } = usePublished(identity.telegramId);
   const tier = tierFor(published ?? 0);
+  const [flipped, setFlipped] = useState(false);
+  const back = backData ? cardBackInfo(locale, backData, tier.name) : null;
   // until the level is known the card stays invisible (no flash of the wrong metal)
   const cardShown = published != null || cardSettled;
   const holder = identity.username || identity.firstName || "EPB Member";
@@ -617,9 +657,22 @@ function Home({
                 count={base?.accounts ?? null}
                 ribbon={t(locale, "cardRibbon")}
                 locale={locale}
-                onOpen={onTiers}
+                // a tap on the reverse turns it back
+                onOpen={flipped ? () => setFlipped(false) : onTiers}
+                back={back}
+                flipped={flipped}
                 width="min(290px, 76vw)"
               />
+              {back ? (
+                <button
+                  type="button"
+                  onClick={() => setFlipped((v) => !v)}
+                  className="mt-4 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold text-muted transition-colors hover:text-fg"
+                >
+                  <RefreshCw className="size-3.5" />
+                  {t(locale, flipped ? "cardFront" : "cardFlip")}
+                </button>
+              ) : null}
             </div>
           ) : (
             // same size as the card, so nothing jumps when it appears

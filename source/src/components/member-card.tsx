@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { Metal } from "@/lib/tiers";
 
 // The member card on the home screen. The art (public/brand/card-*.webp, drawn
@@ -7,11 +7,14 @@ import type { Metal } from "@/lib/tiers";
 // count. It is built like a thin metal plate: edge layers shifted against the
 // tilt show its rim, a shadow under it follows the tilt, a metallic sheen
 // slides over the face and the side turned away darkens. It sways on its own,
-// tilts under a finger and a tap opens `onOpen`. The metal (green to black)
+// tilts under a finger and a tap opens `onOpen`. With `back` it can be turned
+// over (`flipped`): the reverse (public/brand/card-*-back.webp, drawn by
+// scripts/gen-im-assets.py like the bot's /im card) with the holder's details. The metal (green to black)
 // comes from the user's tier, see lib/tiers.ts. (No preserve-3d: browsers
 // rasterise such layers at low resolution and the small print goes blurry.)
 type Look = {
   art: string;
+  backArt: string;
   // small copy for lists
   thumb: string;
   ink: string;
@@ -25,6 +28,7 @@ type Look = {
 export const CARD_LOOKS: Record<Metal, Look> = {
   green: {
     art: "/brand/card-green.webp",
+    backArt: "/brand/card-green-back.webp",
     thumb: "/brand/card-green-thumb.webp",
     ink: "#0e1d11",
     ribbon: "#8aa886",
@@ -35,6 +39,7 @@ export const CARD_LOOKS: Record<Metal, Look> = {
   },
   gold: {
     art: "/brand/card-gold.webp",
+    backArt: "/brand/card-gold-back.webp",
     thumb: "/brand/card-gold-thumb.webp",
     ink: "#1d1810",
     ribbon: "#d2b468",
@@ -45,6 +50,7 @@ export const CARD_LOOKS: Record<Metal, Look> = {
   },
   platinum: {
     art: "/brand/card-platinum.webp",
+    backArt: "/brand/card-platinum-back.webp",
     thumb: "/brand/card-platinum-thumb.webp",
     ink: "#0e131b",
     ribbon: "#98a2b0",
@@ -55,6 +61,7 @@ export const CARD_LOOKS: Record<Metal, Look> = {
   },
   black: {
     art: "/brand/card-black.webp",
+    backArt: "/brand/card-black-back.webp",
     thumb: "/brand/card-black-thumb.webp",
     ink: "#d6d6dc",
     ribbon: "#1e1e21",
@@ -66,6 +73,19 @@ export const CARD_LOOKS: Record<Metal, Look> = {
 };
 // the wide, flat-topped face of a charge card
 const CARD_FONT = "Archivo, Manrope, sans-serif";
+// the reverse: one plain face for everything
+const BACK_FONT = "Manrope, ui-sans-serif, system-ui, sans-serif";
+// where the details go on the reverse (the same grid as the bot's /im card)
+const BACK_COLS = [84, 640];
+const BACK_ROWS = [404, 502, 600];
+const BACK_COL_W = 516;
+
+export type CardBackInfo = { signature: string; fields: [string, string][] };
+
+// a rough width of a line of text, to squeeze the long ones into their column
+function roughWidth(text: string, size: number, k: number) {
+  return [...text].length * size * k;
+}
 const VB_W = 1200;
 const VB_H = 756;
 
@@ -100,6 +120,8 @@ const RIBBON = ribbonPaths();
 const EDGES = [0.34, 0.67, 1];
 // how thick the plate looks, px
 const THICK = 4;
+// each half of turning the card over, ms
+const TURN_MS = 190;
 
 type Pose = { rx: number; ry: number; lift: number };
 
@@ -170,6 +192,8 @@ export function MemberCard({
   ribbon,
   locale,
   onOpen,
+  back,
+  flipped = false,
   width = "min(340px, 88vw)",
 }: {
   metal: Metal;
@@ -178,6 +202,8 @@ export function MemberCard({
   ribbon: string;
   locale: "ru" | "en";
   onOpen?: () => void;
+  back?: CardBackInfo | null;
+  flipped?: boolean;
   // CSS width of the card
   width?: string;
 }) {
@@ -186,6 +212,7 @@ export function MemberCard({
   const uid = useId().replace(/:/g, "");
   const embossId = `epb-emboss-${uid}`;
   const lineId = `epb-ribbon-${uid}`;
+  const engraveId = `epb-engrave-${uid}`;
   // long names get a smaller size so they stay inside the frame
   const name = holder.toUpperCase();
   const nameSize = Math.max(28, Math.min(54, (54 * 14) / Math.max(14, name.length)));
@@ -197,6 +224,48 @@ export function MemberCard({
   const edgeRefs = useRef<(HTMLDivElement | null)[]>([]);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
+
+  // Turning over: the card turns edge-on, the other side is put in, and it
+  // turns on to face the viewer again (a flat turn, see the note on preserve-3d).
+  const showBack = Boolean(back && flipped);
+  const [side, setSide] = useState<"front" | "back">(showBack ? "back" : "front");
+  const [turn, setTurn] = useState<"rest" | "out" | "in-start" | "in">("rest");
+  const want = showBack ? "back" : "front";
+  useEffect(() => {
+    if (want === side) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    if (reduce) {
+      setSide(want);
+      return;
+    }
+    const timers: number[] = [];
+    setTurn("out");
+    timers.push(
+      window.setTimeout(() => {
+        setSide(want);
+        setTurn("in-start");
+        timers.push(window.setTimeout(() => setTurn("in"), 20));
+        timers.push(window.setTimeout(() => setTurn("rest"), 20 + TURN_MS));
+      }, TURN_MS),
+    );
+    return () => timers.forEach((t) => clearTimeout(t));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [want]);
+  // the reverse is fetched ahead, so it is there when the card turns
+  useEffect(() => {
+    if (back) new Image().src = look.backArt;
+  }, [back, look.backArt]);
+  const dir = want === "back" ? 1 : -1;
+  const turnStyle =
+    turn === "rest"
+      ? undefined
+      : {
+          transform: `perspective(1100px) rotateY(${turn === "out" ? 90 * dir : turn === "in-start" ? -90 * dir : 0}deg)`,
+          transition:
+            turn === "in-start"
+              ? "none"
+              : `transform ${TURN_MS}ms ${turn === "out" ? "ease-in" : "ease-out"}`,
+        };
 
   useEffect(() => {
     const el = cardRef.current;
@@ -356,129 +425,209 @@ export function MemberCard({
 
   return (
     <div className="epb-card-stage" data-metal={metal} style={{ width }}>
-      <div ref={shadowRef} className="epb-card-shadow" aria-hidden />
-      <div
-        ref={cardRef}
-        className="epb-card"
-        role={onOpen ? "button" : undefined}
-        aria-label={`Europe Private Blacklist — ${ribbon} ${shown}`}
-      >
-        {/* the thickness of the plate: edge layers stacked behind the face */}
-        {EDGES.map((k, i) => (
-          <div
-            key={k}
-            ref={(node) => {
-              edgeRefs.current[i] = node;
-            }}
-            className="epb-card-edge"
-            aria-hidden
-          />
-        ))}
-        <div className="epb-card-face">
-          <img src={look.art} alt="" draggable={false} className="epb-card-art" />
-          <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
-            <defs>
-              {/* raised lettering: a light edge above, a soft dark one below */}
-              <filter id={embossId} x="-5%" y="-30%" width="110%" height="160%">
-                <feOffset in="SourceAlpha" dx="-2" dy="-2.5" result="up" />
-                <feFlood floodColor={look.hi} floodOpacity={look.hiOpacity} />
-                <feComposite in2="up" operator="in" result="hi" />
-                <feOffset in="SourceAlpha" dx="2" dy="3.5" result="down" />
-                <feFlood floodColor={look.lo} floodOpacity={look.loOpacity} />
-                <feComposite in2="down" operator="in" result="lo" />
-                <feMerge>
-                  <feMergeNode in="lo" />
-                  <feMergeNode in="hi" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
-            <g filter={`url(#${embossId})`}>
-              <text
-                x={600}
-                y={162}
-                textAnchor="middle"
-                textLength={680}
-                lengthAdjust="spacingAndGlyphs"
-                fontFamily={CARD_FONT}
-                fontWeight={700}
-                fontSize={60}
-                letterSpacing={1}
-                style={{ fontStretch: "125%" }}
-                fill={look.ink}
-              >
-                EUROPE PRIVATE
-              </text>
-              <text
-                x={122}
-                y={704}
-                fontFamily={CARD_FONT}
-                fontWeight={400}
-                fontSize={nameSize}
-                letterSpacing={1}
-                style={{ fontStretch: "105%" }}
-                fill={look.ink}
-              >
-                {name}
-              </text>
-            </g>
-            <g fill={look.ribbon} stroke={look.ink} strokeWidth={3.2} strokeLinejoin="round">
-              {RIBBON.tails.map((d) => (
-                <path key={d} d={d} />
-              ))}
-              <path d={RIBBON.body} />
-            </g>
-            <path id={lineId} d={RIBBON.text} fill="none" />
-            <text
-              fontFamily={CARD_FONT}
-              fontWeight={600}
-              fontSize={20}
-              letterSpacing={3}
-              style={{ fontStretch: "110%" }}
-              fill={look.ink}
-            >
-              <textPath href={`#${lineId}`} startOffset="50%" textAnchor="middle">
-                {ribbon}
-              </textPath>
-            </text>
-            <text
-              x={RX + 6}
-              y={604}
-              textAnchor="middle"
-              fontFamily={CARD_FONT}
-              fontWeight={400}
-              fontSize={46}
-              letterSpacing={2}
-              style={{ fontStretch: "105%" }}
-              fill={look.ink}
-              filter={`url(#${embossId})`}
-            >
-              {shown}
-            </text>
-            <text
-              x={RX + 6}
-              y={746}
-              textAnchor="middle"
-              fontFamily={CARD_FONT}
-              fontWeight={700}
-              fontSize={15}
-              fill={look.ink}
-            >
-              © EPB
-            </text>
-          </svg>
-          <div ref={foilRef} className="epb-card-foil" aria-hidden />
-          {(["l", "r", "t", "b"] as const).map((side, i) => (
+      <div className="epb-card-turn" style={turnStyle}>
+        <div ref={shadowRef} className="epb-card-shadow" aria-hidden />
+        <div
+          ref={cardRef}
+          className="epb-card"
+          role={onOpen ? "button" : undefined}
+          aria-label={`Europe Private Blacklist — ${ribbon} ${shown}`}
+        >
+          {/* the thickness of the plate: edge layers stacked behind the face */}
+          {EDGES.map((k, i) => (
             <div
-              key={side}
+              key={k}
               ref={(node) => {
-                shadeRefs.current[i] = node;
+                edgeRefs.current[i] = node;
               }}
-              className={`epb-card-shade epb-card-shade-${side}`}
+              className="epb-card-edge"
               aria-hidden
             />
           ))}
-          <div ref={glareRef} className="epb-card-glare" aria-hidden />
+          <div className="epb-card-face">
+            {side === "back" && back ? (
+              <>
+                <img src={look.backArt} alt="" draggable={false} className="epb-card-art" />
+                <svg
+                  viewBox={`0 0 ${VB_W} ${VB_H}`}
+                  className="epb-card-words"
+                  aria-label={back.fields.map((f) => f.join(": ")).join(", ")}
+                >
+                  <defs>
+                    {/* cut into the metal: a dark edge above, a light one below */}
+                    <filter id={engraveId} x="-5%" y="-30%" width="110%" height="160%">
+                      <feOffset in="SourceAlpha" dx="-1.5" dy="-2" result="up" />
+                      <feFlood floodColor={look.lo} floodOpacity={look.loOpacity} />
+                      <feComposite in2="up" operator="in" result="lo" />
+                      <feOffset in="SourceAlpha" dx="1.5" dy="2" result="down" />
+                      <feFlood floodColor={look.hi} floodOpacity={look.hiOpacity} />
+                      <feComposite in2="down" operator="in" result="hi" />
+                      <feMerge>
+                        <feMergeNode in="lo" />
+                        <feMergeNode in="hi" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                  </defs>
+                  <text
+                    x={104}
+                    y={330}
+                    fontFamily={BACK_FONT}
+                    fontWeight={600}
+                    fontStyle="italic"
+                    fontSize={46}
+                    fill="#181e30"
+                    {...(roughWidth(back.signature, 46, 0.56) > 620
+                      ? { textLength: 620, lengthAdjust: "spacingAndGlyphs" }
+                      : {})}
+                  >
+                    {back.signature}
+                  </text>
+                  {back.fields.slice(0, 6).map(([label, value], i) => {
+                    const x = BACK_COLS[i % 2]!;
+                    const y = BACK_ROWS[Math.floor(i / 2)]!;
+                    return (
+                      <g key={label}>
+                        <text
+                          x={x}
+                          y={y}
+                          fontFamily={BACK_FONT}
+                          fontWeight={700}
+                          fontSize={19}
+                          letterSpacing={3}
+                          fill={look.ink}
+                          fillOpacity={0.62}
+                        >
+                          {label}
+                        </text>
+                        <text
+                          x={x}
+                          y={y + 40}
+                          fontFamily={BACK_FONT}
+                          fontWeight={800}
+                          fontSize={36}
+                          fill={look.ink}
+                          filter={`url(#${engraveId})`}
+                          {...(roughWidth(value, 36, 0.62) > BACK_COL_W
+                            ? { textLength: BACK_COL_W, lengthAdjust: "spacingAndGlyphs" }
+                            : {})}
+                        >
+                          {value || "—"}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </>
+            ) : (
+              <>
+                <img src={look.art} alt="" draggable={false} className="epb-card-art" />
+                <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="epb-card-words" aria-hidden>
+                  <defs>
+                    {/* raised lettering: a light edge above, a soft dark one below */}
+                    <filter id={embossId} x="-5%" y="-30%" width="110%" height="160%">
+                      <feOffset in="SourceAlpha" dx="-2" dy="-2.5" result="up" />
+                      <feFlood floodColor={look.hi} floodOpacity={look.hiOpacity} />
+                      <feComposite in2="up" operator="in" result="hi" />
+                      <feOffset in="SourceAlpha" dx="2" dy="3.5" result="down" />
+                      <feFlood floodColor={look.lo} floodOpacity={look.loOpacity} />
+                      <feComposite in2="down" operator="in" result="lo" />
+                      <feMerge>
+                        <feMergeNode in="lo" />
+                        <feMergeNode in="hi" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                  </defs>
+                  <g filter={`url(#${embossId})`}>
+                    <text
+                      x={600}
+                      y={162}
+                      textAnchor="middle"
+                      textLength={680}
+                      lengthAdjust="spacingAndGlyphs"
+                      fontFamily={CARD_FONT}
+                      fontWeight={700}
+                      fontSize={60}
+                      letterSpacing={1}
+                      style={{ fontStretch: "125%" }}
+                      fill={look.ink}
+                    >
+                      EUROPE PRIVATE
+                    </text>
+                    <text
+                      x={122}
+                      y={704}
+                      fontFamily={CARD_FONT}
+                      fontWeight={400}
+                      fontSize={nameSize}
+                      letterSpacing={1}
+                      style={{ fontStretch: "105%" }}
+                      fill={look.ink}
+                    >
+                      {name}
+                    </text>
+                  </g>
+                  <g fill={look.ribbon} stroke={look.ink} strokeWidth={3.2} strokeLinejoin="round">
+                    {RIBBON.tails.map((d) => (
+                      <path key={d} d={d} />
+                    ))}
+                    <path d={RIBBON.body} />
+                  </g>
+                  <path id={lineId} d={RIBBON.text} fill="none" />
+                  <text
+                    fontFamily={CARD_FONT}
+                    fontWeight={600}
+                    fontSize={20}
+                    letterSpacing={3}
+                    style={{ fontStretch: "110%" }}
+                    fill={look.ink}
+                  >
+                    <textPath href={`#${lineId}`} startOffset="50%" textAnchor="middle">
+                      {ribbon}
+                    </textPath>
+                  </text>
+                  <text
+                    x={RX + 6}
+                    y={604}
+                    textAnchor="middle"
+                    fontFamily={CARD_FONT}
+                    fontWeight={400}
+                    fontSize={46}
+                    letterSpacing={2}
+                    style={{ fontStretch: "105%" }}
+                    fill={look.ink}
+                    filter={`url(#${embossId})`}
+                  >
+                    {shown}
+                  </text>
+                  <text
+                    x={RX + 6}
+                    y={746}
+                    textAnchor="middle"
+                    fontFamily={CARD_FONT}
+                    fontWeight={700}
+                    fontSize={15}
+                    fill={look.ink}
+                  >
+                    © EPB
+                  </text>
+                </svg>
+              </>
+            )}
+            <div ref={foilRef} className="epb-card-foil" aria-hidden />
+            {(["l", "r", "t", "b"] as const).map((side, i) => (
+              <div
+                key={side}
+                ref={(node) => {
+                  shadeRefs.current[i] = node;
+                }}
+                className={`epb-card-shade epb-card-shade-${side}`}
+                aria-hidden
+              />
+            ))}
+            <div ref={glareRef} className="epb-card-glare" aria-hidden />
+          </div>
         </div>
       </div>
     </div>

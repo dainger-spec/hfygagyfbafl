@@ -782,7 +782,7 @@ export function isBannedUser(id?: string | number, username?: string): boolean {
 
 // Signed mini-app user; banned users are treated as not signed in, which closes
 // every app endpoint (complaints, checks, history) for them.
-export function verifyTelegramInitData(initData: string): { id: string; username?: string; firstName?: string } | null {
+export function verifyTelegramInitData(initData: string): { id: string; username?: string; firstName?: string; lastName?: string } | null {
   const u = verifyInitDataRaw(initData);
   if (!u || isBannedUser(u.id, u.username)) return null;
   return u;
@@ -795,7 +795,7 @@ export function appAccess(initData: string): { ok: boolean; banned: boolean } {
   return { ok: true, banned: isBannedUser(u.id, u.username) };
 }
 
-function verifyInitDataRaw(initData: string): { id: string; username?: string; firstName?: string } | null {
+function verifyInitDataRaw(initData: string): { id: string; username?: string; firstName?: string; lastName?: string } | null {
   if (!botToken() || !initData) return null;
   try {
     const params = new URLSearchParams(initData);
@@ -813,9 +813,14 @@ function verifyInitDataRaw(initData: string): { id: string; username?: string; f
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     const authDate = Number(params.get("auth_date") || 0);
     if (!authDate || Math.abs(Date.now() / 1000 - authDate) > 86_400) return null;
-    const user = JSON.parse(params.get("user") || "{}") as { id?: number; username?: string; first_name?: string };
+    const user = JSON.parse(params.get("user") || "{}") as { id?: number; username?: string; first_name?: string; last_name?: string };
     if (!user?.id) return null;
-    return { id: String(user.id), username: user.username, firstName: typeof user.first_name === "string" ? user.first_name : undefined };
+    return {
+      id: String(user.id),
+      username: user.username,
+      firstName: typeof user.first_name === "string" ? user.first_name : undefined,
+      lastName: typeof user.last_name === "string" ? user.last_name : undefined,
+    };
   } catch {
     return null;
   }
@@ -3815,13 +3820,14 @@ export function listComplaintsForUser(telegramId: string): ComplaintHistoryItem[
 // ---------- /im: a member's card in a group ----------
 // The card of the app (metal by tier, the person's name, the base count) as a
 // short looping animation that tilts in 3D, with the person's numbers below.
-// Drawing one takes ~1 s of CPU, so cards are drawn one at a time, a finished one is
-// reused for half an hour (by Telegram file id), each person and chat has a
-// small limit, and the bot draws at most 12 a minute.
+// Drawing one takes ~1 s of CPU, so cards are drawn one at a time and a
+// finished one is reused (by Telegram file id): as it is for 10 minutes, after
+// that it is drawn anew, unless the person had cards drawn just now (repeated
+// /im): then the last one is sent again. The bot draws at most 12 a minute.
 const imCache = new Map<string, { fileId: string; at: number }>();
 let imQueue: Promise<unknown> = Promise.resolve();
 let imWaiting = 0;
-const IM_CACHE_MS = 30 * 60_000;
+const IM_FRESH_MS = 10 * 60_000;
 
 function memberStats(uid: string) {
   let filed = 0;
@@ -3864,15 +3870,57 @@ function regLabel(id: string): string {
   return `${["НАЧАЛО", "СЕРЕДИНА", "КОНЕЦ"][r.part]} ${r.year}`;
 }
 
+// What the back of the card says about a person (the bot's /im card and the
+// app's card show the same): name, username, id, the registration estimate,
+// whether the person is in the blacklist base and the complaint numbers.
+function memberFacts(from: TgUser) {
+  const uid = String(from.id);
+  const published = publishedCountFor(uid);
+  const st = memberStats(uid);
+  const name = [from.first_name, from.last_name].filter(Boolean).join(" ").trim();
+  // is the person in the blacklist base? (local base only, no lookups)
+  const botPosts = new Set<number>();
+  for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
+  const find = parsLookup({ id: uid, usernames: from.username ? [from.username.toLowerCase()] : [], name }, checkChannels(), botPosts);
+  const sources = find ? Math.max(1, find.epb.length + find.manual.length + new Set(find.posts.map((p) => p.channelTitle)).size) : 0;
+  return { uid, name, published, st, sources };
+}
+
+export type MemberCardBack = {
+  name: string;
+  username: string;
+  id: string;
+  reg: { year: number; part: 0 | 1 | 2; later: boolean } | null;
+  // in how many sources of the blacklist base the person is (0: not listed)
+  listed: number;
+  accepted: number;
+  filed: number;
+};
+
+// The app's card: the level and its back.
+export function memberCardFor(u: { id: string; username?: string; firstName?: string; lastName?: string }): { published: number; back: MemberCardBack } {
+  const f = memberFacts({ id: Number(u.id), username: u.username, first_name: u.firstName, last_name: u.lastName });
+  const r = registrationEstimate(f.uid);
+  return {
+    published: f.published,
+    back: {
+      name: f.name,
+      username: u.username || "",
+      id: f.uid,
+      reg: r ? { year: r.year, part: r.part, later: Boolean(r.later) } : null,
+      listed: f.sources,
+      accepted: f.st.accepted,
+      filed: f.st.filed,
+    },
+  };
+}
+
 // Everything the card shows for one person: the caption under it, the metal,
 // and the details engraved on its back.
 function memberInfo(from: TgUser): MemberInfo {
-  const uid = String(from.id);
-  const published = publishedCountFor(uid);
+  const { uid, name, published, st, sources } = memberFacts(from);
   const tier = tierFor(published);
   const next = nextTier(published);
-  const st = memberStats(uid);
-  const name = [from.first_name, from.last_name].filter(Boolean).join(" ").trim();
   const holder = from.username || name || "EPB Member";
   const who = from.username ? `@${escapeHtml(from.username)}` : escapeHtml(holder);
   const caption = [
@@ -3884,12 +3932,7 @@ function memberInfo(from: TgUser): MemberInfo {
       ? `До ${next.name} — ещё ${next.min - st.accepted} ${plural(next.min - st.accepted, "блеклист", "блеклиста", "блеклистов")}`
       : "Высшая карта участника",
   ].join("\n");
-  // is the person in the blacklist base? (local base only, no lookups)
-  const botPosts = new Set<number>();
-  for (const rec of Object.values(pendingPosts)) for (const mid of rec.channelMsgIds || []) botPosts.add(mid);
-  const find = parsLookup({ id: uid, usernames: from.username ? [from.username.toLowerCase()] : [], name }, checkChannels(), botPosts);
-  const sources = find ? find.epb.length + find.manual.length + new Set(find.posts.map((p) => p.channelTitle)).size : 0;
-  const listed = find ? `ДА · ${sources} ${plural(sources, "ИСТОЧНИК", "ИСТОЧНИКА", "ИСТОЧНИКОВ")}` : "НЕТ";
+  const listed = sources ? `ДА · ${sources} ${plural(sources, "ИСТОЧНИК", "ИСТОЧНИКА", "ИСТОЧНИКОВ")}` : "НЕТ";
   return {
     uid,
     holder,
@@ -3909,11 +3952,15 @@ function memberInfo(from: TgUser): MemberInfo {
   };
 }
 
-function memberMarkup(uid: string, side: "front" | "back") {
+// `menu`: the card was opened from the bot's menu ("Мой профиль"), so it leads
+// back there instead of to the bot.
+function memberMarkup(uid: string, side: "front" | "back", menu = false) {
   return {
     inline_keyboard: [
-      [{ text: "🔄 Перевернуть", callback_data: `imf:${uid}:${side === "front" ? "b" : "f"}` }],
-      [{ text: "Подать жалобу", url: `https://t.me/${BOT_USERNAME}?start=im` }],
+      [{ text: "🔄 Перевернуть", callback_data: `imf:${uid}:${side === "front" ? "b" : "f"}${menu ? ":m" : ""}` }],
+      menu
+        ? [{ text: tb(langOf(uid), "inMenu"), callback_data: "imhome" }]
+        : [{ text: "Подать жалобу", url: `https://t.me/${BOT_USERNAME}?start=im` }],
     ],
   };
 }
@@ -3924,9 +3971,12 @@ function memberMarkup(uid: string, side: "front" | "back") {
 async function memberAnimation(info: MemberInfo, side: "front" | "back"): Promise<{ fileId: string } | { gif: Buffer } | null> {
   const key = side === "front" ? `${info.metal}|${info.holder}` : `back|${info.uid}|${info.metal}|${info.back.lines.map((l) => l[1]).join("|")}`;
   const cached = imCache.get(key);
-  if (cached && Date.now() - cached.at < IM_CACHE_MS) return { fileId: cached.fileId };
-  // and for the whole bot: a burst of /im in many chats waits instead of piling up
-  if (imWaiting >= 4 || tooMany("im-render", 12, 60_000)) return null;
+  if (cached && Date.now() - cached.at < IM_FRESH_MS) return { fileId: cached.fileId };
+  // a few drawings per person, and for the whole bot: a burst of /im in many
+  // chats waits instead of piling up; meanwhile the last card is sent again
+  if (imWaiting >= 4 || tooMany(`im-draw:${info.uid}`, 3, 5 * 60_000) || tooMany("im-render", 12, 60_000)) {
+    return cached ? { fileId: cached.fileId } : null;
+  }
   imWaiting++;
   const job = imQueue.then(async () => {
     try {
@@ -3956,20 +4006,26 @@ function rememberAnimation(info: MemberInfo, side: "front" | "back", sent: { ani
 async function replyMemberCard(msg: TgMessage) {
   const from = msg.from!;
   const chatId = msg.chat.id;
-  if (tooMany(`im:${from.id}`, 1, 30_000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+  if (tooMany(`im:${from.id}`, 1, 5000) || tooMany(`im-chat:${chatId}`, 8, 60_000)) return;
+  if ((await sendMemberCard(chatId, from, { replyTo: msg.message_id })) === "busy") {
+    await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
+  }
+}
+
+// The card's front as a new message: in a chat (/im) or in private from the
+// menu ("Мой профиль").
+async function sendMemberCard(chatId: number, from: TgUser, opts: { replyTo?: number; menu?: boolean } = {}): Promise<"sent" | "busy"> {
   const info = memberInfo(from);
-  const markup = memberMarkup(info.uid, "front");
+  const markup = memberMarkup(info.uid, "front", opts.menu);
+  const reply = opts.replyTo ? { reply_to_message_id: opts.replyTo } : {};
   void tgSoft("sendChatAction", { chat_id: chatId, action: "upload_video" });
   try {
     const anim = await memberAnimation(info, "front");
-    if (!anim) {
-      await tgSoft("sendMessage", { chat_id: chatId, text: "Сейчас рисую карты для других — попробуйте через минуту.", reply_to_message_id: msg.message_id });
-      return;
-    }
+    if (!anim) return "busy";
     let gif: Buffer | null = "gif" in anim ? anim.gif : null;
     if ("fileId" in anim) {
-      const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption: info.caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
-      if (sent) return;
+      const sent = await tgSoft("sendAnimation", { chat_id: chatId, animation: anim.fileId, caption: info.caption, parse_mode: "HTML", ...reply, reply_markup: markup });
+      if (sent) return "sent";
       // the saved file stopped working: draw it again
       imCache.delete(`${info.metal}|${info.holder}`);
       const again = await memberAnimation(info, "front");
@@ -3980,20 +4036,33 @@ async function replyMemberCard(msg: TgMessage) {
     form.set("chat_id", String(chatId));
     form.set("caption", info.caption);
     form.set("parse_mode", "HTML");
-    form.set("reply_to_message_id", String(msg.message_id));
+    if (opts.replyTo) form.set("reply_to_message_id", String(opts.replyTo));
     form.set("reply_markup", JSON.stringify(markup));
     form.set("animation", new File([new Uint8Array(gif)], "card.gif", { type: "image/gif" }));
     rememberAnimation(info, "front", await tgForm("sendAnimation", form));
   } catch (err) {
     console.error("[epb] im", err);
     // without the picture the numbers still reach the chat
-    await tgSoft("sendMessage", { chat_id: chatId, text: info.caption, parse_mode: "HTML", reply_to_message_id: msg.message_id, reply_markup: markup });
+    await tgSoft("sendMessage", { chat_id: chatId, text: info.caption, parse_mode: "HTML", ...reply, reply_markup: markup });
   }
+  return "sent";
+}
+
+// "Мой профиль" in the bot's menu: the card replaces the menu message, and
+// "В меню" under it brings the menu back.
+async function openMemberProfile(cb: NonNullable<TgUpdate["callback_query"]>) {
+  const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+  if (!cb.message || !cb.from || cb.message.chat.type !== "private") return answer();
+  if (tooMany(`im:${cb.from.id}`, 1, 5000)) return answer("Секунду…");
+  const result = await sendMemberCard(cb.message.chat.id, cb.from, { menu: true });
+  if (result === "busy") return answer("Сейчас рисую карты для других — попробуйте через минуту.", true);
+  await answer();
+  void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
 }
 
 // "Перевернуть": only the person who asked for the card can turn it over.
 async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
-  const [, uid = "", to = "b"] = (cb.data || "").split(":");
+  const [, uid = "", to = "b", from = ""] = (cb.data || "").split(":");
   const answer = (text?: string, alert = false) => tgSoft("answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
   if (!cb.message || !cb.from) return answer();
   if (String(cb.from.id) !== uid) {
@@ -4007,7 +4076,7 @@ async function flipMemberCard(cb: NonNullable<TgUpdate["callback_query"]>) {
   const side = to === "f" ? "front" : "back";
   await answer(side === "back" ? "Переворачиваю…" : "Обратно на лицевую сторону…");
   const info = memberInfo(cb.from);
-  const markup = memberMarkup(uid, side);
+  const markup = memberMarkup(uid, side, from === "m");
   try {
     const anim = await memberAnimation(info, side);
     if (!anim) {
@@ -7178,6 +7247,7 @@ function applyKeyboard(locale: Locale) {
     rows.push([{ text: tb(locale, "openApp"), web_app: { url } }]);
   }
   rows.push([{ text: tb(locale, "applyBtn"), callback_data: "apply" }]);
+  rows.push([{ text: tb(locale, "myProfileBtn"), callback_data: "myprofile" }]);
   if (checkEnabled()) rows.push([{ text: tb(locale, "checkMenuBtn"), callback_data: "bcheck" }]);
   rows.push([{ text: tb(locale, "sponsorsMenuBtn"), callback_data: "bsponsors" }]);
   rows.push([
@@ -10710,6 +10780,17 @@ async function handleTelegramUpdate(update: TgUpdate) {
     }
     if (cb.data.startsWith("imf:")) {
       await flipMemberCard(cb);
+      return;
+    }
+    if (cb.data === "myprofile") {
+      await openMemberProfile(cb);
+      return;
+    }
+    if (cb.data === "imhome") {
+      // the card is an animation: the menu comes back as a new message
+      void tgSoft("answerCallbackQuery", { callback_query_id: cb.id });
+      void tgSoft("deleteMessage", { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
+      await replyStart(cb.message.chat.id, cb.from?.id);
       return;
     }
     if (cb.data.startsWith("pars:")) {

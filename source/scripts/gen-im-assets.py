@@ -131,7 +131,7 @@ def face(metal: str) -> bytes:
 BACK_GRID = {"cols": [84, 640], "rows": [404, 502, 600], "valueGap": 40, "sign": [104, 330], "signWidth": 620}
 
 
-def back_face(metal: str) -> bytes:
+def back_art(metal: str) -> Image.Image:
     """The reverse, like the back of a charge card, with our own words: the
     stripe, the signature panel, the emblem box, the contactless mark and the
     service line (the bot instead of phone numbers). One typeface (Inter) for
@@ -187,6 +187,10 @@ def back_face(metal: str) -> bytes:
     d.text((84 * s, 700 * s), "EUROPE PRIVATE BLACKLIST  ·  t.me/EuropeBlack_bot  ·  24/7", font=inter("InterDisplay-Bold.otf", 24), fill=inkc, anchor="ls")
     d.text((84 * s, 738 * s), "NOT TRANSFERABLE", font=inter("InterDisplay-SemiBold.otf", 15), fill=soft, anchor="ls")
     d.text((1116 * s, 738 * s), "© EPB", font=inter("InterDisplay-Bold.otf", 15), fill=soft, anchor="rs")
+    return art
+
+
+def back_face(metal: str, art: Image.Image) -> bytes:
     out = art.resize((CW, CH), Image.LANCZOS)
     return np.asarray(out.convert("RGBA"), np.uint8).tobytes()
 
@@ -228,7 +232,12 @@ def atlas(px: int, latin_font: str = "", cyr_font: str = "", chars: str = UPPER)
 
 def main():
     faces = {m: base64.b64encode(gzip.compress(face(m), 9)).decode() for m in LOOKS}
-    backs = {m: base64.b64encode(gzip.compress(back_face(m), 9)).decode() for m in LOOKS}
+    arts = {m: back_art(m) for m in LOOKS}
+    backs = {m: base64.b64encode(gzip.compress(back_face(m, arts[m]), 9)).decode() for m in LOOKS}
+    # the same reverse for the app's card (public/brand/card-<metal>-back.webp),
+    # which lays the holder's details over it as SVG
+    for m, art in arts.items():
+        art.convert("RGB").resize((1200, 756), Image.LANCZOS).save(os.path.join(ROOT, "public", "brand", f"card-{m}-back.webp"), quality=84, method=6)
     looks = {m: {"ink": v[0], "hi": list(v[2]), "lo": list(v[3]), "rim": list(v[4])} for m, v in LOOKS.items()}
     inter = lambda n: os.path.join(INTER, n)
     fonts = {

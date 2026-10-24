@@ -469,6 +469,11 @@
   margin: 0 auto;
   perspective: 900px;
 }
+/* turning the card over (a transform only while it turns) */
+.epb-card-turn {
+  position: relative;
+  perspective: 900px;
+}
 .epb-card-stage::before {
   content: "";
   position: absolute;

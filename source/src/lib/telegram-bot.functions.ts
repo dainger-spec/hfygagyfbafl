@@ -102,10 +102,11 @@ export const getMyComplaints = createServerFn({ method: "POST" })
 export const getMyCard = createServerFn({ method: "POST" })
   .validator(z.object({ initData: z.string().max(16384) }))
   .handler(async ({ data }) => {
-    const { publishedCountFor, verifyTelegramInitData } = await import("@/lib/telegram-bot.server");
+    const { memberCardFor, verifyTelegramInitData } = await import("@/lib/telegram-bot.server");
     const authed = verifyTelegramInitData(data.initData);
     if (!authed) return { ok: false as const };
-    return { ok: true as const, published: publishedCountFor(authed.id) };
+    // the level, and what the back of the card says (as on the bot's /im card)
+    return { ok: true as const, ...memberCardFor(authed) };
   });
 
 export const saveUserLocale = createServerFn({ method: "POST" })
