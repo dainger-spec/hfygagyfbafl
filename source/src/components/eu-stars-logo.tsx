@@ -22,6 +22,7 @@ export function EuStarsLogo({
   spin = false,
   fast = false,
   emblem = false,
+  big = false,
 }: {
   className?: string;
   size?: number;
@@ -31,14 +32,16 @@ export function EuStarsLogo({
   // A faster spin, e.g. while a complaint is being sent.
   fast?: boolean;
   emblem?: boolean;
+  // Home screen: a larger medallion inside a ring of smaller stars.
+  big?: boolean;
 }) {
   // Metallic gold like the brand artwork: bright core, warm edge.
   const gid = `epb-star-${useId().replace(/:/g, "")}`;
   const stars = Array.from({ length: 12 }, (_, i) => {
     const angle = ((i * 30 - 90) * Math.PI) / 180;
     return {
-      cx: r(50 + 36 * Math.cos(angle)),
-      cy: r(50 + 36 * Math.sin(angle)),
+      cx: r(50 + (big ? 42 : 36) * Math.cos(angle)),
+      cy: r(50 + (big ? 42 : 36) * Math.sin(angle)),
     };
   });
 
@@ -61,7 +64,7 @@ export function EuStarsLogo({
         </radialGradient>
       </defs>
       {stars.map((s, i) => (
-        <polygon key={i} points={starPoints(s.cx, s.cy)} fill={`url(#${gid})`} />
+        <polygon key={i} points={big ? starPoints(s.cx, s.cy, 5.2, 2.1) : starPoints(s.cx, s.cy)} fill={`url(#${gid})`} />
       ))}
     </svg>
   );
@@ -82,7 +85,10 @@ export function EuStarsLogo({
           alt=""
           aria-hidden
           draggable={false}
-          className="pointer-events-none absolute left-1/2 top-1/2 h-[53%] w-auto -translate-x-1/2 -translate-y-1/2 select-none"
+          className={cn(
+            "pointer-events-none absolute left-1/2 top-1/2 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
+            big ? "h-[66%]" : "h-[53%]",
+          )}
         />
       </picture>
     </span>

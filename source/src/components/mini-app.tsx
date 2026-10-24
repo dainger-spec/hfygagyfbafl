@@ -482,7 +482,7 @@ function Home({
       {noBanners ? <BaseCard /> : null}
       <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
         <LangSwitch />
-        <EuStarsLogo size={128} title="Europe Private Blacklist" spin emblem className="mt-5" />
+        <EuStarsLogo size={150} title="Europe Private Blacklist" spin emblem big className="mt-4" />
         <h1 className="mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
           <span className="block text-fg">Europe Private</span>
           <span className="epb-gold-text block">Blacklist</span>
