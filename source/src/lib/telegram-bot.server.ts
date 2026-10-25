@@ -2214,13 +2214,21 @@ const NOT_ACCUSED_CUE =
   "пишите(?:\\s+(?:в|на))?|писать|обращайтесь(?:\\s+к)?|присылайте(?:\\s+(?:в|на))?|отправляйте(?:\\s+(?:в|на))?|" +
   "подписывайтесь(?:\\s+на)?|переходите(?:\\s+(?:в|на))?|вступайте(?:\\s+в)?|наш\\p{L}*\\s+(?:канал|чат|бот)\\p{L}*|" +
   "по\\s+(?:всем\\s+)?вопросам|контакт\\p{L}*|связь|связаться(?:\\s+с)?|админ\\p{L}*|модератор\\p{L}*|оспорить(?:\\s+можно)?(?:\\s+(?:у|через))?";
+// The mention-list tail must not use two adjacent quantifiers over overlapping
+// classes: `@[A-Za-z0-9_]+[’'s]*` let `s` be matched by either, and with a
+// non-matching end the engine explored 2^n splits (catastrophic backtracking on
+// input like "@a's @a's …x"). The possessive is now a single optional group that
+// starts with an apostrophe (so it can't overlap the name), and the separator
+// run carries exactly one `\s*`.
 const NOT_ACCUSED_BEFORE_RE = new RegExp(
-  `(?:^|[^\\p{L}])(?:${NOT_ACCUSED_CUE})\\s*:?\\s*(?:@[A-Za-z0-9_]+[’'s]*\\s*(?:,|and|&|и|или)?\\s*)*@?$`,
+  `(?:^|[^\\p{L}])(?:${NOT_ACCUSED_CUE})\\s*:?\\s*(?:@[A-Za-z0-9_]+(?:['’]s?)?\\s*(?:(?:,|and|&|и|или)\\s*)?)*@?$`,
   "iu",
 );
 // The sentence around position `at` in a line, and the part of it before `at`.
+// Capped: a real "cue + @mentions" prefix is short, and the cap keeps any regex
+// over this text linear even on a hostile line.
 function sentencePrefix(line: string, at: number): string {
-  const before = line.slice(0, at);
+  const before = line.slice(Math.max(0, at - 400), at);
   const cut = Math.max(before.lastIndexOf(". "), before.lastIndexOf("! "), before.lastIndexOf("? "));
   return cut >= 0 ? before.slice(cut + 2) : before;
 }
