@@ -247,6 +247,20 @@
   to { opacity: 1; filter: none; transform: none; }
 }
 /* Frog loader on counterparty search: fades in and rises gently. */
+/* the loader frog's glow: a still gradient behind it, not a filter on it */
+.epb-frog-glow {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+.epb-frog-glow::before {
+  content: "";
+  position: absolute;
+  inset: -18% -22% -30%;
+  background: radial-gradient(closest-side, rgba(240, 180, 60, 0.22), rgba(240, 180, 60, 0));
+  pointer-events: none;
+}
+
 .epb-frog-in {
   animation: epb-frog-in 0.6s cubic-bezier(0.2, 0.9, 0.25, 1.1) both;
 }

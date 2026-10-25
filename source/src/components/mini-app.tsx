@@ -876,7 +876,7 @@ function SearchSteps({ input }: { input: string }) {
 }
 
 // Gold animated frog (animated WebP with alpha) used as the loader.
-const FROG_ANIM = "/brand/sending-frog.webp";
+const FROG_ANIM = "/brand/sending-frog2.webp";
 
 // Scrolling strip of partner blacklist/forum logos (sponsors and check pages).
 function PartnerMarquee() {
@@ -2170,17 +2170,18 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         ) : null}
         {loading ? (
           <div className="epb-frog-in flex flex-col items-center gap-4 py-6 text-center">
-            <img
-              src={FROG_ANIM}
-              alt=""
-              width={scanSources.length ? 92 : 120}
-              height={scanSources.length ? 94 : 123}
-              draggable={false}
-              className={cn(
-                "select-none drop-shadow-[0_10px_30px_rgba(240,180,60,0.25)]",
-                scanSources.length ? "h-[94px] w-[92px]" : "h-[123px] w-[120px]",
-              )}
-            />
+            {/* a still glow behind the frog (a CSS shadow on the animated picture
+                was redrawn every frame and slowed the animation on phones) */}
+            <span className="epb-frog-glow">
+              <img
+                src={FROG_ANIM}
+                alt=""
+                width={scanSources.length ? 92 : 120}
+                height={scanSources.length ? 94 : 123}
+                draggable={false}
+                className={cn("relative select-none", scanSources.length ? "h-[94px] w-[92px]" : "h-[123px] w-[120px]")}
+              />
+            </span>
             <SearchSteps input={value} />
             {scanSources.length ? (
               <SourceScan key={scanId} sources={scanSources} hits={scanHits} onDone={() => scanDone.current?.()} />
