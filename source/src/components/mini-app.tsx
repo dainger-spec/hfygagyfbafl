@@ -1325,7 +1325,7 @@ function CleanReport() {
   if (data.manual) rows.push({ name: en ? "Third-party blacklists" : "Сторонние блеклисты", main: `${fmt(data.manual)} ${en ? "entries" : "записей"}`, usernames: null, ids: null });
   if (!rows.length) return null;
   return (
-    <div className="epb-frog-in mt-4 w-full rounded-2xl bg-surface/70 p-4 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+    <div className="epb-frog-in epb-glass mt-4 w-full rounded-2xl p-4 text-left">
       <p className="text-xs font-bold tracking-[0.14em] text-muted uppercase">{en ? "Check report" : "Отчёт проверки"}</p>
       <div className="mt-3 grid grid-cols-3 gap-2">
         {[
@@ -1333,7 +1333,7 @@ function CleanReport() {
           [totalUsernames, en ? "usernames" : ruForm(totalUsernames, "юзернейм", "юзернейма", "юзернеймов")],
           [data.ids, "ID"],
         ].map(([v, label]) => (
-          <div key={String(label)} className="rounded-xl bg-bg/40 px-2.5 py-2">
+          <div key={String(label)} className="rounded-xl bg-white/[0.04] px-2.5 py-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]">
             <div className="font-display text-base leading-tight font-extrabold text-fg">{fmt(Number(v))}</div>
             <div className="text-[11px] text-muted">{label}</div>
           </div>
