@@ -882,7 +882,7 @@ const FROG_ANIM = "/brand/sending-frog.webp";
 function PartnerMarquee() {
   return (
     <div
-      className="relative overflow-hidden rounded-xl epb-glass py-1.5"
+      className="relative overflow-hidden rounded-xl epb-glass-lite py-1.5"
       style={{ "--epb-marquee-dur": "11s" } as CSSProperties}
     >
       <div className="epb-marquee-track">
@@ -967,7 +967,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
         }
       }}
       aria-label="project sponsors"
-      className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl epb-glass py-2"
+      className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl epb-glass-lite py-2"
       style={{ "--epb-marquee-dur": `${Math.max(9, items.length * 2.5)}s` } as CSSProperties}
     >
       <div key={items.length} className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
