@@ -28,14 +28,13 @@ SS = 3  # text is drawn larger and reduced, for smooth edges
 
 LOOKS = {
     # ink, ribbon fill, emboss light (rgba), emboss shadow (rgba), rim colour
-    "green": ("#0e1d11", "#8aa886", (230, 244, 226, 166), (10, 26, 13, 128), (60, 92, 64)),
     "gold": ("#1d1810", "#d2b468", (255, 244, 210, 204), (59, 42, 6, 115), (150, 112, 44)),
     "platinum": ("#0e131b", "#98a2b0", (238, 243, 250, 153), (11, 15, 22, 128), (92, 102, 118)),
     "black": ("#d6d6dc", "#1e1e21", (0, 0, 0, 230), (255, 255, 255, 31), (40, 40, 44)),
 }
 # the magnetic stripe on the back
-STRIPE = {"green": (44, 64, 46), "gold": (118, 90, 52), "platinum": (58, 64, 74), "black": (12, 12, 14)}
-ART = {"green": "card-green.webp", "gold": "card-gold.webp", "platinum": "card-platinum.webp", "black": "card-black.webp"}
+STRIPE = {"gold": (118, 90, 52), "platinum": (58, 64, 74), "black": (12, 12, 14)}
+ART = {"gold": "card-gold.webp", "platinum": "card-platinum.webp", "black": "card-black.webp"}
 
 
 def rgb(h):

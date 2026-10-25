@@ -1041,7 +1041,6 @@ type BaseDetailsData = {
 // "Blacklist base": the totals and what each source adds (opened from the base card).
 // text colour of each tier's name
 const TIER_TEXT: Record<string, string> = {
-  green: "text-[#9cc79a]",
   gold: "text-gold",
   platinum: "text-[#aeb9c9]",
   black: "text-fg",
@@ -1058,13 +1057,9 @@ function ruBlacklists(n: number) {
 // What each member card takes, with the user's own progress.
 // What each card means and how to get it (shown when a card is opened).
 const TIER_INFO: Record<Metal, Record<Locale, string>> = {
-  green: {
-    ru: "Стартовая карта участника — выдаётся сразу, как только вы открыли приложение. Как зелёная карта American Express, с неё всё начинается.",
-    en: "The starter card — yours as soon as you open the app. Like the American Express Green card, this is where it starts.",
-  },
   gold: {
-    ru: "Ваш первый блеклист: подайте жалобу с доказательствами, и после публикации в канале карта станет золотой.",
-    en: "Your first blacklist: file a complaint with proof, and once it is published the card turns gold.",
+    ru: "Стартовая карта участника — выдаётся сразу, как только вы открыли приложение. С золотой карты всё начинается.",
+    en: "The starter card — yours as soon as you open the app. Everything starts with the gold card.",
   },
   platinum: {
     ru: "Три опубликованных блеклиста — вы уже помогли нескольким людям не попасть на скамера.",

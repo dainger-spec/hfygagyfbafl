@@ -589,35 +589,7 @@
   background: radial-gradient(circle at 50% 50%, rgba(255, 252, 235, 0.32), rgba(255, 252, 235, 0) 26%);
 }
 
-/* the green, platinum and black cards (gold is the default above) */
-.epb-card-stage[data-metal="green"]::before {
-  background: radial-gradient(closest-side, rgba(130, 190, 130, 0.2), rgba(0, 0, 0, 0));
-}
-[data-metal="green"] .epb-card-edge {
-  background: linear-gradient(135deg, #d6ecd2 0%, #4f7552 35%, #a9c8a5 55%, #233a26 100%);
-}
-[data-metal="green"] .epb-card-face {
-  background: #8aa886;
-  box-shadow:
-    inset 0 1px 0 rgba(230, 246, 226, 0.7),
-    inset 0 -1px 0 rgba(16, 36, 20, 0.6),
-    inset 0 0 0 1px rgba(24, 50, 28, 0.35);
-}
-[data-metal="green"] .epb-card-shade-l {
-  background: linear-gradient(90deg, rgba(6, 18, 8, 0.42), rgba(6, 18, 8, 0) 60%);
-}
-[data-metal="green"] .epb-card-shade-r {
-  background: linear-gradient(270deg, rgba(6, 18, 8, 0.42), rgba(6, 18, 8, 0) 60%);
-}
-[data-metal="green"] .epb-card-shade-t {
-  background: linear-gradient(180deg, rgba(6, 18, 8, 0.36), rgba(6, 18, 8, 0) 60%);
-}
-[data-metal="green"] .epb-card-shade-b {
-  background: linear-gradient(0deg, rgba(6, 18, 8, 0.36), rgba(6, 18, 8, 0) 60%);
-}
-[data-metal="green"] .epb-card-glare {
-  background: radial-gradient(circle at 50% 50%, rgba(240, 255, 236, 0.32), rgba(255, 255, 255, 0) 26%);
-}
+/* the platinum and black cards (gold is the default above) */
 .epb-card-stage[data-metal="platinum"]::before {
   background: radial-gradient(closest-side, rgba(170, 190, 220, 0.2), rgba(0, 0, 0, 0));
 }

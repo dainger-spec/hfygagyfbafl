@@ -9,7 +9,7 @@ import type { Metal } from "@/lib/tiers";
 // slides over the face and the side turned away darkens. It sways on its own,
 // tilts under a finger and a tap opens `onOpen`. With `back` it can be turned
 // over (`flipped`): the reverse (public/brand/card-*-back.webp, drawn by
-// scripts/gen-im-assets.py like the bot's /im card) with the holder's details. The metal (green to black)
+// scripts/gen-im-assets.py like the bot's /im card) with the holder's details. The metal (gold to black)
 // comes from the user's tier, see lib/tiers.ts. (No preserve-3d: browsers
 // rasterise such layers at low resolution and the small print goes blurry.)
 type Look = {
@@ -26,17 +26,6 @@ type Look = {
   loOpacity: number;
 };
 export const CARD_LOOKS: Record<Metal, Look> = {
-  green: {
-    art: "/brand/card-green.webp",
-    backArt: "/brand/card-green-back.webp",
-    thumb: "/brand/card-green-thumb.webp",
-    ink: "#0e1d11",
-    ribbon: "#8aa886",
-    hi: "#e6f4e2",
-    hiOpacity: 0.65,
-    lo: "#0a1a0d",
-    loOpacity: 0.5,
-  },
   gold: {
     art: "/brand/card-gold.webp",
     backArt: "/brand/card-gold-back.webp",
