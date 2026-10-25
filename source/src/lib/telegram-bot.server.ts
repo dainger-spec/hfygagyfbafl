@@ -3167,7 +3167,7 @@ export async function diagnoseUserSearch(input: string): Promise<string> {
 type TgUserRaw = {
   id?: unknown;
   username?: string;
-  usernames?: { username?: string; active?: boolean }[];
+  usernames?: { username?: string; active?: boolean; editable?: boolean }[];
   firstName?: string;
   lastName?: string;
   premium?: boolean;
@@ -3193,9 +3193,13 @@ type TgProfile = {
   lastSeen: LastSeen;
   hasPhoto: boolean;
   restricted: string; // Telegram's restriction note, "" if none
+  // usernames bought on Fragment (collectible: the owner can't edit them)
+  collectible: string[];
   at: number;
   // from users.getFullUser (one extra request, cached for a day)
   about?: string;
+  // when the current profile photo was set (unix seconds)
+  photoAt?: number;
   channel?: { title: string; username?: string };
   fullAt?: number;
 };
@@ -3232,8 +3236,10 @@ function rememberProfile(id: string, u: TgUserRaw) {
     lastSeen: lastSeenOf(u.status),
     hasPhoto: Boolean(u.photo && u.photo.className !== "UserProfilePhotoEmpty"),
     restricted: u.restricted ? (u.restrictionReason || []).map((r) => r.text || r.reason || "").filter(Boolean)[0] || "restricted" : "",
+    collectible: (u.usernames || []).filter((x) => x.editable === false && x.username).map((x) => x.username!.toLowerCase()),
     at: Date.now(),
     about: prev?.about,
+    photoAt: prev?.photoAt,
     channel: prev?.channel,
     fullAt: prev?.fullAt,
   });
@@ -3262,11 +3268,12 @@ async function fetchFullProfile(id: string): Promise<void> {
   try {
     const { client, Api } = await mtproto();
     const res = (await withTimeout(client.invoke(new Api.users.GetFullUser({ id: raw.user as never })), 10_000, "full user timeout")) as {
-      fullUser?: { about?: string; personalChannelId?: { toString(): string } };
+      fullUser?: { about?: string; personalChannelId?: { toString(): string }; profilePhoto?: { date?: number } };
       chats?: { id?: { toString(): string }; title?: string; username?: string }[];
     };
     prof.fullAt = Date.now();
     prof.about = (res.fullUser?.about || "").slice(0, 300);
+    prof.photoAt = Number(res.fullUser?.profilePhoto?.date) || undefined;
     const chId = res.fullUser?.personalChannelId?.toString();
     const ch = chId ? (res.chats || []).find((c) => c.id?.toString() === chId) : undefined;
     prof.channel = ch?.title ? { title: ch.title.slice(0, 80), username: ch.username || undefined } : undefined;
@@ -5313,11 +5320,13 @@ export type AccountCard = {
   idSource: "input" | "telegram" | "posts";
   usernames: string[]; // current, when known
   name: string;
-  premium: boolean;
   scam: boolean;
   fake: boolean;
   bot: boolean;
   verified: boolean;
+  // usernames bought on Fragment, and when the current profile photo was set
+  collectible?: string[];
+  photoAt?: number;
   reg: { year: number; part: 0 | 1 | 2; later?: boolean; months?: number } | null;
   // usernames this account had before (seen in blacklist posts or by the bot)
   previous: { username: string; since: number; source: "post" | "bot"; where?: string }[];
@@ -5995,7 +6004,6 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       idSource: (idSource || "posts") as AccountCard["idSource"],
       usernames,
       name,
-      premium: Boolean(profile?.premium),
       scam: Boolean(profile?.scam),
       fake: Boolean(profile?.fake),
       bot: Boolean(profile?.bot),
@@ -6007,6 +6015,8 @@ async function checkCounterpartyUncached(input: string): Promise<CheckResult> {
       restricted: profile?.restricted || undefined,
       about: profile?.about || undefined,
       channel: profile?.channel,
+      collectible: profile?.collectible?.length ? profile.collectible : undefined,
+      photoAt: profile?.photoAt,
     };
     // Our own data: when this account first showed up in a blacklist, and in how many sources.
     const dates = [...epb.map((e) => Math.floor(e.date / 1000)), ...hits.map((h) => Math.floor(h.date / 1000)), ...manual.map((m) => Math.floor(m.date / 1000))].filter((d) => d > 0);
@@ -7756,6 +7766,17 @@ function monthYear(sec: number): string {
   return `${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
 }
 
+// "3 дня назад (12.10.2026)": a fresh photo on an old account is worth a look.
+function photoAgoText(locale: Locale, sec: number): string {
+  const en = locale === "en";
+  const days = Math.max(0, Math.floor((Date.now() / 1000 - sec) / 86400));
+  const d = new Date(sec * 1000);
+  const date = `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+  const ago =
+    days === 0 ? (en ? "today" : "сегодня") : days < 60 ? (en ? `${days} d ago` : `${days} дн. назад`) : days < 730 ? (en ? `${Math.round(days / 30)} mo ago` : `${Math.round(days / 30)} мес. назад`) : en ? `${Math.round(days / 365)} y ago` : `${Math.round(days / 365)} г. назад`;
+  return `${ago} (${date})${days < 14 ? " ⚠️" : ""}`;
+}
+
 // The "👤 Account" block of a bot check reply.
 function accountLines(locale: Locale, a?: AccountCard): string[] {
   if (!a) return [];
@@ -7769,13 +7790,14 @@ function accountLines(locale: Locale, a?: AccountCard): string[] {
   if (a.fake) out.push(en ? "⚠️ Telegram marked this account as <b>FAKE</b>" : "⚠️ Telegram пометил аккаунт как <b>FAKE</b>");
   if (a.restricted) out.push(`⚠️ ${en ? "Restricted by Telegram" : "Ограничен Telegram"}: ${escapeHtml(a.restricted.slice(0, 120))}`);
   const tags = [
-    a.premium ? "⭐ Premium" : "",
     a.bot ? (en ? "🤖 bot" : "🤖 бот") : "",
     a.verified ? (en ? "✔️ verified" : "✔️ верифицирован") : "",
     a.hasPhoto === false ? (en ? "no profile photo" : "без фото профиля") : "",
   ].filter(Boolean);
   if (tags.length) out.push(tags.join(" · "));
   if (a.lastSeen) out.push(`${en ? "Last seen" : "Был(а) в сети"}: ${lastSeenText(locale, a.lastSeen)}`);
+  if (a.photoAt) out.push(`${en ? "Profile photo set" : "Аватар поставлен"}: ${photoAgoText(locale, a.photoAt)}`);
+  if (a.collectible?.length) out.push(`${en ? "Bought on Fragment" : "Куплен на Fragment"}: ${a.collectible.map((u) => `@${escapeHtml(u)}`).join(", ")}`);
   if (a.about) out.push(`${en ? "About" : "О себе"}: ${escapeHtml(a.about.replace(/\s+/g, " ").slice(0, 200))}`);
   if (a.channel) out.push(`${en ? "Channel" : "Канал"}: ${a.channel.username ? `@${escapeHtml(a.channel.username)}` : escapeHtml(a.channel.title)}`);
   if (a.reg) {

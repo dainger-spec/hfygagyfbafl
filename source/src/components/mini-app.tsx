@@ -1323,7 +1323,7 @@ function CleanReport() {
   if (data.manual) rows.push({ name: en ? "Third-party blacklists" : "Сторонние блеклисты", main: `${fmt(data.manual)} ${en ? "entries" : "записей"}`, usernames: null, ids: null });
   if (!rows.length) return null;
   return (
-    <div className="epb-frog-in epb-glass mt-4 w-full rounded-2xl p-4 text-left">
+    <div className="epb-frog-in epb-glass w-full rounded-2xl p-4 text-left">
       <p className="text-xs font-bold tracking-[0.14em] text-muted uppercase">{en ? "Check report" : "Отчёт проверки"}</p>
       <div className="mt-3 grid grid-cols-3 gap-2">
         {[
@@ -1634,7 +1634,6 @@ type CheckData = {
     idSource: "input" | "telegram" | "posts";
     usernames: string[];
     name: string;
-    premium: boolean;
     scam: boolean;
     fake: boolean;
     bot: boolean;
@@ -1646,10 +1645,23 @@ type CheckData = {
     restricted?: string;
     about?: string;
     channel?: { title: string; username?: string };
+    collectible?: string[];
+    photoAt?: number;
     firstListed?: number;
     listedIn?: number;
   };
 };
+
+// "3 дн. назад (12.10.2026)": a fresh photo on an old account is worth a look.
+function photoAgo(locale: Locale, sec: number): { text: string; fresh: boolean } {
+  const en = locale === "en";
+  const days = Math.max(0, Math.floor((Date.now() / 1000 - sec) / 86400));
+  const d = new Date(sec * 1000);
+  const date = `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+  const ago =
+    days === 0 ? (en ? "today" : "сегодня") : days < 60 ? (en ? `${days} d ago` : `${days} дн. назад`) : days < 730 ? (en ? `${Math.round(days / 30)} mo ago` : `${Math.round(days / 30)} мес. назад`) : en ? `${Math.round(days / 365)} y ago` : `${Math.round(days / 365)} г. назад`;
+  return { text: `${ago} (${date})`, fresh: days < 14 };
+}
 
 function ageText(locale: Locale, months?: number): string {
   if (months == null) return "";
@@ -1690,7 +1702,6 @@ function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
     return `${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
   };
   const tags = [
-    a.premium ? "⭐ Premium" : "",
     a.bot ? `🤖 ${t(locale, "accBot")}` : "",
     a.verified ? `✔️ ${t(locale, "accVerified")}` : "",
     a.hasPhoto === false ? t(locale, "accNoPhoto") : "",
@@ -1732,6 +1743,17 @@ function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
       {a.lastSeen ? (
         <p>
           <span className="text-muted">{t(locale, "accLastSeen")}:</span> {lastSeenText(locale, a.lastSeen)}
+        </p>
+      ) : null}
+      {a.photoAt ? (
+        <p>
+          <span className="text-muted">{t(locale, "accPhotoAt")}:</span>{" "}
+          <span className={photoAgo(locale, a.photoAt).fresh ? "font-semibold text-gold" : ""}>{photoAgo(locale, a.photoAt).text}</span>
+        </p>
+      ) : null}
+      {a.collectible?.length ? (
+        <p>
+          <span className="text-muted">{t(locale, "accFragment")}:</span> {a.collectible.map((u) => `@${u}`).join(", ")}
         </p>
       ) : null}
       {a.about ? (
@@ -2263,11 +2285,11 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
               ) : null}
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
-              <ShieldCheck className="size-10 text-ok" />
+            <div className="flex flex-col items-center gap-3 pt-2 pb-2 text-center">
+              <CleanReport />
+              <ShieldCheck className="mt-4 size-10 text-ok" />
               <p className="font-display text-lg font-bold">{t(locale, "checkClean")}</p>
               <p className="max-w-xs text-sm leading-relaxed text-muted">{t(locale, "checkCleanHint")}</p>
-              <CleanReport />
             </div>
           )}</div>
         ) : null}
