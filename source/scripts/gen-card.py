@@ -164,6 +164,29 @@ def ground():
     return im
 
 
+# ------------------------------------------------------------------ engraved lines
+def engraved_lines(gx, gy):
+    """The gold card's guilloche: fine wavy lines cut into the metal, like a
+    banknote (the same flow as the app's background). Returns the groove (dark)
+    and its lit lower lip (light), both 0..1."""
+    ts = SS
+    x, y = gx / ts, gy / ts
+    flow = (
+        9 * np.sin(x / 61 + y / 97)
+        + 6 * np.sin(x / 33 - y / 71 + 1.3)
+        + 4 * np.sin((x + 2 * y) / 47 + 0.7)
+        + 2.5 * np.sin(x / 17 + y / 130 + 2.1)
+    )
+    step = 5.2  # line spacing, card units
+
+    def line_at(shift):
+        ph = (y + shift - flow) / step
+        dist = np.abs(ph - np.round(ph)) * step  # card units to the nearest line
+        return np.clip(1 - (dist - 0.28) / 0.55, 0, 1)
+
+    return line_at(0), line_at(-0.9) * (1 - line_at(0))
+
+
 # ------------------------------------------------------------------ frame
 def frame():
     band = canvas()   # where the black band is
@@ -276,6 +299,10 @@ def main():
     brush = np.repeat(rng.normal(0, 1, (H * SS, 1)).astype(np.float32), W * SS, axis=1)
     noise = (rng.normal(0, 1, (H * SS, W * SS)).astype(np.float32) * 1.6 + brush * 2.2)[..., None]
     col = base * shade + noise
+    if METAL == "gold":
+        groove, lip = engraved_lines(gx, gy)
+        col = col * (1 - 0.30 * groove[..., None]) + np.array((92, 66, 20), np.float32) * 0.30 * groove[..., None]
+        col = col + 26 * lip[..., None]
 
     ink = np.array(PAL["ink"], np.float32)
     g = np.asarray(ground()).astype(np.float32)[..., None] / 255
