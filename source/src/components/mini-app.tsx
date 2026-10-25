@@ -766,7 +766,7 @@ function LatestRow({ item: e, index, onClick }: { item: LatestItem; index: numbe
         haptic("light");
         onClick();
       }}
-      className="epb-latest-row flex w-full items-center gap-3 rounded-2xl bg-surface/70 p-3 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.06)] hover:bg-surface"
+      className="epb-latest-row flex w-full items-center gap-3 rounded-2xl epb-glass-lite p-3 text-left"
       style={{ animationDelay: `${Math.min(index, 12) * 35}ms` }}
     >
       <span className="grid size-9 shrink-0 place-items-center rounded-full bg-danger/10 text-sm font-extrabold text-danger uppercase">
@@ -882,7 +882,7 @@ const FROG_ANIM = "/brand/sending-frog.webp";
 function PartnerMarquee() {
   return (
     <div
-      className="relative overflow-hidden rounded-xl bg-surface/60 py-1.5 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      className="relative overflow-hidden rounded-xl epb-glass py-1.5"
       style={{ "--epb-marquee-dur": "11s" } as CSSProperties}
     >
       <div className="epb-marquee-track">
@@ -907,9 +907,7 @@ function GoldText({ text }: { text: string }) {
         !p ? null : /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(p) ? (
           <span key={i}>{p}</span>
         ) : (
-          <span key={i} className="epb-gold-text">
-            {p}
-          </span>
+          <span key={i}>{p}</span>
         ),
       )}
     </span>
@@ -947,7 +945,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
   const Seq = () => (
     <>
       <span className="inline-flex items-center">
-        <span className="epb-gold-text opacity-80">{t(locale, "sponsorsTitle")}</span>
+        <span className="opacity-80">{t(locale, "sponsorsTitle")}</span>
         <span className="mx-3 text-gold/40">·</span>
       </span>
       {items.map((s) => (
@@ -969,7 +967,7 @@ function SponsorsTicker({ onOpen }: { onOpen?: () => void }) {
         }
       }}
       aria-label="project sponsors"
-      className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl bg-surface/60 py-2 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]"
+      className="group relative mt-4 flex w-full items-center overflow-hidden rounded-xl epb-glass py-2"
       style={{ "--epb-marquee-dur": `${Math.max(9, items.length * 2.5)}s` } as CSSProperties}
     >
       <div key={items.length} className="epb-marquee-track text-sm font-semibold tracking-tight text-gold">
@@ -1113,7 +1111,7 @@ function TiersPage({
           {t(locale, "tiersTitle")}
         </button>
         <p className="text-sm leading-relaxed text-muted">{t(locale, "tiersIntro")}</p>
-        <div className="rounded-2xl bg-surface/70 px-4 py-3.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+        <div className="rounded-2xl epb-glass px-4 py-3.5">
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-sm text-muted">{t(locale, "tiersYours")}</span>
             <span className={cn("font-display text-lg font-extrabold", TIER_TEXT[current.metal])}>{current.name}</span>
@@ -1149,7 +1147,7 @@ function TiersPage({
                   setOpened(tier.metal);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-3 rounded-2xl bg-surface/60 p-2.5 pr-3.5 transition-transform active:scale-[0.99]",
+                  "flex w-full items-center gap-3 rounded-2xl epb-glass-lite p-2.5 pr-3.5 transition-transform active:scale-[0.99]",
                   isCurrent && "shadow-[0_0_0_1px_rgba(242,190,85,0.55)]",
                 )}
               >
@@ -1333,7 +1331,7 @@ function CleanReport() {
           [totalUsernames, en ? "usernames" : ruForm(totalUsernames, "юзернейм", "юзернейма", "юзернеймов")],
           [data.ids, "ID"],
         ].map(([v, label]) => (
-          <div key={String(label)} className="rounded-xl bg-white/[0.04] px-2.5 py-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]">
+          <div key={String(label)} className="rounded-xl bg-white/[0.04] py-2 pr-2.5 pl-3.5 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]">
             <div className="font-display text-base leading-tight font-extrabold text-fg">{fmt(Number(v))}</div>
             <div className="text-[11px] text-muted">{label}</div>
           </div>
@@ -1374,7 +1372,7 @@ function BasePage({ onBack }: { onBack: () => void }) {
   }, []);
   const fmt = (n: number) => n.toLocaleString(locale === "en" ? "en-US" : "ru-RU");
   const stat = (value: number, label: string) => (
-    <div className="rounded-2xl bg-surface/70 px-3 py-2.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+    <div className="rounded-2xl epb-glass px-3 py-2.5">
       <div className="font-display text-lg leading-tight font-extrabold text-fg">{fmt(value)}</div>
       <div className="text-[11px] text-muted">{label}</div>
     </div>
@@ -1433,7 +1431,7 @@ function BasePage({ onBack }: { onBack: () => void }) {
               </div>
               <p className="text-xs leading-relaxed text-subtle">{t(locale, "basePageSourcesHint")}</p>
               {data.sources.map((src) => (
-                <div key={src.name} className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                <div key={src.name} className="rounded-2xl epb-glass p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="min-w-0 truncate text-sm font-semibold">{src.name}</span>
                     <span className={cn("shrink-0 text-xs font-semibold", src.complete ? "text-gold" : "text-muted")}>
@@ -1455,11 +1453,11 @@ function BasePage({ onBack }: { onBack: () => void }) {
                 </div>
               ))}
               <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                <div className="rounded-2xl epb-glass p-3">
                   <div className="text-sm font-semibold">{t(locale, "basePageEpb")}</div>
                   <div className="mt-1 text-xs text-muted">{t(locale, "basePageEntries", { n: fmt(data.epb) })}</div>
                 </div>
-                <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.06)]">
+                <div className="rounded-2xl epb-glass p-3">
                   <div className="text-sm font-semibold">{t(locale, "basePageManual")}</div>
                   <div className="mt-1 text-xs text-muted">{t(locale, "basePageEntries", { n: fmt(data.manual) })}</div>
                 </div>
@@ -1518,7 +1516,7 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
                     haptic("light");
                     openExternal(s.link);
                   }}
-                  className="flex w-full items-center gap-3 rounded-2xl bg-surface/70 p-2.5 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                  className="flex w-full items-center gap-3 rounded-2xl epb-glass-lite p-2.5 text-left"
                 >
                   <SponsorAvatar src={s.avatar} title={s.title} />
                   <span className="min-w-0 flex-1 truncate font-semibold text-gold">{s.title}</span>
@@ -1527,7 +1525,7 @@ function SponsorsPage({ onBack }: { onBack: () => void }) {
               ) : (
                 <div
                   key={s.id}
-                  className="flex items-center gap-3 rounded-2xl bg-surface/70 p-2.5 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]"
+                  className="flex items-center gap-3 rounded-2xl epb-glass-lite p-2.5"
                 >
                   <SponsorAvatar src={s.avatar} title={s.title} />
                   <span className="min-w-0 flex-1 truncate font-semibold">{s.title}</span>
@@ -1699,7 +1697,7 @@ function AccountCardView({ a }: { a: NonNullable<CheckData["account"]> }) {
   ].filter(Boolean);
   const age = ageText(locale, a.reg?.months);
   return (
-    <div className="mb-4 space-y-2 rounded-2xl bg-surface/70 p-4 text-sm shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+    <div className="mb-4 space-y-2 rounded-2xl epb-glass p-4 text-sm">
       <p className="font-display text-base font-bold">👤 {t(locale, "accCardTitle")}</p>
       {a.scam || a.fake ? (
         <p className="flex items-center gap-2 rounded-xl bg-danger/10 px-3 py-2 font-semibold text-danger">
@@ -2122,7 +2120,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
         </div>
         {error ? <p className="text-sm text-danger">{error}</p> : null}
         {captcha ? (
-          <div className="epb-cap-card space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+          <div className="epb-cap-card space-y-3 rounded-2xl epb-glass p-4">
             <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "capHint")}</p>
             <img key={captcha} src={captcha} alt="" draggable={false} className="epb-cap-img w-full select-none rounded-xl" />
@@ -2213,7 +2211,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                         haptic("light");
                         setPost(c);
                       }}
-                      className="block w-full rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                      className="block w-full rounded-2xl epb-glass-lite p-3 text-left text-sm"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="font-semibold">{forumName(c.channelTitle)}</p>
@@ -2239,7 +2237,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                       href={f.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="block w-full rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+                      className="block w-full rounded-2xl epb-glass-lite p-3 text-left text-sm"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="font-semibold">
@@ -2447,7 +2445,7 @@ function PostView({ hit, onBack }: { hit: CheckData["channels"][number]; onBack:
         {data?.photosPending ? <p className="text-xs text-muted">{t(locale, "postPhotosLater")}</p> : null}
 
         {!loading && text ? (
-          <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+          <div className="rounded-2xl epb-glass p-4">
             <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
               <LinkedText text={text} links={data?.text ? data.links : undefined} />
             </p>
@@ -2482,7 +2480,7 @@ function BlacklistRow({ account, sub, onClick, danger }: { account: string; sub?
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center justify-between gap-2 rounded-2xl bg-surface/70 p-3 text-left text-sm shadow-[0_0_0_1px_rgba(243,239,228,0.08)] hover:bg-surface"
+      className="flex w-full items-center justify-between gap-2 rounded-2xl epb-glass-lite p-3 text-left text-sm"
     >
       <span className="min-w-0">
         <span className={cn("block truncate font-semibold", danger && "text-danger")}>{account}</span>
@@ -2543,7 +2541,7 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
 
         {isSimple ? (
           <div className="space-y-4">
-            <div className="rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+            <div className="rounded-2xl epb-glass p-4">
               <p className="text-xs font-semibold text-gold">{shown.source || t(locale, "checkInExternal")}</p>
               <p className="mt-2 text-sm leading-relaxed">{t(locale, isFind ? "checkFoundDesc" : "checkExternalDesc")}</p>
               {shown.note ? <p className="mt-2 text-sm leading-relaxed text-muted">{shown.note}</p> : null}
@@ -2560,7 +2558,7 @@ function BlacklistDetail({ entry, onBack }: { entry: BlEntry; onBack: () => void
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+            <div className="rounded-2xl epb-glass p-3">
               <p className="text-xs text-muted">
                 {t(locale, "checkDamageLabel")}:{" "}
                 <span className="font-semibold text-fg">

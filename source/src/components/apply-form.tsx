@@ -227,11 +227,11 @@ export function ApplyForm({
     <form
       ref={formRef}
       onSubmit={onSubmit}
-      className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="epb-apply relative flex min-h-0 flex-1 flex-col overflow-hidden"
     >
       {captcha && !sending ? (
         <div className="epb-cap-backdrop absolute inset-0 z-30 flex items-center justify-center bg-bg/95 px-5 backdrop-blur-sm">
-          <div className="epb-cap-card w-full max-w-md space-y-3 rounded-2xl bg-surface/70 p-4 shadow-[0_0_0_1px_rgba(240,196,48,0.14)]">
+          <div className="epb-cap-card epb-glass w-full max-w-md space-y-3 rounded-2xl p-4">
             <p className="font-display text-base font-bold">{t(locale, "capTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "capHintSubmit")}</p>
             <img key={captcha} src={captcha} alt="" draggable={false} className="epb-cap-img w-full select-none rounded-xl" />
@@ -328,7 +328,7 @@ export function ApplyForm({
         {accounts.length < MAX_ACCOUNTS ? (
           <button
             type="button"
-            className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-surface text-sm font-semibold text-gold shadow-[0_0_0_1px_rgba(240,196,48,0.28)] hover:bg-surface-2"
+            className="epb-glass-lite flex h-11 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold text-gold"
             onClick={() => setAccounts((prev) => [...prev, emptyAcc()])}
           >
             <Plus className="size-4" />
@@ -381,7 +381,7 @@ export function ApplyForm({
                   onClick={() => setCurrency(c)}
                   className={cn(
                     "h-11 px-1 text-xs font-semibold transition-colors",
-                    currency === c ? "bg-gold text-gold-fg" : "bg-surface text-muted hover:text-fg",
+                    currency === c ? "bg-gold text-gold-fg" : "bg-white/[0.04] text-muted hover:text-fg",
                   )}
                 >
                   {c}
@@ -404,7 +404,7 @@ export function ApplyForm({
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-line bg-bg px-4 py-3">
+      <div className="epb-glass-bar shrink-0 px-4 py-3">
         {/* solid gold, no gradient (same as "Подать жалобу") */}
         <Button type="submit" size="lg" className="w-full bg-none" disabled={sending}>
           {sending ? t(locale, "sending") : t(locale, "send")}
@@ -498,7 +498,7 @@ function ScammerAccountRow({
   }, [row.input]);
 
   return (
-    <div className="space-y-3 rounded-2xl bg-surface/70 p-3 shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+    <div className="epb-glass space-y-3 rounded-2xl p-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-semibold text-muted">
           {t(locale, "accountN")} {index + 1}
