@@ -679,11 +679,7 @@ function Home({
             <div className="mx-auto" style={{ width: "min(290px, 76vw)", aspectRatio: "1200 / 756" }} />
           )}
         </div>
-        <h1 className="epb-title-heavy mt-7 font-display text-3xl font-extrabold tracking-tight uppercase">
-          <span className="block text-fg">Europe Private</span>
-          <span className="block text-gold">Blacklist</span>
-        </h1>
-        {handle ? null : <p className="mt-4 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
+        {handle ? null : <p className="mt-6 text-xs text-subtle">{t(locale, "openFromBot")}</p>}
         <div className="mt-8 flex w-full max-w-md flex-col gap-3">
           {/* solid gold, no gradient */}
           <Button size="lg" className="w-full rounded-xl bg-none" onClick={onComplaint} disabled={!canUse}>
