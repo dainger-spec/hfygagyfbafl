@@ -164,27 +164,27 @@ def ground():
     return im
 
 
-# ------------------------------------------------------------------ engraved lines
-def engraved_lines(gx, gy):
-    """The gold card's guilloche: fine wavy lines cut into the metal, like a
-    banknote (the same flow as the app's background). Returns the groove (dark)
-    and its lit lower lip (light), both 0..1."""
-    ts = SS
-    x, y = gx / ts, gy / ts
-    flow = (
-        9 * np.sin(x / 61 + y / 97)
-        + 6 * np.sin(x / 33 - y / 71 + 1.3)
-        + 4 * np.sin((x + 2 * y) / 47 + 0.7)
-        + 2.5 * np.sin(x / 17 + y / 130 + 2.1)
-    )
-    step = 5.2  # line spacing, card units
-
-    def line_at(shift):
-        ph = (y + shift - flow) / step
-        dist = np.abs(ph - np.round(ph)) * step  # card units to the nearest line
-        return np.clip(1 - (dist - 0.28) / 0.55, 0, 1)
-
-    return line_at(0), line_at(-0.9) * (1 - line_at(0))
+# ------------------------------------------------------------------ brushed metal
+def brushed_metal(rng):
+    """Brushed gold: fine lengthwise streaks of different brightness and length,
+    as a real metal card is finished. Returns a brightness offset per pixel."""
+    h, w = H * SS, W * SS
+    # every row its own shade: the fine lines
+    rows = rng.normal(0, 1, (h, 1)).astype(np.float32)
+    # long streaks: noise stretched along the rows (a few hundred px long)
+    def streaks(seg):
+        n = w // seg + 2
+        coarse = rng.normal(0, 1, (h, n)).astype(np.float32)
+        xs = np.arange(w, dtype=np.float32) / seg
+        i0 = xs.astype(np.int32)
+        f = xs - i0
+        f = f * f * (3 - 2 * f)
+        return coarse[:, i0] * (1 - f) + coarse[:, i0 + 1] * f
+    long = streaks(260)
+    short = streaks(40)
+    # a few brighter scratches catching the light
+    bright = np.clip(streaks(120) - 1.8, 0, None) * 20
+    return rows * 6.5 + long * 8.5 + short * 4.0 + bright
 
 
 # ------------------------------------------------------------------ frame
@@ -300,9 +300,7 @@ def main():
     noise = (rng.normal(0, 1, (H * SS, W * SS)).astype(np.float32) * 1.6 + brush * 2.2)[..., None]
     col = base * shade + noise
     if METAL == "gold":
-        groove, lip = engraved_lines(gx, gy)
-        col = col * (1 - 0.30 * groove[..., None]) + np.array((92, 66, 20), np.float32) * 0.30 * groove[..., None]
-        col = col + 26 * lip[..., None]
+        col = col + brushed_metal(rng)[..., None]
 
     ink = np.array(PAL["ink"], np.float32)
     g = np.asarray(ground()).astype(np.float32)[..., None] / 255
