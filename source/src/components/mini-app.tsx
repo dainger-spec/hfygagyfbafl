@@ -2267,11 +2267,18 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                     {t(locale, "checkForumArb", { n: String(data.forum.length) })}
                   </div>
                   {data.forum.map((f) => (
+                    // the case link comes from imported forum data: only open it
+                    // when it is a plain web/Telegram link (never javascript:, data: …)
                     <a
                       key={f.key}
-                      href={f.url}
+                      {...(SAFE_LINK_RE.test(f.url) ? { href: f.url } : {})}
                       target="_blank"
                       rel="noreferrer"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        haptic("light");
+                        openExternal(f.url);
+                      }}
                       className="block w-full rounded-2xl epb-glass-lite p-3 text-left text-sm"
                     >
                       <div className="flex items-center justify-between gap-2">
