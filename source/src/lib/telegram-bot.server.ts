@@ -1451,6 +1451,18 @@ async function editCard(
   await sendCeMessage(chatId, caption, { reply_markup });
 }
 
+// Joins HTML lines up to Telegram's limit, dropping whole lines from the end:
+// cutting inside a tag would make Telegram refuse the whole message.
+function fitHtml(lines: string[], max = 3900): string {
+  let out = "";
+  for (const line of lines) {
+    const next = out ? `${out}\n${line}` : line;
+    if (next.length > max) return `${out}\n…`;
+    out = next;
+  }
+  return out;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&" + "amp;")
@@ -4944,7 +4956,7 @@ async function sendOwnerPanel(chatId: string | number, editMessageId?: number) {
     lines.push("", "Подключите свой аккаунт Telegram, затем выберите каналы, по которым искать. Понадобятся api_id и api_hash с my.telegram.org.");
     rows.push([{ text: "➕ Подключить аккаунт", callback_data: "ub:connect" }]);
   }
-  const payload = { chat_id: chatId, text: lines.join("\n").slice(0, 4000), parse_mode: "HTML", reply_markup: { inline_keyboard: rows } };
+  const payload = { chat_id: chatId, text: fitHtml(lines, 4000), parse_mode: "HTML", reply_markup: { inline_keyboard: rows } };
   if (editMessageId) {
     const edited = await tgSoft("editMessageText", { ...payload, message_id: editMessageId });
     if (edited) return;
@@ -5541,9 +5553,14 @@ type ForumArb = {
   text?: string; // the start of the claim, as on the forum
 };
 export type ForumArbHit = { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet"; text?: string };
-const FORUM_ARB_PATH = join(DATA_DIR, "forum-arbitrations.json");
+// named like the other data files, so the off-site backup restores it too
+// (the first version kept it as forum-arbitrations.json: still read from there)
+const FORUM_ARB_PATH = join(DATA_DIR, "telegram-forum-arbitrations.json");
+const FORUM_ARB_LEGACY_PATH = join(DATA_DIR, "forum-arbitrations.json");
 const FORUM_ARB_MAX = 50_000;
-let forumArbs: ForumArb[] = (readJson<{ items?: ForumArb[] }>(FORUM_ARB_PATH)?.items || []).filter((x) => x && typeof x.url === "string");
+let forumArbs: ForumArb[] = (
+  (readJson<{ items?: ForumArb[] }>(FORUM_ARB_PATH) || readJson<{ items?: ForumArb[] }>(FORUM_ARB_LEGACY_PATH))?.items || []
+).filter((x) => x && typeof x.url === "string" && typeof x.defendant === "string" && Array.isArray(x.contacts) && Array.isArray(x.wallets));
 let forumArbIndex: { nick: Map<string, ForumArb[]>; contact: Map<string, ForumArb[]>; wallet: Map<string, ForumArb[]> } | null = null;
 
 // "Dark Money", "dark_money", "dark.money" are one forum nick
@@ -7808,7 +7825,7 @@ function forumArbLines(locale: Locale, list: ForumArbHit[]): string[] {
 function formatBotCheck(locale: Locale, input: string, res: CheckResult): string {
   const q = res.query.username ? `@${res.query.username}` : res.query.id ? `ID ${res.query.id}` : input.trim();
   const found = res.epb.length || res.manual.length || res.channels.length || res.forum?.length;
-  if (!found) return [...accountLines(locale, res.account), tb(locale, "checkClean", { q: escapeHtml(q) })].join("\n").slice(0, 3900);
+  if (!found) return fitHtml([...accountLines(locale, res.account), tb(locale, "checkClean", { q: escapeHtml(q) })]);
   const lines: string[] = [`🔎 <b>${escapeHtml(q)}</b>`, "", ...accountLines(locale, res.account)];
   if (res.epb.length) {
     lines.push(tb(locale, "checkEpbHdr"));
@@ -7831,7 +7848,7 @@ function formatBotCheck(locale: Locale, input: string, res: CheckResult): string
   }
   lines.push(...forumArbLines(locale, res.forum || []));
   lines.push(tb(locale, "checkDispute"));
-  return lines.join("\n").slice(0, 3900);
+  return fitHtml(lines);
 }
 
 // Bot users waiting to answer a captcha: chat -> the check they asked for, or
@@ -8536,7 +8553,7 @@ export function publicBaseDetails(): BaseDetails | null {
         accounts: new Set(cases.map((a) => forumNickKey(a.defendant))).size,
         complete: true,
         progress: 100,
-        updatedAt: Math.max(...cases.map((a) => a.date)),
+        updatedAt: cases.reduce((m, a) => Math.max(m, a.date), 0),
       });
     }
   }
@@ -10008,7 +10025,7 @@ function adminSearchLog(): AdminView {
     );
   });
   return {
-    text: lines.join("\n").slice(0, 4000),
+    text: fitHtml(lines, 4000),
     keyboard: [
       [{ text: "🔄 Обновить", callback_data: "adm:sl" }],
       [{ text: "⬅ В меню", callback_data: "adm:home" }],
@@ -11851,6 +11868,7 @@ function offsiteFiles(): string[] {
     join(DATA_DIR, "telegram-ids.json"),
     UNAME_HISTORY_PATH,
     TIERS_PATH,
+    FORUM_ARB_PATH,
   ];
 }
 
