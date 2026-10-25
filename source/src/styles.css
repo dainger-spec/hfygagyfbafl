@@ -336,8 +336,13 @@
    slides finished layers, nothing is redrawn). Colour: dark bronze at the top,
    warm yellow-gold at the bottom, with a soft glow rising from the bottom. */
 .epb-bg {
+  /* the full screen height (lvh), not the visible part: when the keyboard
+     opens the app shrinks, and the background must not stretch and slide up */
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100lvh;
   z-index: -1;
   overflow: hidden;
   pointer-events: none;
@@ -415,9 +420,9 @@ html[data-scrolling] .epb-app-bg::after {
   z-index: -1;
   pointer-events: none;
   left: -40%;
-  top: -20%;
+  top: -20lvh;
   width: 180%;
-  height: 140%;
+  height: 140lvh;
   background:
     radial-gradient(35% 28% at 30% 70%, rgba(255, 205, 100, 0.1), transparent 70%),
     radial-gradient(30% 22% at 72% 35%, rgba(241, 187, 76, 0.06), transparent 70%);
