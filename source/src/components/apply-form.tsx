@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { FrogLoader, warmFrogLoader } from "@/components/frog-loader";
 import { ChevronLeft, LoaderCircle, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -106,8 +107,7 @@ export function ApplyForm({
 
   // Warm the cache so the sending animation shows instantly.
   useEffect(() => {
-    const img = new Image();
-    img.src = SENDING_ANIM;
+    warmFrogLoader();
   }, []);
 
   useEffect(() => {
@@ -275,16 +275,7 @@ export function ApplyForm({
       ) : null}
       {sending ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-bg/95 px-8 text-center backdrop-blur-sm">
-          <span className="epb-frog-glow">
-            <img
-            src={SENDING_ANIM}
-            alt=""
-            width={136}
-            height={140}
-            draggable={false}
-            className="relative h-[140px] w-[136px] select-none"
-          />
-          </span>
+          <FrogLoader size={136} />
           <div className="space-y-1.5">
             <p className="font-display text-lg font-bold">{t(locale, "sendingTitle")}</p>
             <p className="text-sm text-muted">{t(locale, "sendingHint")}</p>
@@ -416,8 +407,6 @@ export function ApplyForm({
   );
 }
 
-// Gold animated frog shown while a complaint is being sent (animated WebP with alpha).
-const SENDING_ANIM = "/brand/sending-frog60.webp";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

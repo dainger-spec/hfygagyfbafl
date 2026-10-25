@@ -2,6 +2,7 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, use
 import { ChevronLeft, ChevronRight, ExternalLink, Lock, X, LoaderCircle, RefreshCw, Scale, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { EuStarsLogo } from "@/components/eu-stars-logo";
 import { CARD_LOOKS, MemberCard, type CardBackInfo } from "@/components/member-card";
+import { FrogLoader, warmFrogLoader } from "@/components/frog-loader";
 import { TIERS, nextTier, tierFor, type Metal } from "@/lib/tiers";
 import { ApplyForm } from "@/components/apply-form";
 import { Button } from "@/components/ui/button";
@@ -898,8 +899,6 @@ function ScrollPause() {
   return null;
 }
 
-// Gold animated frog (animated WebP with alpha) used as the loader.
-const FROG_ANIM = "/brand/sending-frog60.webp";
 
 // Scrolling strip of partner blacklist/forum logos (sponsors and check pages).
 function PartnerMarquee() {
@@ -1960,8 +1959,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
 
   // Warm the cache so the frog loader shows instantly on the first search.
   useEffect(() => {
-    const img = new Image();
-    img.src = FROG_ANIM;
+    warmFrogLoader();
   }, []);
 
   // After a few seconds of searching, a grey note says it can take up to 30 s.
@@ -2195,16 +2193,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
           <div className="epb-frog-in flex flex-col items-center gap-4 py-6 text-center">
             {/* a still glow behind the frog (a CSS shadow on the animated picture
                 was redrawn every frame and slowed the animation on phones) */}
-            <span className="epb-frog-glow">
-              <img
-                src={FROG_ANIM}
-                alt=""
-                width={scanSources.length ? 92 : 120}
-                height={scanSources.length ? 94 : 123}
-                draggable={false}
-                className={cn("relative select-none", scanSources.length ? "h-[94px] w-[92px]" : "h-[123px] w-[120px]")}
-              />
-            </span>
+            <FrogLoader size={scanSources.length ? 92 : 120} />
             <SearchSteps input={value} />
             {scanSources.length ? (
               <SourceScan key={scanId} sources={scanSources} hits={scanHits} onDone={() => scanDone.current?.()} />

@@ -247,6 +247,13 @@
   to { opacity: 1; filter: none; transform: none; }
 }
 /* Frog loader on counterparty search: fades in and rises gently. */
+/* the loader frog video: its square edges fade into the background */
+.epb-frog-video {
+  display: block;
+  -webkit-mask-image: radial-gradient(closest-side, #000 72%, transparent 100%);
+  mask-image: radial-gradient(closest-side, #000 72%, transparent 100%);
+}
+
 /* the loader frog's glow: a still gradient behind it, not a filter on it */
 .epb-frog-glow {
   position: relative;
