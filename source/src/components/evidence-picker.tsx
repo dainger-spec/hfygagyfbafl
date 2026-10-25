@@ -91,8 +91,7 @@ export function EvidencePicker({
           if (e.dataTransfer.files) void addFiles(e.dataTransfer.files);
         }}
         className={cn(
-          "flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-2xl bg-surface px-4 py-6 text-center shadow-[0_0_0_1px_rgba(243,239,228,0.10)]",
-          "hover:bg-surface-2",
+          "epb-glass flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-2xl px-4 py-6 text-center",
         )}
       >
         <ImagePlus className="size-6 text-gold" />
@@ -131,7 +130,7 @@ export function EvidenceThumb({ item }: { item: EvidenceItem }) {
   const src = evidenceSrc(item);
   if (item.kind === "video") {
     return (
-      <div className="relative aspect-square overflow-hidden rounded-lg bg-surface-2">
+      <div className="epb-glass-lite relative aspect-square overflow-hidden rounded-lg">
         {src ? (
           <video src={src} className="size-full object-cover img-outline" muted />
         ) : (
