@@ -135,7 +135,8 @@ export function MiniApp({
         paddingTop: "var(--tg-safe-top, 0px)",
       }}
     >
-      {/* animated engraving behind every screen */}
+      {/* animated engraving behind every screen (paused while scrolling) */}
+      <ScrollPause />
       <div className="epb-bg" aria-hidden>
         <i className="epb-bg-a" />
         <i className="epb-bg-b" />
@@ -873,6 +874,28 @@ function SearchSteps({ input }: { input: string }) {
       </p>
     </div>
   );
+}
+
+// Marks the page as scrolling (any scroll container) and clears the mark a
+// moment after the last scroll event; the CSS pauses the moving background
+// meanwhile.
+function ScrollPause() {
+  useEffect(() => {
+    const root = document.documentElement;
+    let timer = 0;
+    const onScroll = () => {
+      if (!root.dataset.scrolling) root.dataset.scrolling = "1";
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => delete root.dataset.scrolling, 250);
+    };
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    return () => {
+      document.removeEventListener("scroll", onScroll, { capture: true });
+      window.clearTimeout(timer);
+      delete root.dataset.scrolling;
+    };
+  }, []);
+  return null;
 }
 
 // Gold animated frog (animated WebP with alpha) used as the loader.
