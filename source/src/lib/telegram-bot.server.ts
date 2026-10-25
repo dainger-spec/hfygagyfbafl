@@ -8505,7 +8505,17 @@ export async function postDetail(userId: string, channelId: string, messageId: n
 // copied and how many accounts it adds. Counted at most once a minute; before
 // the background count has run, the per-source account numbers are left out
 // (never a slow count while someone waits).
-export type BaseSource = { name: string; posts: number; accounts: number | null; complete: boolean; progress: number; updatedAt: number };
+export type BaseSource = {
+  name: string;
+  posts: number;
+  accounts: number | null;
+  // what a check looks through in this source (null until the background count ran)
+  usernames?: number | null;
+  ids?: number | null;
+  complete: boolean;
+  progress: number;
+  updatedAt: number;
+};
 export type BaseDetails = {
   accounts: number;
   usernames: number;
@@ -8536,6 +8546,8 @@ export function publicBaseDetails(): BaseDetails | null {
       name,
       posts: (prev?.posts || 0) + m.msgs.size,
       accounts: accounts === null ? null : (prev?.accounts || 0) + accounts,
+      usernames: a ? (prev?.usernames || 0) + a.usernames.size : null,
+      ids: a ? (prev?.ids || 0) + a.ids.size : null,
       complete: (prev ? prev.complete : true) && m.complete,
       progress: prev ? Math.min(prev.progress, mirrorProgress(m)) : mirrorProgress(m),
       updatedAt: Math.max(prev?.updatedAt || 0, m.updatedAt || 0),
@@ -8551,6 +8563,8 @@ export function publicBaseDetails(): BaseDetails | null {
         name: `Арбитражи ${source}`,
         posts: cases.length,
         accounts: new Set(cases.map((a) => forumNickKey(a.defendant))).size,
+        usernames: new Set(cases.flatMap((a) => a.contacts)).size,
+        ids: 0,
         complete: true,
         progress: 100,
         updatedAt: cases.reduce((m, a) => Math.max(m, a.date), 0),

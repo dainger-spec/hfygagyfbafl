@@ -1032,7 +1032,7 @@ type BaseDetailsData = {
   usernames: number;
   ids: number;
   posts: number;
-  sources: { name: string; posts: number; accounts: number | null; complete: boolean; progress: number; updatedAt: number }[];
+  sources: { name: string; posts: number; accounts: number | null; usernames?: number | null; ids?: number | null; complete: boolean; progress: number; updatedAt: number }[];
   epb: number;
   manual: number;
   updatedAt: number;
@@ -1275,6 +1275,90 @@ function TierSheet({
             </Button>
           ) : null}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// After a check that found nothing: what was looked through, source by source
+// (posts read, usernames and IDs compared), each marked "not found".
+let reportDetails: { at: number; data: BaseDetailsData | null } | null = null;
+function ruForm(n: number, one: string, few: string, many: string) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+function CleanReport() {
+  const locale = useBlacklistStore((s) => s.locale);
+  const [data, setData] = useState<BaseDetailsData | null>(() => reportDetails?.data ?? null);
+  useEffect(() => {
+    if (reportDetails && Date.now() - reportDetails.at < 60_000) return;
+    void getBaseDetails()
+      .then((d) => {
+        reportDetails = { at: Date.now(), data: (d as BaseDetailsData | null) ?? null };
+        setData(reportDetails.data);
+      })
+      .catch(() => {});
+  }, []);
+  if (!data) return null;
+  const en = locale === "en";
+  const fmt = (n: number) => n.toLocaleString(en ? "en-US" : "ru-RU");
+  type Row = { name: string; main: string; usernames: number | null; ids: number | null };
+  // forum cases are not in the channel totals: added here
+  const arbs = data.sources.filter((src) => /^Арбитражи /.test(src.name));
+  const totalUsernames = data.usernames + arbs.reduce((n, src) => n + (src.usernames || 0), 0);
+  const totalRecords = data.posts + arbs.reduce((n, src) => n + src.posts, 0) + data.epb + data.manual;
+  const rows: Row[] = data.sources.filter((src) => src.posts > 0).map((src) => {
+    const arb = /^Арбитражи /.test(src.name);
+    return {
+      name: arb && en ? src.name.replace(/^Арбитражи /, "Arbitrations ") : src.name,
+      main: arb ? `${fmt(src.posts)} ${en ? "cases" : "арбитражей"}` : `${fmt(src.posts)} ${en ? "posts" : "постов"}`,
+      usernames: src.usernames ?? null,
+      ids: src.ids ?? null,
+    };
+  });
+  if (data.epb && !rows.some((r) => r.name === "Europe Private Blacklist")) {
+    rows.unshift({ name: "Europe Private Blacklist", main: `${fmt(data.epb)} ${en ? "complaints" : "жалоб"}`, usernames: null, ids: null });
+  }
+  if (data.manual) rows.push({ name: en ? "Third-party blacklists" : "Сторонние блеклисты", main: `${fmt(data.manual)} ${en ? "entries" : "записей"}`, usernames: null, ids: null });
+  if (!rows.length) return null;
+  return (
+    <div className="epb-frog-in mt-4 w-full rounded-2xl bg-surface/70 p-4 text-left shadow-[0_0_0_1px_rgba(243,239,228,0.08)]">
+      <p className="text-xs font-bold tracking-[0.14em] text-muted uppercase">{en ? "Check report" : "Отчёт проверки"}</p>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {[
+          [rows.length, en ? "sources" : ruForm(rows.length, "источник", "источника", "источников")],
+          [totalUsernames, en ? "usernames" : ruForm(totalUsernames, "юзернейм", "юзернейма", "юзернеймов")],
+          [data.ids, "ID"],
+        ].map(([v, label]) => (
+          <div key={String(label)} className="rounded-xl bg-bg/40 px-2.5 py-2">
+            <div className="font-display text-base leading-tight font-extrabold text-fg">{fmt(Number(v))}</div>
+            <div className="text-[11px] text-muted">{label}</div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] text-subtle">
+        {en ? `${fmt(totalRecords)} records read, ${fmt(data.accounts)} accounts compared` : `Просмотрено записей: ${fmt(totalRecords)} · сверено аккаунтов: ${fmt(data.accounts)}`}
+      </p>
+      <div className="mt-3 divide-y divide-fg/5">
+        {rows.map((r) => (
+          <div key={r.name} className="flex items-center justify-between gap-3 py-2.5">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold">{r.name}</p>
+              <p className="text-[11px] text-muted">
+                {r.main}
+                {r.usernames ? ` · @ ${fmt(r.usernames)}` : ""}
+                {r.ids ? ` · ID ${fmt(r.ids)}` : ""}
+              </p>
+            </div>
+            <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-ok">
+              <ShieldCheck className="size-3.5" />
+              {en ? "not found" : "не найден"}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -2181,10 +2265,11 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
               ) : null}
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <div className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
               <ShieldCheck className="size-10 text-ok" />
               <p className="font-display text-lg font-bold">{t(locale, "checkClean")}</p>
               <p className="max-w-xs text-sm leading-relaxed text-muted">{t(locale, "checkCleanHint")}</p>
+              <CleanReport />
             </div>
           )}</div>
         ) : null}
