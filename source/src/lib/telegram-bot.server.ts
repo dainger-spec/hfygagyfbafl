@@ -5538,8 +5538,9 @@ type ForumArb = {
   date: number;
   contacts: string[]; // telegram usernames from the claim, lowercase
   wallets: string[];
+  text?: string; // the start of the claim, as on the forum
 };
-export type ForumArbHit = { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet" };
+export type ForumArbHit = { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet"; text?: string };
 const FORUM_ARB_PATH = join(DATA_DIR, "forum-arbitrations.json");
 const FORUM_ARB_MAX = 50_000;
 let forumArbs: ForumArb[] = (readJson<{ items?: ForumArb[] }>(FORUM_ARB_PATH)?.items || []).filter((x) => x && typeof x.url === "string");
@@ -5661,6 +5662,8 @@ export function parseForumArbitrations(raw: unknown): { items: ForumArb[]; skipp
       date: forumDate(clip(r.date, 60)),
       contacts: claimContacts(desc),
       wallets: [...new Set([...desc.matchAll(WALLET_IN_TEXT)].map((m) => m[1]!))].slice(0, 6),
+      // "Deal Arbitration" alone is the forum's empty placeholder
+      ...(desc && !/^deal arbitration$/i.test(desc) ? { text: desc.slice(0, 400) } : {}),
     });
   }
   // a "contact" named in the claims against many different people is a
@@ -5680,7 +5683,7 @@ function forumArbDiff(items: ForumArb[]) {
   for (const a of items) {
     const old = known.get(a.key);
     if (!old) added++;
-    else if (old.status !== a.status || old.amount !== a.amount || old.defendant !== a.defendant || old.contacts.join() !== a.contacts.join()) changed++;
+    else if (old.status !== a.status || old.amount !== a.amount || old.defendant !== a.defendant || old.contacts.join() !== a.contacts.join() || (old.text || "") !== (a.text || "")) changed++;
   }
   return { added, changed, same: items.length - added - changed };
 }
@@ -5698,7 +5701,7 @@ function matchForumArbs(q: { uname?: string; nick?: string; wallet?: string }): 
   const out = new Map<string, ForumArbHit>();
   const add = (list: ForumArb[] | undefined, via: ForumArbHit["via"]) => {
     for (const a of list || []) {
-      if (!out.has(a.key)) out.set(a.key, { key: a.key, source: a.source, url: a.url, status: a.status, amount: a.amount, defendant: a.defendant, date: a.date, via });
+      if (!out.has(a.key)) out.set(a.key, { key: a.key, source: a.source, url: a.url, status: a.status, amount: a.amount, defendant: a.defendant, date: a.date, via, ...(a.text ? { text: a.text } : {}) });
     }
   };
   if (q.wallet) add(idx.wallet.get(walletKey(q.wallet)), "wallet");
@@ -7794,6 +7797,7 @@ function forumArbLines(locale: Locale, list: ForumArbHit[]): string[] {
       const bits = [f.amount, f.status, parsDate(f.date)].filter(Boolean).map((b) => escapeHtml(b));
       const via = f.via === "contact" ? (en ? " (contact in the claim)" : " (контакт из жалобы)") : f.via === "wallet" ? (en ? " (wallet in the claim)" : " (кошелёк из жалобы)") : "";
       out.push(`• ${escapeHtml(f.defendant)}${via} · ${bits.join(" · ")} — <a href="${escapeHtml(f.url)}">${en ? "case" : "тема"}</a>`);
+      if (f.text) out.push(`<blockquote>${escapeHtml(f.text.length > 220 ? `${f.text.slice(0, 220).trimEnd()}…` : f.text)}</blockquote>`);
     }
     if (cases.length > 6) out.push(en ? `… and ${cases.length - 6} more` : `… и ещё ${cases.length - 6}`);
   }

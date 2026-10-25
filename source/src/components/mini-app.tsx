@@ -1554,7 +1554,7 @@ type CheckData = {
   epb: { id: string; accounts: string; amount: string; currency: string; date: number }[];
   channels: { channelId?: string; messageId?: number; channelTitle: string; link: string; date: number; snippet: string }[];
   manual: { id: string; account: string; source: string; note?: string; date: number }[];
-  forum?: { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet" }[];
+  forum?: { key: string; source: string; url: string; status: string; amount: string; defendant: string; date: number; via: "nick" | "contact" | "wallet"; text?: string }[];
   sourceHits?: Record<string, number>;
   account?: {
     id: string;
@@ -2183,6 +2183,7 @@ function CheckCounterparty({ onBack }: { onBack: () => void }) {
                         ) : null}
                         {fmtDate(f.date) ? ` · ${fmtDate(f.date)}` : ""} · {f.source}
                       </p>
+                      {f.text ? <p className="mt-1.5 line-clamp-4 text-xs leading-relaxed text-fg/80">{f.text}</p> : null}
                     </a>
                   ))}
                 </div>
