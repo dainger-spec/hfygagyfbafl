@@ -417,7 +417,7 @@ export function ApplyForm({
 }
 
 // Gold animated frog shown while a complaint is being sent (animated WebP with alpha).
-const SENDING_ANIM = "/brand/sending-frog2.webp";
+const SENDING_ANIM = "/brand/sending-frog60.webp";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

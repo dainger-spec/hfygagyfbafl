@@ -899,7 +899,7 @@ function ScrollPause() {
 }
 
 // Gold animated frog (animated WebP with alpha) used as the loader.
-const FROG_ANIM = "/brand/sending-frog2.webp";
+const FROG_ANIM = "/brand/sending-frog60.webp";
 
 // Scrolling strip of partner blacklist/forum logos (sponsors and check pages).
 function PartnerMarquee() {
