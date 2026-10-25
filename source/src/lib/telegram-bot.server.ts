@@ -3045,9 +3045,20 @@ export function blacklistBase() {
     if (e.telegramId) ids.add(e.telegramId);
     if (u && e.telegramId) paired.add(u);
   }
+  // forum arbitrations: one person per defendant, unless one of the contacts
+  // named in the claims is already in the base
+  const defendants = new Map<string, Set<string>>();
+  for (const a of forumArbs) {
+    const k = forumNickKey(a.defendant);
+    const set = defendants.get(k) || new Set<string>();
+    for (const c of a.contacts) set.add(`@${c}`);
+    defendants.set(k, set);
+  }
+  let forumOnly = 0;
+  for (const contacts of defendants.values()) if (![...contacts].some((c) => usernames.has(c))) forumOnly++;
   const unpaired = [...usernames].filter((u) => !paired.has(u)).length;
   return {
-    accounts: ids.size + unpaired,
+    accounts: ids.size + unpaired + forumOnly,
     usernames: usernames.size,
     ids: ids.size,
     posts,
@@ -5559,6 +5570,10 @@ function saveForumArbs() {
   writeJsonAtomic(FORUM_ARB_PATH, { items: forumArbs });
   forumArbIndex = null;
   checkCache.clear();
+  // the base numbers (menu, app) include them: count again now
+  baseStatsCache = { at: 0, value: baseStatsCache.value };
+  baseDetailsCache = { at: 0, value: null };
+  baseCountCache = { at: 0, n: 0 };
 }
 
 export function forumArbCount(): number {
@@ -8297,7 +8312,7 @@ export function publicBaseStats(): { accounts: number; sources: number; updatedA
     const m = mirrors.get(chatIdKey(c.id));
     if (m && m.updatedAt > 0 && m.updatedAt <= Date.now()) updatedAt = Math.max(updatedAt, m.updatedAt);
   }
-  return { accounts, sources: checkSources().length, updatedAt };
+  return { accounts, sources: checkSources().length + new Set(forumArbs.map((x) => x.source)).size, updatedAt };
 }
 
 // ---- Full post on tap (app): text from the channel copy, photos fetched once ----
@@ -8506,6 +8521,20 @@ export function publicBaseDetails(): BaseDetails | null {
     };
     byName.set(name, row);
     updatedAt = Math.max(updatedAt, m.updatedAt || 0);
+  }
+  if (forumArbs.length) {
+    const bySource = new Map<string, ForumArb[]>();
+    for (const a of forumArbs) bySource.set(a.source, [...(bySource.get(a.source) || []), a]);
+    for (const [source, cases] of bySource) {
+      byName.set(`forum:${source}`, {
+        name: `Арбитражи ${source}`,
+        posts: cases.length,
+        accounts: new Set(cases.map((a) => forumNickKey(a.defendant))).size,
+        complete: true,
+        progress: 100,
+        updatedAt: Math.max(...cases.map((a) => a.date)),
+      });
+    }
   }
   const epb = Object.values(pendingPosts).filter((r) => r.status === "published" && !r.removedFromCheck).length;
   const value: BaseDetails = {
